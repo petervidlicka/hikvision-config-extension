@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+  body {
+    width: 260px;
+    padding: 16px;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #12121a;
+    color: #e4e4ed;
+    margin: 0;
+  }
+  h2 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0 0 6px;
+    letter-spacing: -0.02em;
+  }
+  p {
+    font-size: 12px;
+    color: #8888a0;
+    margin: 0 0 14px;
+    line-height: 1.4;
+  }
+  button {
+    width: 100%;
+    padding: 10px;
+    border: none;
+    border-radius: 6px;
+    background: #4a6cf7;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover { background: #3d5ce0; }
+  button:active { transform: scale(0.97); }
+</style>
+</head>
+<body>
+  <h2>HIK:CONFIG</h2>
+  <p>Configure your Hikvision NVR/camera motion detection and privacy masks.</p>
+  <button id="openBtn">Open Config Tool</button>
+  <script src="popup.js"></script>
+</body>
+</html>
