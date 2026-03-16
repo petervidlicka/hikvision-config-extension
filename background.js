@@ -195,6 +195,8 @@ async function handleMessage(msg) {
     case 'putMotionDetection':  return putMotionDetection(msg.config, msg.channelId, msg.xml);
     case 'getPrivacyMask':      return getPrivacyMask(msg.config, msg.channelId);
     case 'putPrivacyMask':      return putPrivacyMask(msg.config, msg.channelId, msg.xml);
+    case 'getEventTriggers':    return getEventTriggers(msg.config, msg.channelId);
+    case 'putEventTriggers':    return putEventTriggers(msg.config, msg.channelId, msg.xml);
     case 'scanNetwork':         return scanNetwork();
     default:
       throw new Error(`Unknown action: ${msg.action}`);
@@ -316,6 +318,49 @@ async function getPrivacyMask(config, channelId) {
 async function putPrivacyMask(config, channelId, xml) {
   const resp = await digestFetch(config, 'PUT', `/ISAPI/System/Video/inputs/channels/${channelId}/privacyMask`, xml);
   return { success: true, response: resp.data };
+}
+
+/* ── Event Triggers (linkage actions for motion detection) ────────────── */
+
+async function getEventTriggers(config, channelId) {
+  // Try the per-trigger endpoint first (VMD = Video Motion Detection)
+  try {
+    const resp = await digestFetch(config, 'GET', `/ISAPI/Event/triggers/VMD-${channelId}`);
+    const parsed = xmlToObj(resp.data);
+    return { success: true, eventTrigger: parsed, rawXml: resp.data };
+  } catch {
+    // Fall back: fetch all triggers and filter for VMD on this channel
+  }
+
+  try {
+    const resp = await digestFetch(config, 'GET', '/ISAPI/Event/triggers');
+    const parsed = xmlToObj(resp.data);
+    let triggers = parsed.EventTrigger;
+    if (!triggers) triggers = [];
+    if (!Array.isArray(triggers)) triggers = [triggers];
+
+    const vmd = triggers.find(t =>
+      t.eventType === 'VMD' &&
+      (t.videoInputChannelID === String(channelId) || t.id === `VMD-${channelId}`)
+    );
+
+    if (vmd) {
+      return { success: true, eventTrigger: vmd, rawXml: resp.data };
+    }
+  } catch {
+    // Neither endpoint works
+  }
+
+  throw new Error('Event triggers not supported on this device or firmware');
+}
+
+async function putEventTriggers(config, channelId, xml) {
+  try {
+    const resp = await digestFetch(config, 'PUT', `/ISAPI/Event/triggers/VMD-${channelId}`, xml);
+    return { success: true, response: resp.data };
+  } catch (err) {
+    throw new Error('Failed to save event triggers: ' + err.message);
+  }
 }
 
 /* ── Network Scanner ─────────────────────────────────────────────────────── */

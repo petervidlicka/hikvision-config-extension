@@ -742,6 +742,184 @@ ToolRegistry.register({
 });
 
 
+// ═══════════════════════════════════════════════════════════════════════════
+// TOOL: Event Actions (motion detection linkage methods)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Defines the linkage actions available for motion detection events.
+ * Each entry maps a human-readable label to a Hikvision notificationMethod value.
+ */
+const EVENT_ACTIONS = [
+  { key: 'record',     method: 'record',     label: 'Record Video',       description: 'Record to NVR when motion is detected' },
+  { key: 'center',     method: 'center',     label: 'Push Notification',  description: 'Send alert to Hik-Connect mobile app' },
+  { key: 'email',      method: 'email',      label: 'Email Alert',        description: 'Send email with snapshot attached' },
+  { key: 'beep',       method: 'beep',       label: 'Audible Warning',    description: 'NVR local buzzer' },
+  { key: 'IO',         method: 'IO',         label: 'Alarm Output',       description: 'Trigger physical alarm relay' },
+  { key: 'whiteLight', method: 'whiteLight', label: 'White Light',        description: 'Flash camera spotlight LED' },
+  { key: 'audio',      method: 'audio',      label: 'Audio Alarm',        description: 'Play warning from camera speaker' },
+];
+
+ToolRegistry.register({
+  id: 'events',
+  label: 'Event Actions',
+  cursor: 'default',
+
+  panelHTML: `
+    <div class="event-actions-info">
+      When motion is detected on this channel, perform these actions:
+    </div>
+    ${EVENT_ACTIONS.map(a => `
+      <div class="toggle-row">
+        <span title="${a.description}">${a.label}</span>
+        <div class="toggle" id="eventToggle_${a.key}" data-action="${a.key}"></div>
+      </div>
+    `).join('')}
+    <div class="btn-group" style="margin-top:12px">
+      <button class="btn btn-primary btn-block" id="loadEventsBtn">Load from Device</button>
+    </div>
+    <div class="btn-group">
+      <button class="btn btn-success btn-block" id="saveEventsBtn">Save to Device</button>
+    </div>
+  `,
+
+  initState() {
+    const eventActions = {};
+    EVENT_ACTIONS.forEach(a => { eventActions[a.key] = false; });
+    return {
+      eventActions,
+      eventTriggersRawXml: null,
+    };
+  },
+
+  resetState() {
+    EVENT_ACTIONS.forEach(a => { state.eventActions[a.key] = false; });
+    state.eventTriggersRawXml = null;
+    // Reset toggle UI
+    EVENT_ACTIONS.forEach(a => {
+      const el = document.getElementById(`eventToggle_${a.key}`);
+      if (el) el.classList.remove('on');
+    });
+  },
+
+  draw(ctx, canvas) {
+    // No canvas overlay for event actions
+  },
+
+  onMouseDown(pos, e) {},
+  onMouseMove(pos, e) {},
+  onMouseUp(pos, e) {},
+
+  async load() {
+    if (!state.config || !state.activeChannel) return;
+    setStatus('Loading event actions...');
+    try {
+      const data = await sendMsg({
+        action: 'getEventTriggers',
+        config: state.config,
+        channelId: state.activeChannel,
+      });
+
+      state.eventTriggersRawXml = data.rawXml;
+
+      // Reset all toggles first
+      EVENT_ACTIONS.forEach(a => { state.eventActions[a.key] = false; });
+
+      // Parse which actions are enabled
+      const trigger = data.eventTrigger;
+      if (trigger) {
+        let notifications = trigger.EventTriggerNotificationList?.EventTriggerNotification;
+        if (notifications) {
+          if (!Array.isArray(notifications)) notifications = [notifications];
+          notifications.forEach(n => {
+            const method = n.notificationMethod;
+            const action = EVENT_ACTIONS.find(a => a.method === method);
+            if (action) {
+              state.eventActions[action.key] = true;
+            }
+          });
+        }
+      }
+
+      // Update toggle UI
+      EVENT_ACTIONS.forEach(a => {
+        const el = document.getElementById(`eventToggle_${a.key}`);
+        if (el) el.classList.toggle('on', state.eventActions[a.key]);
+      });
+
+      showToast('Event actions loaded', 'success');
+      setStatus('Config loaded', `Channel ${state.activeChannel}`);
+    } catch (err) {
+      showToast('Failed to load event actions: ' + err.message, 'error');
+      setStatus('Failed to load config');
+    }
+  },
+
+  async save() {
+    if (!state.config || !state.activeChannel) return;
+
+    // Build notification list XML from enabled toggles
+    let notificationsXml = '';
+    EVENT_ACTIONS.forEach(a => {
+      if (!state.eventActions[a.key]) return;
+
+      let extra = '';
+      if (a.method === 'record') {
+        extra = `\n        <notificationRecurrence>beginning</notificationRecurrence>\n        <videoInputID>${state.activeChannel}</videoInputID>`;
+      } else if (a.method === 'IO') {
+        extra = `\n        <outputIOPortID>1</outputIOPortID>`;
+      }
+
+      notificationsXml += `
+      <EventTriggerNotification>
+        <id>${a.method}</id>
+        <notificationMethod>${a.method}</notificationMethod>${extra}
+      </EventTriggerNotification>`;
+    });
+
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<EventTrigger version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+  <id>VMD-${state.activeChannel}</id>
+  <eventType>VMD</eventType>
+  <eventDescription>Video Motion Detection</eventDescription>
+  <videoInputChannelID>${state.activeChannel}</videoInputChannelID>
+  <EventTriggerNotificationList>${notificationsXml}
+  </EventTriggerNotificationList>
+</EventTrigger>`;
+
+    setStatus('Saving event actions...');
+    try {
+      await sendMsg({
+        action: 'putEventTriggers',
+        config: state.config,
+        channelId: state.activeChannel,
+        xml,
+      });
+      showToast('Event actions saved successfully!', 'success');
+      setStatus('Config saved', `Channel ${state.activeChannel}`);
+    } catch (err) {
+      showToast('Failed to save event actions: ' + err.message, 'error');
+      setStatus('Save failed');
+    }
+  },
+
+  bindPanel() {
+    // Bind toggle clicks
+    EVENT_ACTIONS.forEach(a => {
+      document.getElementById(`eventToggle_${a.key}`).addEventListener('click', () => {
+        state.eventActions[a.key] = !state.eventActions[a.key];
+        document.getElementById(`eventToggle_${a.key}`).classList.toggle('on', state.eventActions[a.key]);
+      });
+    });
+
+    document.getElementById('loadEventsBtn').addEventListener('click', () => this.load());
+    document.getElementById('saveEventsBtn').addEventListener('click', () => this.save());
+  },
+
+  onActivate() {},
+});
+
+
 // ─── Initialize Tool Registry ───────────────────────────────────────────────
 
 function initToolRegistry() {
