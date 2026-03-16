@@ -106,81 +106,8 @@
         <span class="section-arrow" id="configArrow">▸</span>
       </div>
 
-      <div id="configPanels" style="display:none">
-
-      <!-- Motion Detection Panel -->
-      <div class="tool-panel active" id="motionPanel">
-        <div class="toggle-row">
-          <span>Motion Detection</span>
-          <div class="toggle" id="motionToggle"></div>
-        </div>
-        <div class="slider-group">
-          <label>Sensitivity <span id="sensitivityVal">50</span></label>
-          <input type="range" id="sensitivitySlider" min="0" max="100" value="50" />
-        </div>
-        <div class="instructions" id="motionInstructions">
-          <strong>Click cells</strong> in the grid overlay to toggle motion detection zones. <strong>Click &amp; drag</strong> to paint multiple cells.
-        </div>
-        <div class="legend">
-          <div class="legend-item">
-            <div class="legend-swatch" style="background:rgba(74,108,247,0.45)"></div>
-            Active zone
-          </div>
-          <div class="legend-item">
-            <div class="legend-swatch" style="background:transparent; border-color:rgba(255,255,255,0.15)"></div>
-            Inactive
-          </div>
-        </div>
-        <div class="btn-group">
-          <button class="btn" id="selectAllBtn">Select All</button>
-          <button class="btn" id="clearAllBtn">Clear All</button>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary btn-block" id="loadMotionBtn">
-            Load from Device
-          </button>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-success btn-block" id="saveMotionBtn">
-            Save to Device
-          </button>
-        </div>
-      </div>
-
-      <!-- Privacy Mask Panel -->
-      <div class="tool-panel" id="privacyPanel">
-        <div class="toggle-row">
-          <span>Privacy Mask</span>
-          <div class="toggle" id="privacyToggle"></div>
-        </div>
-        <div class="instructions">
-          <strong>Click &amp; drag</strong> on the video to draw rectangular privacy mask regions.
-          <strong>Right-click</strong> a region to delete it.
-          Maximum 4 regions supported.
-        </div>
-        <div class="legend">
-          <div class="legend-item">
-            <div class="legend-swatch" style="background:rgba(239,68,68,0.35)"></div>
-            Masked region
-          </div>
-        </div>
-        <div id="privacyRegionList" style="margin-top:10px"></div>
-        <div class="btn-group">
-          <button class="btn btn-danger" id="clearPrivacyBtn">Clear All</button>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-primary btn-block" id="loadPrivacyBtn">
-            Load from Device
-          </button>
-        </div>
-        <div class="btn-group">
-          <button class="btn btn-success btn-block" id="savePrivacyBtn">
-            Save to Device
-          </button>
-        </div>
-      </div>
-
-      </div><!-- /configPanels -->
+      <!-- Tool panels are generated dynamically by ToolRegistry -->
+      <div id="configPanels" style="display:none"></div>
     </div>
   </div>
 
@@ -197,10 +124,8 @@
         <button class="tool-tab active" id="singleViewTab">1-Cam View</button>
         <button class="tool-tab" id="gridViewTab">4-Cam View</button>
       </div>
-      <div id="configTabs" style="display:none;gap:2px;width:100%">
-        <button class="tool-tab active" id="motionTab">Motion Detection</button>
-        <button class="tool-tab" id="privacyTab">Privacy Mask</button>
-      </div>
+      <!-- Config sub-tabs are generated dynamically by ToolRegistry -->
+      <div id="configTabs" style="display:none;gap:2px;width:100%"></div>
     </div>
 
     <div id="gridView" class="grid-view" style="display:none">
