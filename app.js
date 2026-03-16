@@ -439,7 +439,10 @@ ToolRegistry.register({
       redraw();
     });
 
-    document.getElementById('loadMotionBtn').addEventListener('click', () => this.load());
+    document.getElementById('loadMotionBtn').addEventListener('click', () => {
+      setToolPanelLoading('motion', true);
+      this.load().then(() => setToolPanelLoading('motion', false)).catch(() => setToolPanelLoading('motion', false));
+    });
     document.getElementById('saveMotionBtn').addEventListener('click', () => this.save());
   },
 
@@ -714,7 +717,10 @@ ToolRegistry.register({
       redraw();
     });
 
-    document.getElementById('loadPrivacyBtn').addEventListener('click', () => this.load());
+    document.getElementById('loadPrivacyBtn').addEventListener('click', () => {
+      setToolPanelLoading('privacy', true);
+      this.load().then(() => setToolPanelLoading('privacy', false)).catch(() => setToolPanelLoading('privacy', false));
+    });
     document.getElementById('savePrivacyBtn').addEventListener('click', () => this.save());
   },
 
@@ -912,7 +918,10 @@ ToolRegistry.register({
       });
     });
 
-    document.getElementById('loadEventsBtn').addEventListener('click', () => this.load());
+    document.getElementById('loadEventsBtn').addEventListener('click', () => {
+      setToolPanelLoading('events', true);
+      this.load().then(() => setToolPanelLoading('events', false)).catch(() => setToolPanelLoading('events', false));
+    });
     document.getElementById('saveEventsBtn').addEventListener('click', () => this.save());
   },
 
@@ -1037,6 +1046,40 @@ function switchTool(toolId) {
   expandConfig();
   if (tool.onActivate) tool.onActivate();
   redraw();
+
+  // Auto-load settings from device when switching tools in config mode
+  if (state.activeSection === 'config' && state.activeChannel && tool.load) {
+    setToolPanelLoading(toolId, true);
+    tool.load().then(() => {
+      setToolPanelLoading(toolId, false);
+    }).catch(() => {
+      setToolPanelLoading(toolId, false);
+    });
+  }
+}
+
+/**
+ * Set or clear the loading/disabled state on a tool's sidebar panel.
+ * When loading, all interactive elements (inputs, buttons, toggles) are
+ * disabled and the panel is visually dimmed so users know the settings
+ * haven't been loaded yet.
+ */
+function setToolPanelLoading(toolId, isLoading) {
+  const panel = dom.configPanels.querySelector(`[data-tool-panel="${toolId}"]`);
+  if (!panel) return;
+  panel.classList.toggle('tool-loading', isLoading);
+  // Disable/enable all interactive children
+  panel.querySelectorAll('input, button, select, .toggle').forEach(el => {
+    if (isLoading) {
+      el.dataset.wasDisabled = el.hasAttribute('disabled') ? 'true' : 'false';
+      el.setAttribute('disabled', '');
+      if (el.classList.contains('toggle')) el.style.pointerEvents = 'none';
+    } else {
+      if (el.dataset.wasDisabled !== 'true') el.removeAttribute('disabled');
+      delete el.dataset.wasDisabled;
+      if (el.classList.contains('toggle')) el.style.pointerEvents = '';
+    }
+  });
 }
 
 // ─── Collapsible Config Section ──────────────────────────────────────────────
@@ -1271,7 +1314,14 @@ async function selectChannel(channelId, element) {
   if (state.activeSection === 'config') {
     expandConfig();
     const tool = ToolRegistry.get(state.activeTool);
-    if (tool?.load) tool.load();
+    if (tool?.load) {
+      setToolPanelLoading(state.activeTool, true);
+      tool.load().then(() => {
+        setToolPanelLoading(state.activeTool, false);
+      }).catch(() => {
+        setToolPanelLoading(state.activeTool, false);
+      });
+    }
   }
 }
 
@@ -1312,7 +1362,14 @@ function switchSection(section) {
     expandConfig();
     if (state.activeChannel) {
       startSnapshotFeed(state.activeChannel);
-      if (tool?.load) tool.load();
+      if (tool?.load) {
+        setToolPanelLoading(state.activeTool, true);
+        tool.load().then(() => {
+          setToolPanelLoading(state.activeTool, false);
+        }).catch(() => {
+          setToolPanelLoading(state.activeTool, false);
+        });
+      }
     }
 
     // Update config sub-tab active states
