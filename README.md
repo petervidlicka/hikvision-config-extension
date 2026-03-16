@@ -19,6 +19,14 @@ To solve this, I opted to build this lightweight Chrome extension as a straightf
 
 > **Note**: You must be connected to your home network to use this extension, as it will not work remotely.
 
+## Installation
+
+1. Download or clone this repository to your local machine.
+2. Open Google Chrome and navigate to `chrome://extensions/`.
+3. Enable **Developer mode** using the toggle in the top right corner.
+4. Click the **Load unpacked** button and select the directory containing this extension.
+5. The extension will now be installed and accessible from your Chrome extensions menu!
+
 ## Contributing
 
 I haven't bothered adding other administrative functionality simply because I never needed to set it up for my own use case. I am happy to add more features in the future, or feel free to fork this project and send me a Pull Request!
