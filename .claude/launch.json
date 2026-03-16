@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "hikvision-ext",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "--directory", "/Users/peter/Dev files/hikvision-config-extension"],
+      "port": 8765,
+      "autoPort": true
+    }
+  ]
+}

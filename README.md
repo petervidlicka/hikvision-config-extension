@@ -21,7 +21,7 @@ To solve this, I opted to build this lightweight Chrome extension as a straightf
 
 ## Installation
 
-1. Download this repository to your local machine. You can do this by clicking the green **Code** button at the top of this repository and selecting **Download ZIP**, then extract the downloaded folder. Alternatively, you can clone it via terminal: `git clone https://github.com/petervidlicka/hikvision-config-extension.git`.
+1. Download this repository to your local machine. You can do this by clicking the green **Code** button at the top of this repository and selecting **Download ZIP**, then extract the downloaded folder. 
 2. Open Google Chrome and navigate to `chrome://extensions/`.
 3. Enable **Developer mode** using the toggle in the top right corner.
 4. Click the **Load unpacked** button and select the directory containing this extension.
