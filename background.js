@@ -195,6 +195,7 @@ async function handleMessage(msg) {
     case 'putMotionDetection':  return putMotionDetection(msg.config, msg.channelId, msg.xml);
     case 'getPrivacyMask':      return getPrivacyMask(msg.config, msg.channelId);
     case 'putPrivacyMask':      return putPrivacyMask(msg.config, msg.channelId, msg.xml);
+    case 'scanNetwork':         return scanNetwork();
     default:
       throw new Error(`Unknown action: ${msg.action}`);
   }
@@ -315,4 +316,106 @@ async function getPrivacyMask(config, channelId) {
 async function putPrivacyMask(config, channelId, xml) {
   const resp = await digestFetch(config, 'PUT', `/ISAPI/System/Video/inputs/channels/${channelId}/privacyMask`, xml);
   return { success: true, response: resp.data };
+}
+
+/* ── Network Scanner ─────────────────────────────────────────────────────── */
+
+/**
+ * Scan the local /24 subnet(s) for Hikvision devices by probing
+ * /ISAPI/System/deviceInfo on every host in parallel.
+ * Resolves after all probes finish or after 9.5 seconds, whichever is first.
+ *
+ * Subnet detection strategy:
+ *  1. Try chrome.system.network.getNetworkInterfaces() (requires "system.network" permission)
+ *  2. Fall back to the most common home/office subnets so the scan still
+ *     works even if the API is unavailable or the extension hasn't been
+ *     reloaded after the permission was added.
+ */
+async function scanNetwork() {
+  const subnets = new Set();
+
+  // ── Step 1: try the native network API ──────────────────────────────────
+  try {
+    if (chrome.system?.network) {
+      const ifaces = await new Promise((resolve, reject) => {
+        chrome.system.network.getNetworkInterfaces((result) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+          } else {
+            resolve(result || []);
+          }
+        });
+      });
+
+      for (const iface of ifaces) {
+        const addr = iface.address || '';
+        if (
+          addr.includes('.') &&
+          !addr.startsWith('127.') &&
+          !addr.startsWith('169.254.') &&
+          !addr.startsWith('0.')
+        ) {
+          const parts = addr.split('.');
+          subnets.add(`${parts[0]}.${parts[1]}.${parts[2]}`);
+        }
+      }
+    }
+  } catch {
+    // API unavailable or extension hasn't been reloaded yet — fall through
+  }
+
+  // ── Step 2: fall back to common home/office subnets ─────────────────────
+  if (subnets.size === 0) {
+    for (const s of ['192.168.0', '192.168.1', '192.168.2', '10.0.0', '10.0.1']) {
+      subnets.add(s);
+    }
+  }
+
+  const foundDevices = [];
+  const PROBE_TIMEOUT_MS = 2500; // per-IP timeout
+  const TOTAL_TIMEOUT_MS = 9500; // hard ceiling for the whole scan
+
+  /**
+   * Probe a single IP. Returns the device object if it looks like a
+   * Hikvision NVR/camera (401 on ISAPI endpoint), or nothing on failure.
+   */
+  const probeIP = async (ip) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const resp = await fetch(`http://${ip}/ISAPI/System/deviceInfo`, {
+        method: 'GET',
+        signal: controller.signal,
+        cache: 'no-store',
+      });
+      clearTimeout(timer);
+      // Hikvision ISAPI always returns 401 for unauthenticated requests
+      if (resp.status === 401 || resp.status === 200) {
+        const wwwAuth = resp.headers.get('www-authenticate') || '';
+        // Only add if it looks like a Digest-auth protected ISAPI endpoint
+        if (resp.status === 401 || wwwAuth.toLowerCase().includes('digest')) {
+          foundDevices.push({ ip, port: 80 });
+        }
+      }
+    } catch {
+      // Connection refused, DNS failure, abort — not a reachable Hikvision device
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  // Build the full IP list for all subnets
+  const allIPs = [];
+  for (const subnet of subnets) {
+    for (let i = 1; i <= 254; i++) {
+      allIPs.push(`${subnet}.${i}`);
+    }
+  }
+
+  // Race all probes against the total timeout; collect results as they arrive
+  const allProbes = Promise.all(allIPs.map(probeIP));
+  const totalTimeoutP = new Promise(resolve => setTimeout(resolve, TOTAL_TIMEOUT_MS));
+  await Promise.race([allProbes, totalTimeoutP]);
+
+  return { success: true, devices: foundDevices };
 }

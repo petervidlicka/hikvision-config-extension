@@ -21,31 +21,76 @@
     <!-- Connection Section -->
     <div class="section">
       <div class="section-title">Connection</div>
-      <div class="form-group">
-        <label>NVR / Camera IP</label>
-        <input type="text" id="hostInput" placeholder="192.168.1.64" />
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label>Port</label>
-          <input type="text" id="portInput" placeholder="80" value="80" />
-        </div>
-        <div class="form-group">
-          <label>Username</label>
-          <input type="text" id="userInput" placeholder="admin" value="admin" />
+
+      <!-- Step 1: Scan intro (default view when not connected) -->
+      <div id="scanIntro">
+        <p class="scan-description">Automatically discover your Hikvision NVR on the local network, or enter the IP address manually.</p>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="startScanBtn">Scan Network</button>
+          <button class="btn" id="manualEntryBtn">Enter IP Manually</button>
         </div>
       </div>
-      <div class="form-group">
-        <label>Password</label>
-        <input type="password" id="passInput" placeholder="Password" />
+
+      <!-- Step 2: Scanning in progress -->
+      <div id="scanProgress" style="display:none">
+        <div class="radar-container">
+          <div class="radar-disc"></div>
+          <div class="radar-ring r1"></div>
+          <div class="radar-ring r2"></div>
+          <div class="radar-center-dot"></div>
+        </div>
+        <p class="scan-status-text" id="scanStatusText">Scanning your local network<br>for Hikvision devices…</p>
+        <div class="scan-progress-bar">
+          <div class="scan-progress-fill" id="scanProgressFill"></div>
+        </div>
+        <button class="btn btn-sm" id="cancelScanBtn" style="margin-top:8px;width:100%">Cancel</button>
       </div>
-      <div class="save-password-row">
-        <input type="checkbox" id="savePassCheck" />
-        <label for="savePassCheck">Remember password (stored locally)</label>
+
+      <!-- Step 3: Scan results -->
+      <div id="scanResults" style="display:none">
+        <p class="scan-description" id="scanResultsText"></p>
+        <div id="scanDeviceList"></div>
+        <div class="btn-group" style="margin-top:6px">
+          <button class="btn" id="rescanBtn">Scan Again</button>
+          <button class="btn" id="manualAfterScanBtn">Enter Manually</button>
+        </div>
       </div>
-      <button class="btn btn-primary btn-block" id="connectBtn" style="margin-top:10px">
-        Connect
-      </button>
+
+      <!-- Step 4: Manual login form (also shown after selecting a scanned device) -->
+      <div id="connectionForm" style="display:none">
+        <div class="form-group">
+          <label>NVR / Camera IP</label>
+          <input type="text" id="hostInput" placeholder="192.168.1.64" />
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Port</label>
+            <input type="text" id="portInput" placeholder="80" value="80" />
+          </div>
+          <div class="form-group">
+            <label>Username</label>
+            <input type="text" id="userInput" placeholder="admin" value="admin" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Password</label>
+          <input type="password" id="passInput" placeholder="Password" />
+        </div>
+        <div class="save-password-row">
+          <input type="checkbox" id="savePassCheck" />
+          <label for="savePassCheck">Remember password (stored locally)</label>
+        </div>
+        <button class="btn btn-primary btn-block" id="connectBtn" style="margin-top:10px">
+          Connect
+        </button>
+        <span class="scan-back-link" id="backToScanBtn">← Back to scan options</span>
+      </div>
+      <div id="connectionStatus" class="connection-status" style="display:none">
+        <div class="connection-status-info">
+          <span class="connection-status-host" id="connectedHost"></span>
+        </div>
+        <button class="btn btn-danger btn-sm" id="disconnectBtn">Disconnect</button>
+      </div>
     </div>
 
     <!-- Channels Section -->
@@ -54,9 +99,14 @@
       <div class="channel-list" id="channelList"></div>
     </div>
 
-    <!-- Tool Config Section -->
+    <!-- Tool Config Section (only visible in Configuration mode) -->
     <div class="section" id="toolConfigSection" style="display:none">
-      <div class="section-title">Configuration</div>
+      <div class="section-title section-toggle" id="configToggleBtn">
+        <span id="configToggleLabel">Motion Detection</span>
+        <span class="section-arrow" id="configArrow">▸</span>
+      </div>
+
+      <div id="configPanels" style="display:none">
 
       <!-- Motion Detection Panel -->
       <div class="tool-panel active" id="motionPanel">
@@ -68,10 +118,8 @@
           <label>Sensitivity <span id="sensitivityVal">50</span></label>
           <input type="range" id="sensitivitySlider" min="0" max="100" value="50" />
         </div>
-        <div class="instructions">
-          <strong>Click cells</strong> in the grid overlay to toggle motion detection zones.
-          <strong>Click &amp; drag</strong> to paint multiple cells.
-          Use the buttons below to select or clear all.
+        <div class="instructions" id="motionInstructions">
+          <strong>Click cells</strong> in the grid overlay to toggle motion detection zones. <strong>Click &amp; drag</strong> to paint multiple cells.
         </div>
         <div class="legend">
           <div class="legend-item">
@@ -131,13 +179,79 @@
           </button>
         </div>
       </div>
+
+      </div><!-- /configPanels -->
     </div>
   </div>
 
   <div class="main">
+    <!-- Primary section tabs: Live View vs Configuration -->
+    <div class="section-tabs" id="sectionTabs" style="display:none">
+      <button class="section-tab active" id="liveViewSectionTab">Live View</button>
+      <button class="section-tab" id="configSectionTab">Configuration</button>
+    </div>
+
+    <!-- Context-dependent sub-tabs -->
     <div class="tool-tabs" id="toolTabs" style="display:none">
-      <button class="tool-tab active" id="motionTab">Motion Detection</button>
-      <button class="tool-tab" id="privacyTab">Privacy Mask</button>
+      <div id="liveViewTabs" style="display:flex;gap:2px;width:100%">
+        <button class="tool-tab active" id="singleViewTab">1-Cam View</button>
+        <button class="tool-tab" id="gridViewTab">4-Cam View</button>
+      </div>
+      <div id="configTabs" style="display:none;gap:2px;width:100%">
+        <button class="tool-tab active" id="motionTab">Motion Detection</button>
+        <button class="tool-tab" id="privacyTab">Privacy Mask</button>
+      </div>
+    </div>
+
+    <div id="gridView" class="grid-view" style="display:none">
+      <div class="grid-cell" data-grid-idx="0">
+        <img class="grid-feed" />
+        <div class="grid-top-bar">
+          <select class="grid-channel-picker" data-cell-idx="0"></select>
+        </div>
+        <button class="grid-maximize-btn" title="Maximize">⛶</button>
+        <div class="grid-spinner">
+          <span class="loading"></span>
+          <span class="grid-spinner-text">Loading…</span>
+        </div>
+        <div class="grid-no-feed">No camera</div>
+      </div>
+      <div class="grid-cell" data-grid-idx="1">
+        <img class="grid-feed" />
+        <div class="grid-top-bar">
+          <select class="grid-channel-picker" data-cell-idx="1"></select>
+        </div>
+        <button class="grid-maximize-btn" title="Maximize">⛶</button>
+        <div class="grid-spinner">
+          <span class="loading"></span>
+          <span class="grid-spinner-text">Loading…</span>
+        </div>
+        <div class="grid-no-feed">No camera</div>
+      </div>
+      <div class="grid-cell" data-grid-idx="2">
+        <img class="grid-feed" />
+        <div class="grid-top-bar">
+          <select class="grid-channel-picker" data-cell-idx="2"></select>
+        </div>
+        <button class="grid-maximize-btn" title="Maximize">⛶</button>
+        <div class="grid-spinner">
+          <span class="loading"></span>
+          <span class="grid-spinner-text">Loading…</span>
+        </div>
+        <div class="grid-no-feed">No camera</div>
+      </div>
+      <div class="grid-cell" data-grid-idx="3">
+        <img class="grid-feed" />
+        <div class="grid-top-bar">
+          <select class="grid-channel-picker" data-cell-idx="3"></select>
+        </div>
+        <button class="grid-maximize-btn" title="Maximize">⛶</button>
+        <div class="grid-spinner">
+          <span class="loading"></span>
+          <span class="grid-spinner-text">Loading…</span>
+        </div>
+        <div class="grid-no-feed">No camera</div>
+      </div>
     </div>
 
     <div class="canvas-container" id="canvasContainer">
@@ -145,6 +259,12 @@
         <div class="icon">📷</div>
         <p>Connect to your NVR/Camera to see the video feed</p>
         <p style="margin-top:8px;font-size:12px;color:#555">Enter your device IP and credentials in the sidebar</p>
+        <p class="branding" style="margin-top:24px">
+          Made with ❤️ by
+          <a href="https://github.com/petervidlicka" target="_blank" rel="noopener">Peter Vidlicka</a>
+          &amp;
+          <a href="https://www.yolkstudio.com" target="_blank" rel="noopener">Yolk Studio</a>
+        </p>
       </div>
       <div class="canvas-wrapper" id="canvasWrapper" style="display:none">
         <img id="videoFeed" />

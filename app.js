@@ -29,6 +29,13 @@ const state = {
   // Video
   snapshotInterval: null,
   rawMotionXml: null,
+  // 4-cam grid view
+  viewMode: 'single', // 'single' or 'grid'
+  gridSnapIntervals: [],
+  gridCellChannels: [null, null, null, null], // channelId assigned to each grid cell
+  // Section navigation
+  activeSection: 'liveview', // 'liveview' or 'config'
+  gridExpandedCell: null, // index of maximized grid cell, or null
 };
 
 // ─── DOM refs ───────────────────────────────────────────────────────────────
@@ -84,6 +91,96 @@ function setStatus(text, right = '') {
   document.getElementById('statusRight').textContent = right;
 }
 
+// ─── Network Scanner ─────────────────────────────────────────────────────────
+
+let scanProgressInterval = null;
+
+/** Show the scan intro panel (default disconnected view). */
+function showScanIntro() {
+  document.getElementById('scanIntro').style.display = 'block';
+  document.getElementById('scanProgress').style.display = 'none';
+  document.getElementById('scanResults').style.display = 'none';
+  document.getElementById('connectionForm').style.display = 'none';
+}
+
+/** Show the manual login form (hides all scan panels). */
+function showConnectionForm() {
+  document.getElementById('scanIntro').style.display = 'none';
+  document.getElementById('scanProgress').style.display = 'none';
+  document.getElementById('scanResults').style.display = 'none';
+  document.getElementById('connectionForm').style.display = 'block';
+}
+
+/** Kick off a network scan, show the radar animation, then show results. */
+async function startScan() {
+  document.getElementById('scanIntro').style.display = 'none';
+  document.getElementById('scanProgress').style.display = 'block';
+  document.getElementById('scanResults').style.display = 'none';
+  document.getElementById('connectionForm').style.display = 'none';
+
+  // Animate the progress bar over ~10 seconds
+  const fill = document.getElementById('scanProgressFill');
+  const statusEl = document.getElementById('scanStatusText');
+  fill.style.width = '0%';
+  statusEl.innerHTML = 'Scanning your local network<br>for Hikvision devices…';
+
+  const startTime = Date.now();
+  const TOTAL_MS = 10000;
+  scanProgressInterval = setInterval(() => {
+    const pct = Math.min(100, ((Date.now() - startTime) / TOTAL_MS) * 100);
+    fill.style.width = pct + '%';
+    if (pct >= 100) clearInterval(scanProgressInterval);
+  }, 100);
+
+  try {
+    const data = await sendMsg({ action: 'scanNetwork' });
+    clearInterval(scanProgressInterval);
+    fill.style.width = '100%';
+    showScanResults(data.devices || []);
+  } catch (err) {
+    clearInterval(scanProgressInterval);
+    // Surface the real error so it's not a mystery why results are empty
+    showToast('Scan error: ' + err.message, 'error');
+    showScanResults([]);
+  }
+}
+
+/** Cancel an in-progress scan and return to the intro. */
+function cancelScan() {
+  clearInterval(scanProgressInterval);
+  showScanIntro();
+}
+
+/** Render the results panel after a scan completes. */
+function showScanResults(devices) {
+  document.getElementById('scanProgress').style.display = 'none';
+  document.getElementById('scanResults').style.display = 'block';
+
+  const text = document.getElementById('scanResultsText');
+  const list = document.getElementById('scanDeviceList');
+
+  if (devices.length === 0) {
+    text.textContent = 'No Hikvision devices found on your local network. Try entering the IP address manually.';
+    list.innerHTML = '';
+  } else {
+    text.textContent = `Found ${devices.length} Hikvision device${devices.length > 1 ? 's' : ''}. Click one to connect:`;
+    list.innerHTML = devices.map(d => `
+      <div class="scan-device-card" data-ip="${d.ip}" data-port="${d.port || 80}">
+        <div class="scan-device-ip">${d.ip}</div>
+        <div class="scan-device-label">Hikvision NVR / Camera &bull; Port ${d.port || 80}</div>
+      </div>
+    `).join('');
+
+    list.querySelectorAll('.scan-device-card').forEach(card => {
+      card.addEventListener('click', () => {
+        document.getElementById('hostInput').value = card.dataset.ip;
+        document.getElementById('portInput').value = card.dataset.port;
+        showConnectionForm();
+      });
+    });
+  }
+}
+
 // ─── Connection ─────────────────────────────────────────────────────────────
 async function connect() {
   const btn = document.getElementById('connectBtn');
@@ -119,8 +216,12 @@ async function connect() {
     showToast('Connected successfully!', 'success');
     setStatus('Connected', host);
 
+    // Collapse login form
+    document.getElementById('connectionForm').style.display = 'none';
+    document.getElementById('connectionStatus').style.display = 'flex';
+    document.getElementById('connectedHost').textContent = host;
+
     await loadChannels();
-    btn.textContent = 'Reconnect';
   } catch (err) {
     showToast('Connection failed: ' + err.message, 'error');
     setStatus('Connection failed');
@@ -129,6 +230,46 @@ async function connect() {
     btn.disabled = false;
     if (btn.querySelector('.loading')) btn.textContent = 'Connect';
   }
+}
+
+/** Reset to disconnected state and re-show the login form. */
+function disconnect() {
+  // Stop all feeds
+  if (state.snapshotInterval) clearInterval(state.snapshotInterval);
+  state.gridSnapIntervals.forEach(id => id && clearInterval(id));
+  state.gridSnapIntervals = [null, null, null, null];
+
+  // Reset state
+  state.connected = false;
+  state.config = null;
+  state.channels = [];
+  state.activeChannel = null;
+  state.viewMode = 'single';
+  state.gridCellChannels = [null, null, null, null];
+  state.activeSection = 'liveview';
+  state.gridExpandedCell = null;
+  initGrid();
+  state.privacyRegions = [];
+
+  // Collapse config section
+  configExpanded = false;
+  document.getElementById('configPanels').style.display = 'none';
+  document.getElementById('configArrow').textContent = '▸';
+
+  // Reset UI — return to the scan intro screen
+  showScanIntro();
+  document.getElementById('connectionStatus').style.display = 'none';
+  document.getElementById('channelsSection').style.display = 'none';
+  document.getElementById('toolConfigSection').style.display = 'none';
+  document.getElementById('sectionTabs').style.display = 'none';
+  document.getElementById('toolTabs').style.display = 'none';
+  document.getElementById('statusDot').classList.remove('connected');
+  document.getElementById('deviceInfo').textContent = 'Not connected';
+  document.getElementById('noFeed').style.display = '';
+  document.getElementById('canvasWrapper').style.display = 'none';
+  document.getElementById('canvasContainer').style.display = '';
+  document.getElementById('gridView').style.display = 'none';
+  setStatus('Ready');
 }
 
 async function loadChannels() {
@@ -148,8 +289,11 @@ async function loadChannels() {
     });
 
     document.getElementById('channelsSection').style.display = 'block';
-    document.getElementById('toolConfigSection').style.display = 'block';
+    document.getElementById('sectionTabs').style.display = 'flex';
     document.getElementById('toolTabs').style.display = 'flex';
+
+    // Default to Live View after login
+    switchSection('liveview');
 
     if (state.channels.length > 0) {
       selectChannel(state.channels[0].id, list.children[0]);
@@ -160,6 +304,11 @@ async function loadChannels() {
 }
 
 async function selectChannel(channelId, element) {
+  // If in grid view, switch back to single camera mode
+  if (state.viewMode === 'grid') {
+    switchToSingleView();
+  }
+
   document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
   if (element) element.classList.add('active');
 
@@ -167,8 +316,100 @@ async function selectChannel(channelId, element) {
   initGrid();
   state.privacyRegions = [];
 
+  // Start the feed
   startSnapshotFeed(channelId);
-  loadMotionDetection();
+
+  // Only load config and expand panel if in Configuration section
+  if (state.activeSection === 'config') {
+    expandConfig();
+    loadMotionDetection();
+  }
+}
+
+// ─── Section Navigation ──────────────────────────────────────────────────────
+
+/** Switch between Live View and Configuration primary sections. */
+function switchSection(section) {
+  state.activeSection = section;
+
+  // Update section tab active classes
+  document.getElementById('liveViewSectionTab').classList.toggle('active', section === 'liveview');
+  document.getElementById('configSectionTab').classList.toggle('active', section === 'config');
+
+  // Toggle sub-tab visibility
+  document.getElementById('liveViewTabs').style.display = section === 'liveview' ? 'flex' : 'none';
+  document.getElementById('configTabs').style.display = section === 'config' ? 'flex' : 'none';
+
+  if (section === 'liveview') {
+    // Hide config sidebar section
+    document.getElementById('toolConfigSection').style.display = 'none';
+
+    // Canvas cursor: default (no drawing in live view)
+    canvas.style.cursor = 'default';
+
+    // Restore last view mode
+    if (state.viewMode === 'grid') {
+      switchToGridView();
+    } else {
+      switchToLiveViewSingle();
+    }
+  } else {
+    // Configuration mode
+    // Show config sidebar section
+    document.getElementById('toolConfigSection').style.display = 'block';
+
+    // Canvas cursor: crosshair for drawing
+    canvas.style.cursor = 'crosshair';
+
+    // Force single-cam view for configuration
+    if (state.viewMode === 'grid') {
+      // Stop grid feeds but remember we were in grid mode
+      state.gridSnapIntervals.forEach(id => id && clearInterval(id));
+      state.gridSnapIntervals = [null, null, null, null];
+    }
+    // Show single camera view
+    document.getElementById('canvasContainer').style.display = '';
+    document.getElementById('gridView').style.display = 'none';
+
+    // Expand config panel and load config for active tool
+    expandConfig();
+    if (state.activeChannel) {
+      startSnapshotFeed(state.activeChannel);
+      if (state.activeTool === 'motion') {
+        loadMotionDetection();
+      } else {
+        loadPrivacyMask();
+      }
+    }
+
+    // Update config sub-tab active states
+    document.getElementById('motionTab').classList.toggle('active', state.activeTool === 'motion');
+    document.getElementById('privacyTab').classList.toggle('active', state.activeTool !== 'motion');
+  }
+}
+
+/** Switch to single camera in Live View mode (no config tools). */
+function switchToLiveViewSingle() {
+  state.viewMode = 'single';
+
+  // Stop grid feeds
+  state.gridSnapIntervals.forEach(id => id && clearInterval(id));
+  state.gridSnapIntervals = [null, null, null, null];
+
+  // Show single view, hide grid
+  document.getElementById('canvasContainer').style.display = '';
+  document.getElementById('gridView').style.display = 'none';
+
+  // Update live view sub-tab active states
+  document.getElementById('singleViewTab').classList.toggle('active', true);
+  document.getElementById('gridViewTab').classList.toggle('active', false);
+
+  // Restart single-camera feed if we have an active channel
+  if (state.activeChannel) {
+    startSnapshotFeed(state.activeChannel);
+  }
+
+  setStatus('Live View', state.activeChannel ? `Channel ${state.activeChannel}` : '');
 }
 
 // ─── Video Feed ─────────────────────────────────────────────────────────────
@@ -218,6 +459,9 @@ function resizeCanvas() {
 
 function redraw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Only draw overlays in Configuration mode
+  if (state.activeSection !== 'config') return;
+
   if (state.activeTool === 'motion') {
     drawMotionGrid();
   } else if (state.activeTool === 'privacy') {
@@ -229,23 +473,33 @@ function drawMotionGrid() {
   const cellW = canvas.width / state.gridCols;
   const cellH = canvas.height / state.gridRows;
 
+  // Draw grid cells
   for (let r = 0; r < state.gridRows; r++) {
     for (let c = 0; c < state.gridCols; c++) {
       const x = c * cellW;
       const y = r * cellH;
 
       if (state.grid[r][c]) {
-        ctx.fillStyle = 'rgba(74, 108, 247, 0.4)';
+        ctx.fillStyle = 'rgba(74, 108, 247, 0.35)';
         ctx.fillRect(x, y, cellW, cellH);
-        ctx.strokeStyle = 'rgba(74, 108, 247, 0.7)';
-        ctx.lineWidth = 1;
-        ctx.strokeRect(x + 0.5, y + 0.5, cellW - 1, cellH - 1);
-      } else {
-        ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
-        ctx.lineWidth = 0.5;
-        ctx.strokeRect(x, y, cellW, cellH);
       }
     }
+  }
+
+  // Draw grid lines
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
+  ctx.lineWidth = 0.3;
+  for (let r = 0; r <= state.gridRows; r++) {
+    ctx.beginPath();
+    ctx.moveTo(0, r * cellH);
+    ctx.lineTo(canvas.width, r * cellH);
+    ctx.stroke();
+  }
+  for (let c = 0; c <= state.gridCols; c++) {
+    ctx.beginPath();
+    ctx.moveTo(c * cellW, 0);
+    ctx.lineTo(c * cellW, canvas.height);
+    ctx.stroke();
   }
 }
 
@@ -298,11 +552,16 @@ function getGridCell(pos) {
   };
 }
 
+// ─── Canvas Event Handlers ────────────────────────────────────────────────
+
 canvas.addEventListener('mousedown', (e) => {
+  // Block drawing in Live View
+  if (state.activeSection !== 'config') return;
   e.preventDefault();
   const pos = getCanvasPos(e);
 
   if (state.activeTool === 'motion') {
+    // Paint mode only
     state.isDrawing = true;
     const cell = getGridCell(pos);
     if (cell.row >= 0 && cell.row < state.gridRows && cell.col >= 0 && cell.col < state.gridCols) {
@@ -335,7 +594,10 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 canvas.addEventListener('mousemove', (e) => {
+  // Block drawing in Live View
+  if (state.activeSection !== 'config') return;
   if (!state.isDrawing) return;
+
   const pos = getCanvasPos(e);
 
   if (state.activeTool === 'motion') {
@@ -351,6 +613,9 @@ canvas.addEventListener('mousemove', (e) => {
 });
 
 canvas.addEventListener('mouseup', (e) => {
+  // Block drawing in Live View
+  if (state.activeSection !== 'config') return;
+
   if (state.activeTool === 'privacy' && state.isDrawing && state.drawStart) {
     const pos = getCanvasPos(e);
     const x = Math.min(state.drawStart.x, pos.x);
@@ -374,17 +639,206 @@ canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 // ─── Tool Switching ─────────────────────────────────────────────────────────
 function switchTool(tool) {
   state.activeTool = tool;
-  document.querySelectorAll('.tool-tab').forEach(el => el.classList.remove('active'));
-  document.querySelectorAll('.tool-panel').forEach(el => el.classList.remove('active'));
 
+  // Update config sub-tab active states
+  document.getElementById('motionTab').classList.toggle('active', tool === 'motion');
+  document.getElementById('privacyTab').classList.toggle('active', tool === 'privacy');
+
+  // Update sidebar tool panels
+  document.querySelectorAll('.tool-panel').forEach(el => el.classList.remove('active'));
   if (tool === 'motion') {
-    document.getElementById('motionTab').classList.add('active');
     document.getElementById('motionPanel').classList.add('active');
+    document.getElementById('configToggleLabel').textContent = 'Motion Detection';
   } else {
-    document.getElementById('privacyTab').classList.add('active');
     document.getElementById('privacyPanel').classList.add('active');
+    document.getElementById('configToggleLabel').textContent = 'Privacy Mask';
   }
+
+  // Auto-expand config when user switches to a configuration tab
+  expandConfig();
   redraw();
+}
+
+// ─── Collapsible Config Section ──────────────────────────────────────────────
+
+let configExpanded = false;
+
+/** Expand the sidebar config panels (called when a tool tab is clicked). */
+function expandConfig() {
+  configExpanded = true;
+  document.getElementById('configPanels').style.display = 'block';
+  document.getElementById('configArrow').textContent = '▾';
+}
+
+/** Toggle the config panel open/closed. */
+function toggleConfig() {
+  configExpanded = !configExpanded;
+  document.getElementById('configPanels').style.display = configExpanded ? 'block' : 'none';
+  document.getElementById('configArrow').textContent = configExpanded ? '▾' : '▸';
+}
+
+// ─── 4-Camera Grid View ──────────────────────────────────────────────────────
+
+/**
+ * Start (or restart) the snapshot feed for a single grid cell.
+ * Manages loading state, channel picker label, and interval bookkeeping.
+ */
+function startGridCellFeed(cellIdx, channelId) {
+  // Clear existing interval for this cell
+  if (state.gridSnapIntervals[cellIdx]) {
+    clearInterval(state.gridSnapIntervals[cellIdx]);
+    state.gridSnapIntervals[cellIdx] = null;
+  }
+
+  const cell = document.querySelectorAll('.grid-cell')[cellIdx];
+  if (!cell) return;
+
+  const img = cell.querySelector('.grid-feed');
+  const noFeed = cell.querySelector('.grid-no-feed');
+
+  img.classList.remove('loaded');
+  img.src = '';
+
+  if (!channelId) {
+    // No channel assigned to this cell
+    cell.classList.remove('is-loading');
+    noFeed.textContent = 'No camera';
+    noFeed.style.display = '';
+    return;
+  }
+
+  // Show loading state
+  cell.classList.add('is-loading');
+  noFeed.style.display = 'none';
+
+  const fetchSnap = async () => {
+    try {
+      const data = await sendMsg({
+        action: 'getSnapshot',
+        config: state.config,
+        channelId,
+      });
+      img.onload = () => {
+        cell.classList.remove('is-loading');
+        img.classList.add('loaded');
+      };
+      img.src = data.dataUrl;
+    } catch {
+      // Keep showing loading state until next successful frame
+    }
+  };
+
+  fetchSnap();
+  state.gridSnapIntervals[cellIdx] = setInterval(fetchSnap, 1000);
+}
+
+/** Switch to the 2×2 grid showing all camera feeds simultaneously. */
+function switchToGridView() {
+  if (!state.connected || state.channels.length === 0) {
+    showToast('Connect to an NVR first', 'error');
+    return;
+  }
+
+  state.viewMode = 'grid';
+
+  // Stop single-camera feed
+  if (state.snapshotInterval) clearInterval(state.snapshotInterval);
+
+  // Hide single view, show grid
+  document.getElementById('canvasContainer').style.display = 'none';
+  document.getElementById('gridView').style.display = 'grid';
+
+  // Update live view sub-tab active states
+  document.getElementById('singleViewTab').classList.toggle('active', false);
+  document.getElementById('gridViewTab').classList.toggle('active', true);
+
+  // Clear any maximized state
+  const gridEl = document.getElementById('gridView');
+  gridEl.classList.remove('maximized');
+  document.querySelectorAll('.grid-cell').forEach(c => c.classList.remove('maximized'));
+  state.gridExpandedCell = null;
+
+  // Clear all existing grid intervals
+  state.gridSnapIntervals.forEach(id => id && clearInterval(id));
+  state.gridSnapIntervals = [null, null, null, null];
+
+  // Assign default channels to cells (first N channels) if not already assigned
+  for (let i = 0; i < 4; i++) {
+    if (!state.gridCellChannels[i]) {
+      state.gridCellChannels[i] = state.channels[i]?.id || null;
+    }
+  }
+
+  // Populate channel pickers and start feeds
+  const cells = document.querySelectorAll('.grid-cell');
+  cells.forEach((cell, idx) => {
+    const picker = cell.querySelector('.grid-channel-picker');
+
+    // Populate picker options: blank + all channels
+    picker.innerHTML = '<option value="">— empty —</option>' +
+      state.channels.map(ch => {
+        const name = ch.name || ch.inputPort || `Channel ${ch.id}`;
+        const selected = state.gridCellChannels[idx] === ch.id ? ' selected' : '';
+        return `<option value="${ch.id}"${selected}>${name}</option>`;
+      }).join('');
+
+    // Change handler
+    picker.onchange = () => {
+      state.gridCellChannels[idx] = picker.value || null;
+      startGridCellFeed(idx, state.gridCellChannels[idx]);
+    };
+
+    // Maximize button handler
+    const maxBtn = cell.querySelector('.grid-maximize-btn');
+    maxBtn.onclick = (e) => {
+      e.stopPropagation();
+      toggleMaximizeCell(idx);
+    };
+
+    startGridCellFeed(idx, state.gridCellChannels[idx]);
+  });
+
+  const activeCells = state.gridCellChannels.filter(Boolean).length;
+  setStatus('4-Camera View', `${activeCells} camera${activeCells !== 1 ? 's' : ''}`);
+}
+
+/** Switch back to single camera view. */
+function switchToSingleView() {
+  state.viewMode = 'single';
+
+  // Stop all grid feeds
+  state.gridSnapIntervals.forEach(id => id && clearInterval(id));
+  state.gridSnapIntervals = [null, null, null, null];
+
+  // Show single view, hide grid
+  document.getElementById('canvasContainer').style.display = '';
+  document.getElementById('gridView').style.display = 'none';
+
+  // Restart single-camera feed if we have an active channel
+  if (state.activeChannel) {
+    startSnapshotFeed(state.activeChannel);
+  }
+}
+
+// ─── Grid Cell Maximize ──────────────────────────────────────────────────────
+
+/** Toggle maximize/restore for a single grid cell. */
+function toggleMaximizeCell(cellIdx) {
+  const gridEl = document.getElementById('gridView');
+  const cells = document.querySelectorAll('.grid-cell');
+
+  if (state.gridExpandedCell === cellIdx) {
+    // Restore: remove maximized from grid + all cells
+    gridEl.classList.remove('maximized');
+    cells.forEach(c => c.classList.remove('maximized'));
+    state.gridExpandedCell = null;
+  } else {
+    // Maximize: add maximized to grid + target cell
+    gridEl.classList.add('maximized');
+    cells.forEach(c => c.classList.remove('maximized'));
+    cells[cellIdx].classList.add('maximized');
+    state.gridExpandedCell = cellIdx;
+  }
 }
 
 // ─── Motion Detection Grid <-> Hikvision Hex ────────────────────────────────
@@ -688,11 +1142,37 @@ async function savePrivacyMask() {
 }
 
 // ─── Event Listeners ────────────────────────────────────────────────────────
-document.getElementById('connectBtn').addEventListener('click', connect);
-document.getElementById('motionToggle').addEventListener('click', toggleMotion);
-document.getElementById('privacyToggle').addEventListener('click', togglePrivacy);
+
+// Section tabs (primary navigation)
+document.getElementById('liveViewSectionTab').addEventListener('click', () => switchSection('liveview'));
+document.getElementById('configSectionTab').addEventListener('click', () => switchSection('config'));
+
+// Live View sub-tabs
+document.getElementById('singleViewTab').addEventListener('click', () => {
+  state.viewMode = 'single';
+  switchToLiveViewSingle();
+});
+document.getElementById('gridViewTab').addEventListener('click', switchToGridView);
+
+// Config sub-tabs
 document.getElementById('motionTab').addEventListener('click', () => switchTool('motion'));
 document.getElementById('privacyTab').addEventListener('click', () => switchTool('privacy'));
+
+// Config section collapse toggle
+document.getElementById('configToggleBtn').addEventListener('click', toggleConfig);
+
+// Scan flow
+document.getElementById('startScanBtn').addEventListener('click', startScan);
+document.getElementById('manualEntryBtn').addEventListener('click', showConnectionForm);
+document.getElementById('cancelScanBtn').addEventListener('click', cancelScan);
+document.getElementById('rescanBtn').addEventListener('click', startScan);
+document.getElementById('manualAfterScanBtn').addEventListener('click', showConnectionForm);
+document.getElementById('backToScanBtn').addEventListener('click', showScanIntro);
+
+document.getElementById('connectBtn').addEventListener('click', connect);
+document.getElementById('disconnectBtn').addEventListener('click', disconnect);
+document.getElementById('motionToggle').addEventListener('click', toggleMotion);
+document.getElementById('privacyToggle').addEventListener('click', togglePrivacy);
 document.getElementById('selectAllBtn').addEventListener('click', selectAllGrid);
 document.getElementById('clearAllBtn').addEventListener('click', clearAllGrid);
 document.getElementById('loadMotionBtn').addEventListener('click', loadMotionDetection);
@@ -718,8 +1198,32 @@ window.addEventListener('resize', () => {
 document.addEventListener('keydown', (e) => {
   // Don't capture shortcuts when typing in inputs
   if (e.target.tagName === 'INPUT') return;
-  if (e.key === '1') switchTool('motion');
-  if (e.key === '2') switchTool('privacy');
+
+  // Context-dependent number shortcuts
+  if (e.key === '1') {
+    if (state.activeSection === 'liveview') {
+      state.viewMode = 'single';
+      switchToLiveViewSingle();
+    } else {
+      switchTool('motion');
+    }
+  }
+  if (e.key === '2') {
+    if (state.activeSection === 'liveview') {
+      switchToGridView();
+    } else {
+      switchTool('privacy');
+    }
+  }
+
   if (e.key === 'a' && e.ctrlKey) { e.preventDefault(); selectAllGrid(); }
-  if (e.key === 'Escape') clearAllGrid();
+
+  if (e.key === 'Escape') {
+    // First: restore maximized grid cell
+    if (state.gridExpandedCell !== null) {
+      toggleMaximizeCell(state.gridExpandedCell);
+    } else {
+      clearAllGrid();
+    }
+  }
 });

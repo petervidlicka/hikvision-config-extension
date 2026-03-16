@@ -400,3 +400,316 @@ input[type="range"]::-webkit-slider-thumb {
   width: auto;
   margin: 0;
 }
+
+/* ── Connection Status (after login) ── */
+.connection-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.connection-status-info {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.connection-status-info::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+/* ── 4-Camera Grid View ── */
+.grid-view {
+  flex: 1;
+  min-height: 0; /* prevent flex child from overflowing the viewport */
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 2px;
+  background: #000;
+  padding: 2px;
+  overflow: hidden;
+}
+.grid-cell {
+  position: relative;
+  overflow: hidden;
+  background: #111;
+  min-height: 0; /* prevent grid cell from overflowing */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.grid-cell img.grid-feed {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+}
+.grid-cell img.grid-feed.loaded {
+  display: block;
+}
+
+/* Channel picker bar — overlays the top of each cell */
+.grid-top-bar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+}
+.grid-channel-picker {
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  cursor: pointer;
+  outline: none;
+  max-width: 160px;
+}
+.grid-channel-picker option {
+  background: #1a1a25;
+  color: var(--text);
+}
+
+/* Loading spinner shown while snapshot is in flight */
+.grid-spinner {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+.grid-cell.is-loading .grid-spinner { display: flex; }
+.grid-cell.is-loading .grid-no-feed { display: none; }
+.grid-spinner-text {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.grid-no-feed {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+
+/* ── Network Scanner ── */
+.scan-description {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+/* Radar animation container */
+.radar-container {
+  width: 120px;
+  height: 120px;
+  position: relative;
+  margin: 8px auto 14px;
+}
+
+/* The rotating sweep disc with a conic gradient */
+.radar-disc {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    rgba(74, 108, 247, 0.55) 55deg,
+    transparent 55deg
+  );
+  border: 1px solid rgba(74, 108, 247, 0.4);
+  box-shadow: inset 0 0 20px rgba(74, 108, 247, 0.08);
+  animation: radar-sweep 2s linear infinite;
+}
+
+/* Concentric range rings */
+.radar-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(74, 108, 247, 0.22);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+.radar-ring.r1 { width: 42%; height: 42%; }
+.radar-ring.r2 { width: 72%; height: 72%; }
+
+/* Centre dot */
+.radar-center-dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 6px var(--accent-glow);
+}
+
+@keyframes radar-sweep {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.scan-status-text {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.6;
+  margin-bottom: 10px;
+}
+
+.scan-progress-bar {
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.scan-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.15s linear;
+}
+
+/* Discovered device cards */
+.scan-device-card {
+  padding: 8px 10px;
+  border: 1px solid rgba(74, 108, 247, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: rgba(74, 108, 247, 0.06);
+  margin-bottom: 6px;
+}
+.scan-device-card:hover {
+  background: rgba(74, 108, 247, 0.16);
+  border-color: var(--accent);
+}
+.scan-device-ip {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.scan-device-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+/* "← Back to scan" link inside the login form */
+.scan-back-link {
+  display: block;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-top: 10px;
+  padding: 2px;
+  transition: color 0.15s;
+}
+.scan-back-link:hover { color: var(--text); }
+
+/* ── Collapsible sidebar section ── */
+.section-toggle {
+  cursor: pointer;
+  user-select: none;
+  display: flex !important;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0 !important;
+}
+.section-toggle:hover { color: var(--text); }
+.section-arrow {
+  font-size: 10px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+/* ── Section Tabs (Live View / Configuration) ── */
+.section-tabs {
+  display: flex;
+  gap: 0;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  padding: 0 8px;
+}
+.section-tab {
+  flex: 1;
+  padding: 10px 12px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  color: var(--text-dim);
+  border: none;
+  background: transparent;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.section-tab:hover { color: var(--text); }
+.section-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ── Grid Maximize Button ── */
+.grid-maximize-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  color: #fff;
+  font-size: 14px;
+  padding: 2px 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  line-height: 1;
+}
+.grid-cell:hover .grid-maximize-btn { opacity: 1; }
+.grid-maximize-btn:hover { background: rgba(74, 108, 247, 0.6); }
+
+/* Maximized grid state — show only one cell full-size */
+.grid-view.maximized {
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
+}
+.grid-view.maximized .grid-cell { display: none; }
+.grid-view.maximized .grid-cell.maximized { display: flex; }
+
+/* ── Homepage Branding ── */
+.branding { font-size: 12px; color: #444; }
+.branding a { color: var(--accent); text-decoration: none; }
+.branding a:hover { text-decoration: underline; }
