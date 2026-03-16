@@ -13,9 +13,13 @@ To solve this, I opted to build this lightweight Chrome extension as a straightf
 
 ## Features
 
-- **Live Camera Feeds**: View the live stream from your connected cameras.
-- **Set Motion Detection**: Quickly configure your camera's motion detection settings.
-- **Auto-Discovery**: The extension will automatically scan your local network to identify your Hikvision NVR's IP address. No need to search for it manually, even if the IP happens to change.
+- **Live Camera Feeds**: View single-camera or 4-camera grid view with per-cell channel selection and full-screen maximize.
+- **Motion Detection**: Configure motion detection zones by painting grid cells, toggle detection on/off, and adjust sensitivity.
+- **Privacy Masks**: Draw up to 4 rectangular privacy mask regions on the video feed to block sensitive areas.
+- **Event Actions**: Control what happens when motion is detected — toggle recording, push notifications (Hik-Connect), email alerts, audible warnings, alarm output, white light, and audio alarms per channel.
+- **Auto-Discovery**: Automatically scan your local network to find your Hikvision NVR — no need to search for the IP manually.
+- **Auto-Load Settings**: Configuration settings are automatically fetched from the device when switching tools or channels, with a visual loading state so you always know what's current.
+- **Remember Credentials**: Optionally save your connection details locally for quick reconnection.
 
 > **Note**: You must be connected to your home network to use this extension, as it will not work remotely.
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Hikvision Config Tool",
-  "description": "Configure Hikvision NVR/camera motion detection and privacy masks from any modern browser — no plugins required.",
+  "description": "View live feeds and configure motion detection, privacy masks, and event actions on your Hikvision NVR/camera — no plugins required.",
   "version": "1.0.1",
   "permissions": ["storage", "system.network"],
   "host_permissions": ["http://*/*"],
