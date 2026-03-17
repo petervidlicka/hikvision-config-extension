@@ -389,7 +389,7 @@ ToolRegistry.register({
       state.motionEnabled = md.enabled === 'true';
       document.getElementById('motionToggle').classList.toggle('on', state.motionEnabled);
 
-      // Parse sensitivity from MotionDetectionLayout (grid mode) or MotionDetectionRegionList (region mode)
+      // Parse sensitivity from MotionDetectionLayout
       let sensLayout = md.MotionDetectionLayout;
       if (Array.isArray(sensLayout)) sensLayout = sensLayout[0];
       if (sensLayout) {
@@ -399,52 +399,41 @@ ToolRegistry.register({
         document.getElementById('sensitivityVal').textContent = sens;
       }
 
-      // Parse region-based motion detection zones
+      // Parse region coordinates — stored in MotionDetectionLayout.layout.RegionList.Region
       state.motionRegions = [];
-      let regions = md.MotionDetectionRegionList?.MotionDetectionRegion;
+      let regions = sensLayout?.layout?.RegionList?.Region;
       if (regions) {
         if (!Array.isArray(regions)) regions = [regions];
 
-        // Auto-detect coordinate normalization scale
+        // Auto-detect coordinate scale from the actual max values in the data
         const allXs = [];
         const allYs = [];
         regions.forEach(reg => {
-          if (reg.RegionCoordinatesList) {
-            let coords = reg.RegionCoordinatesList.RegionCoordinates;
-            if (!Array.isArray(coords)) coords = coords ? [coords] : [];
-            coords.forEach(c => {
-              allXs.push(parseInt(c.positionX) || 0);
-              allYs.push(parseInt(c.positionY) || 0);
-            });
-          }
+          let coords = reg.RegionCoordinatesList?.RegionCoordinates;
+          if (!Array.isArray(coords)) coords = coords ? [coords] : [];
+          coords.forEach(c => {
+            allXs.push(parseInt(c.positionX) || 0);
+            allYs.push(parseInt(c.positionY) || 0);
+          });
         });
-        state.motionNormW = (allXs.length && Math.max(...allXs) > 1000) ? 10000 : 704;
-        state.motionNormH = (allYs.length && Math.max(...allYs) > 1000) ? 10000 : 576;
-        console.log('[Motion] Coordinate normalization:', state.motionNormW, 'x', state.motionNormH);
+        state.motionNormW = allXs.length ? Math.max(...allXs) : 10000;
+        state.motionNormH = allYs.length ? Math.max(...allYs) : 10000;
+        console.log('[Motion] Coordinate space:', state.motionNormW, 'x', state.motionNormH);
 
         regions.forEach(reg => {
-          if (reg.RegionCoordinatesList) {
-            let coords = reg.RegionCoordinatesList.RegionCoordinates;
-            if (!Array.isArray(coords)) coords = coords ? [coords] : [];
-            if (coords.length >= 3) {
-              const points = coords.map(c => ({
-                x: ((parseInt(c.positionX) || 0) / state.motionNormW) * dom.canvas.width,
-                y: ((parseInt(c.positionY) || 0) / state.motionNormH) * dom.canvas.height,
-              }));
-              // Extract per-region sensitivity if available
-              const regSens = parseInt(reg.sensitivityLevel);
-              if (!isNaN(regSens)) {
-                state.sensitivity = regSens;
-                document.getElementById('sensitivitySlider').value = regSens;
-                document.getElementById('sensitivityVal').textContent = regSens;
-              }
-              state.motionRegions.push({ points });
-            }
+          let coords = reg.RegionCoordinatesList?.RegionCoordinates;
+          if (!Array.isArray(coords)) coords = coords ? [coords] : [];
+          if (coords.length >= 3) {
+            const points = coords.map(c => ({
+              x: ((parseInt(c.positionX) || 0) / state.motionNormW) * dom.canvas.width,
+              y: ((parseInt(c.positionY) || 0) / state.motionNormH) * dom.canvas.height,
+            }));
+            state.motionRegions.push({ points });
           }
         });
         console.log('[Motion] Loaded', state.motionRegions.length, 'region(s)');
       } else {
-        console.log('[Motion] No MotionDetectionRegionList found — device may use grid mode');
+        console.log('[Motion] No RegionList found in layout');
       }
 
       // Dynamic analysis / target detection (SMD)
@@ -487,51 +476,32 @@ ToolRegistry.register({
     const normW = state.motionNormW;
     const normH = state.motionNormH;
 
-    // Build region XML from canvas polygons
-    let regionsXml = '';
+    // Build the updated RegionList XML from canvas polygons
+    let regionListXml = '<RegionList>';
     state.motionRegions.forEach((reg, i) => {
       let coordsXml = '';
       reg.points.forEach(p => {
         const px = Math.round((p.x / dom.canvas.width) * normW);
         const py = Math.round((p.y / dom.canvas.height) * normH);
-        coordsXml += `
-        <RegionCoordinates>
-          <positionX>${px}</positionX>
-          <positionY>${py}</positionY>
-        </RegionCoordinates>`;
+        coordsXml += `\n<RegionCoordinates><positionX>${px}</positionX><positionY>${py}</positionY></RegionCoordinates>`;
       });
-      regionsXml += `
-    <MotionDetectionRegion>
-      <id>${i + 1}</id>
-      <enabled>true</enabled>
-      <sensitivityLevel>${sensitivity}</sensitivityLevel>
-      <RegionCoordinatesList>${coordsXml}
-      </RegionCoordinatesList>
-    </MotionDetectionRegion>`;
+      regionListXml += `\n<Region><id>${i + 1}</id><RegionCoordinatesList>${coordsXml}\n</RegionCoordinatesList></Region>`;
     });
+    regionListXml += '\n</RegionList>';
 
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<MotionDetection version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
-  <enabled>${state.motionEnabled}</enabled>
-  <enableHighlight>true</enableHighlight>
-  <enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>
-  <samplingInterval>2</samplingInterval>
-  <startTriggerTime>500</startTriggerTime>
-  <endTriggerTime>500</endTriggerTime>
-  <regionType>region</regionType>
-  <MotionDetectionRegionList>${regionsXml}
-  </MotionDetectionRegionList>
-  <TargetDetection>
-    <detectionTarget>
-      <targetType>human</targetType>
-      <enabled>${state.detectHuman}</enabled>
-    </detectionTarget>
-    <detectionTarget>
-      <targetType>vehicle</targetType>
-      <enabled>${state.detectVehicle}</enabled>
-    </detectionTarget>
-  </TargetDetection>
-</MotionDetection>`;
+    // Patch the raw XML from the device — preserving its structure, namespace,
+    // gridMap, timing values, and regionType exactly as the device expects
+    let xml = state.rawMotionXml;
+    xml = xml.replace(/<enabled>[^<]*<\/enabled>/, `<enabled>${state.motionEnabled}</enabled>`);
+    xml = xml.replace(/<sensitivityLevel>[^<]*<\/sensitivityLevel>/, `<sensitivityLevel>${sensitivity}</sensitivityLevel>`);
+
+    // Replace the RegionList block (multiline) with updated polygon coordinates
+    xml = xml.replace(/<RegionList>[\s\S]*?<\/RegionList>/, regionListXml);
+
+    // Update enableDynamicAnalysis if present
+    if (xml.includes('<enableDynamicAnalysis>')) {
+      xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>`);
+    }
 
     console.log('[Motion] Saving XML:', xml);
     setStatus('Saving motion detection config...');
