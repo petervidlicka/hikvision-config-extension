@@ -233,6 +233,17 @@ ToolRegistry.register({
       <label>Sensitivity <span id="sensitivityVal">50</span></label>
       <input type="range" id="sensitivitySlider" min="0" max="100" value="50" />
     </div>
+    <div class="toggle-row">
+      <span>Dynamic Analysis</span>
+      <div class="toggle" id="dynamicAnalysisToggle"></div>
+    </div>
+    <div class="target-detection-row" id="targetDetectionRow">
+      <label class="target-label">Detection Target</label>
+      <div class="target-checkboxes">
+        <label class="target-checkbox"><input type="checkbox" id="detectHuman" /> Person</label>
+        <label class="target-checkbox"><input type="checkbox" id="detectVehicle" /> Vehicle</label>
+      </div>
+    </div>
     <div class="instructions">
       <strong>Click cells</strong> in the grid overlay to toggle motion detection zones.
       <strong>Click &amp; drag</strong> to paint multiple cells.
@@ -266,6 +277,9 @@ ToolRegistry.register({
       grid: [],
       motionEnabled: false,
       sensitivity: 50,
+      dynamicAnalysis: false,
+      detectHuman: false,
+      detectVehicle: false,
       rawMotionXml: null,
     };
   },
@@ -343,7 +357,25 @@ ToolRegistry.register({
       state.motionEnabled = md.enabled === 'true';
       document.getElementById('motionToggle').classList.toggle('on', state.motionEnabled);
 
-      const sensLayout = md.MotionDetectionLayout;
+      // Extract grid dimensions BEFORE parsing gridMap so the hex
+      // is decoded with the correct row/column counts
+      if (md.Grid) {
+        const rows = parseInt(md.Grid.rowGranularity);
+        const cols = parseInt(md.Grid.columnGranularity);
+        if (rows && cols) {
+          state.gridRows = rows;
+          state.gridCols = cols;
+        }
+      }
+      console.log('[Motion] Grid dimensions:', state.gridRows, 'rows x', state.gridCols, 'cols');
+
+      // Handle MotionDetectionLayout — some devices return an array of layouts
+      let sensLayout = md.MotionDetectionLayout;
+      if (Array.isArray(sensLayout)) {
+        console.warn('[Motion] Multiple MotionDetectionLayout entries found, using first');
+        sensLayout = sensLayout[0];
+      }
+
       if (sensLayout) {
         const sens = parseInt(sensLayout.sensitivityLevel) || 50;
         state.sensitivity = sens;
@@ -351,20 +383,33 @@ ToolRegistry.register({
         document.getElementById('sensitivityVal').textContent = sens;
 
         const gridMap = sensLayout.layout?.gridMap;
+        console.log('[Motion] Raw gridMap from device:', gridMap);
         if (gridMap) hexToGrid(gridMap);
       }
 
-      if (md.Grid) {
-        const rows = parseInt(md.Grid.rowGranularity);
-        const cols = parseInt(md.Grid.columnGranularity);
-        if (rows && cols) {
-          state.gridRows = rows;
-          state.gridCols = cols;
-          if (sensLayout?.layout?.gridMap) {
-            hexToGrid(sensLayout.layout.gridMap);
-          }
+      // Dynamic analysis / target detection (SMD)
+      state.dynamicAnalysis = md.enableDynamicAnalysis === 'true';
+      document.getElementById('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
+
+      // Parse target detection — may be nested under MotionDetectionLayout or top-level
+      state.detectHuman = false;
+      state.detectVehicle = false;
+      const parseTargets = (obj) => {
+        if (!obj) return;
+        const targets = obj.TargetDetection?.detectionTarget;
+        if (!targets) return;
+        const list = Array.isArray(targets) ? targets : [targets];
+        for (const t of list) {
+          if (t.targetType === 'human') state.detectHuman = t.enabled === 'true';
+          if (t.targetType === 'vehicle') state.detectVehicle = t.enabled === 'true';
         }
-      }
+      };
+      // Try top-level first, then inside the layout
+      parseTargets(md);
+      if (sensLayout) parseTargets(sensLayout);
+      document.getElementById('detectHuman').checked = state.detectHuman;
+      document.getElementById('detectVehicle').checked = state.detectVehicle;
+      console.log('[Motion] Dynamic analysis:', state.dynamicAnalysis, '| Detect human:', state.detectHuman, '| Detect vehicle:', state.detectVehicle);
 
       redraw();
       showToast('Motion detection config loaded', 'success');
@@ -380,11 +425,38 @@ ToolRegistry.register({
 
     const sensitivity = document.getElementById('sensitivitySlider').value;
     const hexGrid = gridToHex();
+    console.log('[Motion] Saving gridMap:', hexGrid);
 
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+    let xml;
+    if (state.rawMotionXml) {
+      // Preserve the original XML structure from the device, only updating
+      // the fields we've changed. This avoids dropping device-specific fields.
+      xml = state.rawMotionXml;
+      xml = xml.replace(/<enabled>[^<]*<\/enabled>/, `<enabled>${state.motionEnabled}</enabled>`);
+      xml = xml.replace(/<sensitivityLevel>[^<]*<\/sensitivityLevel>/, `<sensitivityLevel>${sensitivity}</sensitivityLevel>`);
+      xml = xml.replace(/<gridMap>[^<]*<\/gridMap>/, `<gridMap>${hexGrid}</gridMap>`);
+
+      // Update dynamic analysis if the field exists in the XML
+      if (xml.includes('<enableDynamicAnalysis>')) {
+        xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>`);
+      }
+
+      // Update target detection enabled states within detectionTarget blocks
+      xml = xml.replace(
+        /(<detectionTarget>\s*<targetType>human<\/targetType>\s*<enabled>)[^<]*(<\/enabled>)/g,
+        `$1${state.detectHuman}$2`
+      );
+      xml = xml.replace(
+        /(<detectionTarget>\s*<targetType>vehicle<\/targetType>\s*<enabled>)[^<]*(<\/enabled>)/g,
+        `$1${state.detectVehicle}$2`
+      );
+    } else {
+      // Fallback: construct XML from scratch when no raw XML is available
+      xml = `<?xml version="1.0" encoding="UTF-8"?>
 <MotionDetection version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
   <enabled>${state.motionEnabled}</enabled>
   <enableHighlight>true</enableHighlight>
+  <enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>
   <samplingInterval>2</samplingInterval>
   <startTriggerTime>500</startTriggerTime>
   <endTriggerTime>500</endTriggerTime>
@@ -400,6 +472,7 @@ ToolRegistry.register({
     </layout>
   </MotionDetectionLayout>
 </MotionDetection>`;
+    }
 
     setStatus('Saving motion detection config...');
     try {
@@ -425,6 +498,18 @@ ToolRegistry.register({
 
     document.getElementById('sensitivitySlider').addEventListener('input', function () {
       document.getElementById('sensitivityVal').textContent = this.value;
+    });
+
+    document.getElementById('dynamicAnalysisToggle').addEventListener('click', () => {
+      state.dynamicAnalysis = !state.dynamicAnalysis;
+      document.getElementById('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
+    });
+
+    document.getElementById('detectHuman').addEventListener('change', function () {
+      state.detectHuman = this.checked;
+    });
+    document.getElementById('detectVehicle').addEventListener('change', function () {
+      state.detectVehicle = this.checked;
     });
 
     document.getElementById('selectAllBtn').addEventListener('click', () => {
