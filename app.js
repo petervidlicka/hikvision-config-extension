@@ -233,8 +233,8 @@ ToolRegistry.register({
     return {
       motionRegions: [],
       drawingPoints: [],
-      motionNormW: 10000,
-      motionNormH: 10000,
+      motionNormW: 0,
+      motionNormH: 0,
       motionEnabled: false,
       sensitivity: 50,
       dynamicAnalysis: false,
@@ -247,6 +247,8 @@ ToolRegistry.register({
   resetState() {
     state.motionRegions = [];
     state.drawingPoints = [];
+    // Reset coordinate space on channel switch so next load re-detects correctly
+    // but keep normW/H across channels on same NVR session (handled in load via sticky logic)
   },
 
   draw(ctx, canvas) {
@@ -405,7 +407,9 @@ ToolRegistry.register({
       if (regions) {
         if (!Array.isArray(regions)) regions = [regions];
 
-        // Auto-detect coordinate scale from the actual max values in the data
+        // Detect coordinate scale from observed max values.
+        // Use sticky expansion — all cameras on the same NVR share one coordinate space,
+        // so we never shrink normW/H between channel loads (only reset on disconnect).
         const allXs = [];
         const allYs = [];
         regions.forEach(reg => {
@@ -416,17 +420,23 @@ ToolRegistry.register({
             allYs.push(parseInt(c.positionY) || 0);
           });
         });
-        state.motionNormW = allXs.length ? Math.max(...allXs) : 10000;
-        state.motionNormH = allYs.length ? Math.max(...allYs) : 10000;
-        console.log('[Motion] Coordinate space:', state.motionNormW, 'x', state.motionNormH);
+        const detectedW = allXs.length ? Math.max(...allXs) : 0;
+        const detectedH = allYs.length ? Math.max(...allYs) : 0;
+        if (detectedW > (state.motionNormW || 0)) state.motionNormW = detectedW;
+        if (detectedH > (state.motionNormH || 0)) state.motionNormH = detectedH;
+        if (!state.motionNormW) state.motionNormW = 10000;
+        if (!state.motionNormH) state.motionNormH = 10000;
+        console.log('[Motion] Coordinate space:', state.motionNormW, 'x', state.motionNormH, '(detected:', detectedW, 'x', detectedH, ')');
 
         regions.forEach(reg => {
           let coords = reg.RegionCoordinatesList?.RegionCoordinates;
           if (!Array.isArray(coords)) coords = coords ? [coords] : [];
           if (coords.length >= 3) {
+            // Hikvision Y=0 is at the bottom of the image (math convention).
+            // Flip Y so device bottom → canvas bottom, device top → canvas top.
             const points = coords.map(c => ({
               x: ((parseInt(c.positionX) || 0) / state.motionNormW) * dom.canvas.width,
-              y: ((parseInt(c.positionY) || 0) / state.motionNormH) * dom.canvas.height,
+              y: (1 - (parseInt(c.positionY) || 0) / state.motionNormH) * dom.canvas.height,
             }));
             state.motionRegions.push({ points });
           }
@@ -476,13 +486,14 @@ ToolRegistry.register({
     const normW = state.motionNormW;
     const normH = state.motionNormH;
 
-    // Build the updated RegionList XML from canvas polygons
+    // Build the updated RegionList XML from canvas polygons.
+    // Flip Y back to device convention: Y=0 at bottom (math), Y=normH at top.
     let regionListXml = '<RegionList>';
     state.motionRegions.forEach((reg, i) => {
       let coordsXml = '';
       reg.points.forEach(p => {
         const px = Math.round((p.x / dom.canvas.width) * normW);
-        const py = Math.round((p.y / dom.canvas.height) * normH);
+        const py = Math.round((1 - p.y / dom.canvas.height) * normH);
         coordsXml += `\n<RegionCoordinates><positionX>${px}</positionX><positionY>${py}</positionY></RegionCoordinates>`;
       });
       regionListXml += `\n<Region><id>${i + 1}</id><RegionCoordinatesList>${coordsXml}\n</RegionCoordinatesList></Region>`;
@@ -498,9 +509,20 @@ ToolRegistry.register({
     // Replace the RegionList block (multiline) with updated polygon coordinates
     xml = xml.replace(/<RegionList>[\s\S]*?<\/RegionList>/, regionListXml);
 
-    // Update enableDynamicAnalysis if present
+    // Update or insert enableDynamicAnalysis
     if (xml.includes('<enableDynamicAnalysis>')) {
       xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>`);
+    } else {
+      xml = xml.replace(/<\/MotionDetection>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>\n</MotionDetection>`);
+    }
+
+    // Update or insert TargetDetection — device XML may not have this block at all
+    const targetXml = `<TargetDetection>\n<detectionTarget><targetType>human</targetType><enabled>${state.detectHuman}</enabled></detectionTarget>\n<detectionTarget><targetType>vehicle</targetType><enabled>${state.detectVehicle}</enabled></detectionTarget>\n</TargetDetection>`;
+    console.log('[Motion] Saving TargetDetection: human=', state.detectHuman, 'vehicle=', state.detectVehicle);
+    if (xml.includes('<TargetDetection>')) {
+      xml = xml.replace(/<TargetDetection>[\s\S]*?<\/TargetDetection>/, targetXml);
+    } else {
+      xml = xml.replace(/<\/MotionDetection>/, `${targetXml}\n</MotionDetection>`);
     }
 
     console.log('[Motion] Saving XML:', xml);
@@ -1378,6 +1400,9 @@ function disconnect() {
 
   // Reset tool state
   ToolRegistry.getAll().forEach(t => t.resetState());
+  // Reset NVR coordinate space so a new connection re-detects from scratch
+  state.motionNormW = 0;
+  state.motionNormH = 0;
 
   // Collapse config section
   state.configExpanded = false;
