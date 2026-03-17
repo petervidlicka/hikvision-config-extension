@@ -164,60 +164,22 @@ function getCanvasPos(e) {
   };
 }
 
-function getGridCell(pos) {
-  const cellW = dom.canvas.width / state.gridCols;
-  const cellH = dom.canvas.height / state.gridRows;
-  return {
-    col: Math.floor(pos.x / cellW),
-    row: Math.floor(pos.y / cellH),
-  };
-}
+// ═══════════════════════════════════════════════════════════════════════════
+// TOOL: Motion Detection (polygon region-based)
+// ═══════════════════════════════════════════════════════════════════════════
 
-// ─── Motion Detection Grid Helpers ──────────────────────────────────────────
-
-function initGrid() {
-  state.grid = Array.from({ length: state.gridRows }, () =>
-    Array.from({ length: state.gridCols }, () => false)
-  );
-}
-
-function gridToHex() {
-  let hex = '';
-  for (let r = 0; r < state.gridRows; r++) {
-    let rowBits = '';
-    for (let c = 0; c < state.gridCols; c++) {
-      rowBits += state.grid[r][c] ? '1' : '0';
-    }
-    while (rowBits.length % 4 !== 0) rowBits += '0';
-    for (let i = 0; i < rowBits.length; i += 4) {
-      hex += parseInt(rowBits.substr(i, 4), 2).toString(16);
+/** Check if a point is inside a polygon using ray casting. */
+function pointInPolygon(px, py, points) {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const xi = points[i].x, yi = points[i].y;
+    const xj = points[j].x, yj = points[j].y;
+    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+      inside = !inside;
     }
   }
-  return hex;
+  return inside;
 }
-
-function hexToGrid(hexStr) {
-  initGrid();
-  if (!hexStr) return;
-  const charsPerRow = Math.ceil(state.gridCols / 4);
-  hexStr = hexStr.toLowerCase().replace(/[^0-9a-f]/g, '');
-  for (let r = 0; r < state.gridRows; r++) {
-    const rowHex = hexStr.substr(r * charsPerRow, charsPerRow);
-    if (!rowHex) continue;
-    let bits = '';
-    for (let i = 0; i < rowHex.length; i++) {
-      bits += parseInt(rowHex[i], 16).toString(2).padStart(4, '0');
-    }
-    for (let c = 0; c < state.gridCols; c++) {
-      if (c < bits.length) state.grid[r][c] = bits[c] === '1';
-    }
-  }
-}
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// TOOL: Motion Detection
-// ═══════════════════════════════════════════════════════════════════════════
 
 ToolRegistry.register({
   id: 'motion',
@@ -245,22 +207,19 @@ ToolRegistry.register({
       </div>
     </div>
     <div class="instructions">
-      <strong>Click cells</strong> in the grid overlay to toggle motion detection zones.
-      <strong>Click &amp; drag</strong> to paint multiple cells.
+      <strong>Click</strong> to place vertices and draw a detection region.
+      <strong>Double-click</strong> or click near the start to close the shape.
+      <strong>Right-click</strong> a region to delete it. Max 8 regions.
     </div>
     <div class="legend">
       <div class="legend-item">
         <div class="legend-swatch" style="background:rgba(74,108,247,0.45)"></div>
-        Active zone
-      </div>
-      <div class="legend-item">
-        <div class="legend-swatch" style="background:transparent; border-color:rgba(255,255,255,0.15)"></div>
-        Inactive
+        Detection zone
       </div>
     </div>
+    <div id="motionRegionList" style="margin-top:10px"></div>
     <div class="btn-group">
-      <button class="btn" id="selectAllBtn">Select All</button>
-      <button class="btn" id="clearAllBtn">Clear All</button>
+      <button class="btn btn-danger" id="clearMotionRegionsBtn">Clear All</button>
     </div>
     <div class="btn-group">
       <button class="btn btn-primary btn-block" id="loadMotionBtn">Load from Device</button>
@@ -272,9 +231,10 @@ ToolRegistry.register({
 
   initState() {
     return {
-      gridCols: 22,
-      gridRows: 18,
-      grid: [],
+      motionRegions: [],
+      drawingPoints: [],
+      motionNormW: 10000,
+      motionNormH: 10000,
       motionEnabled: false,
       sensitivity: 50,
       dynamicAnalysis: false,
@@ -285,60 +245,131 @@ ToolRegistry.register({
   },
 
   resetState() {
-    initGrid();
+    state.motionRegions = [];
+    state.drawingPoints = [];
   },
 
   draw(ctx, canvas) {
-    const cellW = canvas.width / state.gridCols;
-    const cellH = canvas.height / state.gridRows;
-
-    // Fill active cells
-    for (let r = 0; r < state.gridRows; r++) {
-      for (let c = 0; c < state.gridCols; c++) {
-        if (state.grid[r][c]) {
-          ctx.fillStyle = 'rgba(74, 108, 247, 0.35)';
-          ctx.fillRect(c * cellW, r * cellH, cellW, cellH);
-        }
+    // Draw completed regions
+    state.motionRegions.forEach((reg, i) => {
+      if (reg.points.length < 3) return;
+      ctx.beginPath();
+      ctx.moveTo(reg.points[0].x, reg.points[0].y);
+      for (let p = 1; p < reg.points.length; p++) {
+        ctx.lineTo(reg.points[p].x, reg.points[p].y);
       }
-    }
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(74, 108, 247, 0.3)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(74, 108, 247, 0.8)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
 
-    // Grid lines
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.06)';
-    ctx.lineWidth = 0.3;
-    for (let r = 0; r <= state.gridRows; r++) {
+      // Draw vertices
+      reg.points.forEach(p => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(74, 108, 247, 0.9)';
+        ctx.fill();
+      });
+
+      // Label
+      const cx = reg.points.reduce((s, p) => s + p.x, 0) / reg.points.length;
+      const cy = reg.points.reduce((s, p) => s + p.y, 0) / reg.points.length;
+      ctx.fillStyle = 'rgba(74, 108, 247, 0.9)';
+      ctx.font = 'bold 12px "JetBrains Mono", monospace';
+      ctx.fillText(`Region ${i + 1}`, cx - 30, cy + 4);
+    });
+
+    // Draw in-progress polygon
+    if (state.drawingPoints.length > 0) {
+      const pts = state.drawingPoints;
       ctx.beginPath();
-      ctx.moveTo(0, r * cellH);
-      ctx.lineTo(canvas.width, r * cellH);
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let p = 1; p < pts.length; p++) {
+        ctx.lineTo(pts[p].x, pts[p].y);
+      }
+      // Line to current mouse position
+      if (state.mousePos) {
+        ctx.lineTo(state.mousePos.x, state.mousePos.y);
+      }
+      ctx.strokeStyle = 'rgba(74, 108, 247, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([5, 5]);
       ctx.stroke();
-    }
-    for (let c = 0; c <= state.gridCols; c++) {
-      ctx.beginPath();
-      ctx.moveTo(c * cellW, 0);
-      ctx.lineTo(c * cellW, canvas.height);
-      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Draw placed vertices
+      pts.forEach((p, i) => {
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, i === 0 ? 6 : 4, 0, Math.PI * 2);
+        ctx.fillStyle = i === 0 ? 'rgba(74, 247, 108, 0.9)' : 'rgba(74, 108, 247, 0.9)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
     }
   },
 
   onMouseDown(pos, e) {
-    state.isDrawing = true;
-    const cell = getGridCell(pos);
-    if (cell.row >= 0 && cell.row < state.gridRows && cell.col >= 0 && cell.col < state.gridCols) {
-      state.paintValue = !state.grid[cell.row][cell.col];
-      state.grid[cell.row][cell.col] = state.paintValue;
-      redraw();
+    if (e.button === 2) {
+      // Right-click: delete region under cursor
+      for (let i = state.motionRegions.length - 1; i >= 0; i--) {
+        if (pointInPolygon(pos.x, pos.y, state.motionRegions[i].points)) {
+          state.motionRegions.splice(i, 1);
+          this._updateRegionList();
+          redraw();
+          break;
+        }
+      }
+      return;
     }
+
+    // Left click: place vertex or close polygon
+    if (state.drawingPoints.length >= 2) {
+      const first = state.drawingPoints[0];
+      const dist = Math.hypot(pos.x - first.x, pos.y - first.y);
+      if (dist < 12) {
+        // Close polygon — clicked near start vertex
+        if (state.drawingPoints.length >= 3) {
+          state.motionRegions.push({ points: [...state.drawingPoints] });
+          this._updateRegionList();
+        }
+        state.drawingPoints = [];
+        redraw();
+        return;
+      }
+    }
+
+    if (state.motionRegions.length >= 8 && state.drawingPoints.length === 0) {
+      showToast('Maximum 8 detection regions allowed', 'error');
+      return;
+    }
+
+    state.drawingPoints.push({ x: pos.x, y: pos.y });
+    redraw();
   },
 
   onMouseMove(pos, e) {
-    const cell = getGridCell(pos);
-    if (cell.row >= 0 && cell.row < state.gridRows && cell.col >= 0 && cell.col < state.gridCols) {
-      state.grid[cell.row][cell.col] = state.paintValue;
+    state.mousePos = pos;
+    if (state.drawingPoints.length > 0) {
       redraw();
     }
   },
 
   onMouseUp(pos, e) {
-    // Paint mode — nothing special on mouseup
+    // Nothing needed
+  },
+
+  onDblClick(pos, e) {
+    // Double-click: close the polygon if we have enough points
+    if (state.drawingPoints.length >= 3) {
+      state.motionRegions.push({ points: [...state.drawingPoints] });
+      this._updateRegionList();
+    }
+    state.drawingPoints = [];
+    redraw();
   },
 
   async load() {
@@ -353,38 +384,67 @@ ToolRegistry.register({
 
       const md = data.motionDetection;
       state.rawMotionXml = data.rawXml;
+      console.log('[Motion] Raw XML:', data.rawXml);
 
       state.motionEnabled = md.enabled === 'true';
       document.getElementById('motionToggle').classList.toggle('on', state.motionEnabled);
 
-      // Extract grid dimensions BEFORE parsing gridMap so the hex
-      // is decoded with the correct row/column counts
-      if (md.Grid) {
-        const rows = parseInt(md.Grid.rowGranularity);
-        const cols = parseInt(md.Grid.columnGranularity);
-        if (rows && cols) {
-          state.gridRows = rows;
-          state.gridCols = cols;
-        }
-      }
-      console.log('[Motion] Grid dimensions:', state.gridRows, 'rows x', state.gridCols, 'cols');
-
-      // Handle MotionDetectionLayout — some devices return an array of layouts
+      // Parse sensitivity from MotionDetectionLayout (grid mode) or MotionDetectionRegionList (region mode)
       let sensLayout = md.MotionDetectionLayout;
-      if (Array.isArray(sensLayout)) {
-        console.warn('[Motion] Multiple MotionDetectionLayout entries found, using first');
-        sensLayout = sensLayout[0];
-      }
-
+      if (Array.isArray(sensLayout)) sensLayout = sensLayout[0];
       if (sensLayout) {
         const sens = parseInt(sensLayout.sensitivityLevel) || 50;
         state.sensitivity = sens;
         document.getElementById('sensitivitySlider').value = sens;
         document.getElementById('sensitivityVal').textContent = sens;
+      }
 
-        const gridMap = sensLayout.layout?.gridMap;
-        console.log('[Motion] Raw gridMap from device:', gridMap);
-        if (gridMap) hexToGrid(gridMap);
+      // Parse region-based motion detection zones
+      state.motionRegions = [];
+      let regions = md.MotionDetectionRegionList?.MotionDetectionRegion;
+      if (regions) {
+        if (!Array.isArray(regions)) regions = [regions];
+
+        // Auto-detect coordinate normalization scale
+        const allXs = [];
+        const allYs = [];
+        regions.forEach(reg => {
+          if (reg.RegionCoordinatesList) {
+            let coords = reg.RegionCoordinatesList.RegionCoordinates;
+            if (!Array.isArray(coords)) coords = coords ? [coords] : [];
+            coords.forEach(c => {
+              allXs.push(parseInt(c.positionX) || 0);
+              allYs.push(parseInt(c.positionY) || 0);
+            });
+          }
+        });
+        state.motionNormW = (allXs.length && Math.max(...allXs) > 1000) ? 10000 : 704;
+        state.motionNormH = (allYs.length && Math.max(...allYs) > 1000) ? 10000 : 576;
+        console.log('[Motion] Coordinate normalization:', state.motionNormW, 'x', state.motionNormH);
+
+        regions.forEach(reg => {
+          if (reg.RegionCoordinatesList) {
+            let coords = reg.RegionCoordinatesList.RegionCoordinates;
+            if (!Array.isArray(coords)) coords = coords ? [coords] : [];
+            if (coords.length >= 3) {
+              const points = coords.map(c => ({
+                x: ((parseInt(c.positionX) || 0) / state.motionNormW) * dom.canvas.width,
+                y: ((parseInt(c.positionY) || 0) / state.motionNormH) * dom.canvas.height,
+              }));
+              // Extract per-region sensitivity if available
+              const regSens = parseInt(reg.sensitivityLevel);
+              if (!isNaN(regSens)) {
+                state.sensitivity = regSens;
+                document.getElementById('sensitivitySlider').value = regSens;
+                document.getElementById('sensitivityVal').textContent = regSens;
+              }
+              state.motionRegions.push({ points });
+            }
+          }
+        });
+        console.log('[Motion] Loaded', state.motionRegions.length, 'region(s)');
+      } else {
+        console.log('[Motion] No MotionDetectionRegionList found — device may use grid mode');
       }
 
       // Dynamic analysis / target detection (SMD)
@@ -404,13 +464,13 @@ ToolRegistry.register({
           if (t.targetType === 'vehicle') state.detectVehicle = t.enabled === 'true';
         }
       };
-      // Try top-level first, then inside the layout
       parseTargets(md);
       if (sensLayout) parseTargets(sensLayout);
       document.getElementById('detectHuman').checked = state.detectHuman;
       document.getElementById('detectVehicle').checked = state.detectVehicle;
       console.log('[Motion] Dynamic analysis:', state.dynamicAnalysis, '| Detect human:', state.detectHuman, '| Detect vehicle:', state.detectVehicle);
 
+      this._updateRegionList();
       redraw();
       showToast('Motion detection config loaded', 'success');
       setStatus('Config loaded', `Channel ${state.activeChannel}`);
@@ -424,35 +484,33 @@ ToolRegistry.register({
     if (!state.config || !state.activeChannel) return;
 
     const sensitivity = document.getElementById('sensitivitySlider').value;
-    const hexGrid = gridToHex();
-    console.log('[Motion] Saving gridMap:', hexGrid);
+    const normW = state.motionNormW;
+    const normH = state.motionNormH;
 
-    let xml;
-    if (state.rawMotionXml) {
-      // Preserve the original XML structure from the device, only updating
-      // the fields we've changed. This avoids dropping device-specific fields.
-      xml = state.rawMotionXml;
-      xml = xml.replace(/<enabled>[^<]*<\/enabled>/, `<enabled>${state.motionEnabled}</enabled>`);
-      xml = xml.replace(/<sensitivityLevel>[^<]*<\/sensitivityLevel>/, `<sensitivityLevel>${sensitivity}</sensitivityLevel>`);
-      xml = xml.replace(/<gridMap>[^<]*<\/gridMap>/, `<gridMap>${hexGrid}</gridMap>`);
+    // Build region XML from canvas polygons
+    let regionsXml = '';
+    state.motionRegions.forEach((reg, i) => {
+      let coordsXml = '';
+      reg.points.forEach(p => {
+        const px = Math.round((p.x / dom.canvas.width) * normW);
+        const py = Math.round((p.y / dom.canvas.height) * normH);
+        coordsXml += `
+        <RegionCoordinates>
+          <positionX>${px}</positionX>
+          <positionY>${py}</positionY>
+        </RegionCoordinates>`;
+      });
+      regionsXml += `
+    <MotionDetectionRegion>
+      <id>${i + 1}</id>
+      <enabled>true</enabled>
+      <sensitivityLevel>${sensitivity}</sensitivityLevel>
+      <RegionCoordinatesList>${coordsXml}
+      </RegionCoordinatesList>
+    </MotionDetectionRegion>`;
+    });
 
-      // Update dynamic analysis if the field exists in the XML
-      if (xml.includes('<enableDynamicAnalysis>')) {
-        xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>`);
-      }
-
-      // Update target detection enabled states within detectionTarget blocks
-      xml = xml.replace(
-        /(<detectionTarget>\s*<targetType>human<\/targetType>\s*<enabled>)[^<]*(<\/enabled>)/g,
-        `$1${state.detectHuman}$2`
-      );
-      xml = xml.replace(
-        /(<detectionTarget>\s*<targetType>vehicle<\/targetType>\s*<enabled>)[^<]*(<\/enabled>)/g,
-        `$1${state.detectVehicle}$2`
-      );
-    } else {
-      // Fallback: construct XML from scratch when no raw XML is available
-      xml = `<?xml version="1.0" encoding="UTF-8"?>
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <MotionDetection version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
   <enabled>${state.motionEnabled}</enabled>
   <enableHighlight>true</enableHighlight>
@@ -460,20 +518,22 @@ ToolRegistry.register({
   <samplingInterval>2</samplingInterval>
   <startTriggerTime>500</startTriggerTime>
   <endTriggerTime>500</endTriggerTime>
-  <regionType>grid</regionType>
-  <Grid>
-    <rowGranularity>${state.gridRows}</rowGranularity>
-    <columnGranularity>${state.gridCols}</columnGranularity>
-  </Grid>
-  <MotionDetectionLayout version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
-    <sensitivityLevel>${sensitivity}</sensitivityLevel>
-    <layout>
-      <gridMap>${hexGrid}</gridMap>
-    </layout>
-  </MotionDetectionLayout>
+  <regionType>region</regionType>
+  <MotionDetectionRegionList>${regionsXml}
+  </MotionDetectionRegionList>
+  <TargetDetection>
+    <detectionTarget>
+      <targetType>human</targetType>
+      <enabled>${state.detectHuman}</enabled>
+    </detectionTarget>
+    <detectionTarget>
+      <targetType>vehicle</targetType>
+      <enabled>${state.detectVehicle}</enabled>
+    </detectionTarget>
+  </TargetDetection>
 </MotionDetection>`;
-    }
 
+    console.log('[Motion] Saving XML:', xml);
     setStatus('Saving motion detection config...');
     try {
       await sendMsg({
@@ -512,15 +572,10 @@ ToolRegistry.register({
       state.detectVehicle = this.checked;
     });
 
-    document.getElementById('selectAllBtn').addEventListener('click', () => {
-      for (let r = 0; r < state.gridRows; r++)
-        for (let c = 0; c < state.gridCols; c++)
-          state.grid[r][c] = true;
-      redraw();
-    });
-
-    document.getElementById('clearAllBtn').addEventListener('click', () => {
-      initGrid();
+    document.getElementById('clearMotionRegionsBtn').addEventListener('click', () => {
+      state.motionRegions = [];
+      state.drawingPoints = [];
+      this._updateRegionList();
       redraw();
     });
 
@@ -532,6 +587,27 @@ ToolRegistry.register({
   },
 
   onActivate() {},
+
+  /** Render the region list in the sidebar. */
+  _updateRegionList() {
+    const list = document.getElementById('motionRegionList');
+    if (!list) return;
+    list.innerHTML = state.motionRegions.map((r, i) => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;font-family:var(--mono)">
+        <span style="color:var(--text-dim)">Region ${i + 1} (${r.points.length} pts)</span>
+        <button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete-motion="${i}">x</button>
+      </div>
+    `).join('');
+
+    list.querySelectorAll('[data-delete-motion]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.dataset.deleteMotion);
+        state.motionRegions.splice(idx, 1);
+        this._updateRegionList();
+        redraw();
+      });
+    });
+  },
 });
 
 
@@ -1039,9 +1115,6 @@ function initToolRegistry() {
     Object.assign(state, t.initState());
   });
 
-  // Initialize grid after state is merged
-  initGrid();
-
   // Let each tool bind its panel event listeners (DOM is now ready)
   tools.forEach(t => t.bindPanel());
 
@@ -1085,10 +1158,19 @@ dom.canvas.addEventListener('mousedown', (e) => {
 
 dom.canvas.addEventListener('mousemove', (e) => {
   if (state.activeSection !== 'config') return;
-  if (!state.isDrawing) return;
+  // Allow mousemove even when not drawing (for polygon vertex preview)
+  if (!state.isDrawing && !(state.drawingPoints && state.drawingPoints.length > 0)) return;
   const pos = getCanvasPos(e);
   const tool = ToolRegistry.get(state.activeTool);
   if (tool?.onMouseMove) tool.onMouseMove(pos, e);
+});
+
+dom.canvas.addEventListener('dblclick', (e) => {
+  if (state.activeSection !== 'config') return;
+  e.preventDefault();
+  const pos = getCanvasPos(e);
+  const tool = ToolRegistry.get(state.activeTool);
+  if (tool?.onDblClick) tool.onDblClick(pos, e);
 });
 
 dom.canvas.addEventListener('mouseup', (e) => {
@@ -1710,20 +1792,12 @@ document.addEventListener('keydown', (e) => {
     }
   }
 
-  if (e.key === 'a' && e.ctrlKey) {
-    e.preventDefault();
-    // Select all grid cells (motion-specific, but harmless for other tools)
-    for (let r = 0; r < state.gridRows; r++)
-      for (let c = 0; c < state.gridCols; c++)
-        state.grid[r][c] = true;
-    redraw();
-  }
-
   if (e.key === 'Escape') {
     if (state.gridExpandedCell !== null) {
       toggleMaximizeCell(state.gridExpandedCell);
-    } else {
-      initGrid();
+    } else if (state.drawingPoints && state.drawingPoints.length > 0) {
+      // Cancel in-progress polygon drawing
+      state.drawingPoints = [];
       redraw();
     }
   }
