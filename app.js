@@ -486,44 +486,43 @@ ToolRegistry.register({
     const normW = state.motionNormW;
     const normH = state.motionNormH;
 
-    // Build the updated RegionList XML from canvas polygons.
+    // Build the updated RegionList XML matching the native app's format exactly.
     // Flip Y back to device convention: Y=0 at bottom (math), Y=normH at top.
-    let regionListXml = '<RegionList>';
+    // Native app uses: <RegionList size="N"> and <Region xmlns=""> (empty namespace override).
+    let regionListXml = `<RegionList size="${state.motionRegions.length}">`;
     state.motionRegions.forEach((reg, i) => {
       let coordsXml = '';
       reg.points.forEach(p => {
         const px = Math.round((p.x / dom.canvas.width) * normW);
         const py = Math.round((1 - p.y / dom.canvas.height) * normH);
-        coordsXml += `\n<RegionCoordinates><positionX>${px}</positionX><positionY>${py}</positionY></RegionCoordinates>`;
+        coordsXml += `<RegionCoordinates><positionX>${px}</positionX><positionY>${py}</positionY></RegionCoordinates>`;
       });
-      regionListXml += `\n<Region><id>${i + 1}</id><RegionCoordinatesList>${coordsXml}\n</RegionCoordinatesList></Region>`;
+      regionListXml += `<Region xmlns=""><id>${i + 1}</id><RegionCoordinatesList>${coordsXml}</RegionCoordinatesList></Region>`;
     });
-    regionListXml += '\n</RegionList>';
+    regionListXml += '</RegionList>';
 
     // Patch the raw XML from the device — preserving its structure, namespace,
-    // gridMap, timing values, and regionType exactly as the device expects
+    // gridMap, and timing values. We match the native app's save behaviour exactly.
     let xml = state.rawMotionXml;
     xml = xml.replace(/<enabled>[^<]*<\/enabled>/, `<enabled>${state.motionEnabled}</enabled>`);
     xml = xml.replace(/<sensitivityLevel>[^<]*<\/sensitivityLevel>/, `<sensitivityLevel>${sensitivity}</sensitivityLevel>`);
 
-    // Replace the RegionList block (multiline) with updated polygon coordinates
-    xml = xml.replace(/<RegionList>[\s\S]*?<\/RegionList>/, regionListXml);
+    // Switch to region mode — device ignores RegionList when regionType is "grid"
+    xml = xml.replace(/<regionType>[^<]*<\/regionType>/, '<regionType>region</regionType>');
 
-    // Update or insert enableDynamicAnalysis
+    // Clear gridMap — native app zeroes it out when saving in region mode
+    xml = xml.replace(/<gridMap>([^<]*)<\/gridMap>/, (_, hex) => `<gridMap>${'0'.repeat(hex.length)}</gridMap>`);
+
+    // Replace the RegionList block with updated polygon coordinates
+    // Handle both plain <RegionList> and <RegionList size="..."> from previous saves
+    xml = xml.replace(/<RegionList[^>]*>[\s\S]*?<\/RegionList>/, regionListXml);
+
+    // Update enableDynamicAnalysis only if the device already has this field
     if (xml.includes('<enableDynamicAnalysis>')) {
       xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>`);
-    } else {
-      xml = xml.replace(/<\/MotionDetection>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>\n</MotionDetection>`);
     }
-
-    // Update or insert TargetDetection — device XML may not have this block at all
-    const targetXml = `<TargetDetection>\n<detectionTarget><targetType>human</targetType><enabled>${state.detectHuman}</enabled></detectionTarget>\n<detectionTarget><targetType>vehicle</targetType><enabled>${state.detectVehicle}</enabled></detectionTarget>\n</TargetDetection>`;
-    console.log('[Motion] Saving TargetDetection: human=', state.detectHuman, 'vehicle=', state.detectVehicle);
-    if (xml.includes('<TargetDetection>')) {
-      xml = xml.replace(/<TargetDetection>[\s\S]*?<\/TargetDetection>/, targetXml);
-    } else {
-      xml = xml.replace(/<\/MotionDetection>/, `${targetXml}\n</MotionDetection>`);
-    }
+    // Note: person/vehicle target detection is stored via a different ISAPI endpoint,
+    // not in the motionDetection XML — the native app uses <targetType xmlns=""> as an empty element
 
     console.log('[Motion] Saving XML:', xml);
     setStatus('Saving motion detection config...');
