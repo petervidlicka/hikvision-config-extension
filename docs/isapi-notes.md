@@ -364,11 +364,15 @@ same size. A camera connected directly already serves its native main-stream
 size on `{id}01`, so it keeps the plain URL. The size asked for is the
 channel's own main stream (`{id}01` in the stream list, read once per device at
 Connect; 1920×1080 when unknown), so a device that honours it isn't asked to
-scale down. The outcome is remembered per channel until disconnect: a bigger
-still keeps the sized URL; an error answer, something other than an image or
-a still no bigger than the plain one keeps the plain URL. A timeout decides
-nothing. The sized URL is still a `/picture` URL, so it is read as bytes with
-the 10 s full-size time limit.
+scale down. The check runs with the feed's first frame, also when the channel
+answered 503 at first (a camera starting) and recovered later. The outcome is
+remembered per channel until disconnect: a bigger still keeps the sized URL; a
+refusal (404, 403 `notSupport`, 400 `badParameters`, any other 4xx), something
+other than an image or a still no bigger than the plain one keeps the plain
+URL. A timeout, a 503 (`serviceUnavailable`, `deviceBusy`) or another 5xx is
+about the moment, so it decides nothing: that feed shows the plain still and
+the channel's next feed checks again. The sized URL is still a `/picture` URL,
+so it is read as bytes with the 10 s full-size time limit.
 
 Every frame (single view, grid cells, playback stills) is shown at its
 channel's main-stream aspect when its own differs from it by more than 3 %

@@ -159,10 +159,12 @@ export function fullSizePicturePath(channelId, size) {
  *
  * The outcome is passed to `remember`: the full-size URL when it sent a
  * bigger still, or null when the plain URL is to be kept (a camera with
- * different main and sub stills, or without a sub stream; or the sized
- * request answered with an error, something other than an image, or a still
- * no bigger than the plain one). A request that got no answer decides
- * nothing, and the plain URL serves meanwhile.
+ * different main and sub stills, or without a sub stream; or the device
+ * refused the sized request (isRefusal), answered it with something other
+ * than an image, or with a still no bigger than the plain one). A request
+ * that got no answer, or an answer that may be different a moment later (a
+ * busy device or camera, 503), decides nothing: the plain URL serves
+ * meanwhile, and the next feed of the channel looks again.
  * @param {object} init
  * @param {Pick<Channel, 'id'|'kind'>} init.channel
  * @param {Size|undefined} init.streamSize - the main stream's size (Channel.mainStreamSize);
@@ -207,9 +209,10 @@ export function fullSizeUpgrade({ channel, streamSize, fetchSnapshot, remember }
 
 /**
  * One request of fullSizeUpgrade's: the frame; 'refused' when the device
- * answered without one (an error status, or something other than an image);
- * null when nothing answered (a timeout or network failure), which decides
- * nothing.
+ * settled that the URL has none for this channel (isRefusal); null when
+ * nothing answered (a timeout or network failure) or the device answered
+ * with an error that may be gone a moment later (503 for a busy device or a
+ * camera that is starting, an internal error), which decides nothing.
  * @param {FetchSnapshot} fetchSnapshot
  * @param {string} path
  * @param {RequestOptions} options
@@ -221,10 +224,30 @@ async function askOnce(fetchSnapshot, path, options) {
     return await fetchSnapshot(path, options);
   } catch (err) {
     if (options.signal?.aborted) throw err;
-    if (err instanceof IsapiError || err instanceof NotAnImageError) return 'refused';
-    if (err instanceof NetworkError) return null;
+    if (isRefusal(err)) return 'refused';
+    if (err instanceof IsapiError || err instanceof NetworkError) return null;
     throw err;
   }
+}
+
+/** Reasons a device gives for an error that is about now, not about the request: ask again later. */
+const BUSY_REASONS = new Set(['deviceBusy', 'serviceUnavailable']);
+
+/**
+ * Whether an answer settles that a URL has no frame for this channel, for as
+ * long as the connection lasts: "not here" (isFallbackError), any other
+ * refusal of the request itself (a 4xx, such as 400 badParameters from
+ * firmware without the size parameters), or something other than an image.
+ * A busy device or camera (503 serviceUnavailable, deviceBusy) or an
+ * internal error (5xx) is about the moment, and isn't one.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isRefusal(err) {
+  if (err instanceof NotAnImageError) return true;
+  if (!(err instanceof IsapiError)) return false;
+  if (err.reason !== null && BUSY_REASONS.has(err.reason)) return false;
+  return isFallbackError(err) || (err.httpStatus >= 400 && err.httpStatus < 500);
 }
 
 /**
@@ -271,8 +294,8 @@ function servesNoFrames(err) {
  * answered, just not with a frame (503 for a camera that isn't there), is
  * kept like one that works: the next URLs would only answer the same way.
  *
- * An `upgrade` (e.g. fullSizeUpgrade) runs once, after the first URL that
- * serves frames is found, and may swap it for a better one.
+ * An `upgrade` (e.g. fullSizeUpgrade) runs once, with the first frame the
+ * source gets, and may swap the URL that served it for a better one.
  *
  * @example
  * const source = new SnapshotSource(snapshotPaths(channel, 'sub'), (path, options) => Isapi.fetchSnapshot(config, path, options));
@@ -293,8 +316,8 @@ export class SnapshotSource {
     /** @type {FetchSnapshot} */
     this.fetchSnapshot = fetchSnapshot;
     /**
-     * Still to run: cleared once it has looked, and kept for the next
-     * resolve when it was cut short (the feed paused, say).
+     * Still to run: cleared once it has looked, and kept for the next frame
+     * when it was cut short (the feed paused, say).
      * @type {SnapshotUpgrade|null}
      */
     this.upgrade = upgrade;
@@ -327,9 +350,10 @@ export class SnapshotSource {
    */
   async next(options = {}) {
     try {
-      const jpeg = this.path === null ? await this.resolve(options) : await this.fetchSnapshot(this.path, options);
+      const jpeg = this.path === null ? await this.findPath(options) : await this.fetchSnapshot(this.path, options);
+      const frame = this.upgrade ? await this.runUpgrade(jpeg, options) : jpeg;
       this.failures = 0;
-      return jpeg;
+      return frame;
     } catch (err) {
       // A request the caller cancelled says nothing about the channel
       if (!options.signal?.aborted) this.countFailure();
@@ -344,26 +368,21 @@ export class SnapshotSource {
   }
 
   /**
-   * Find the URL to keep (findPath), then let the upgrade, if any is still
-   * to run, swap it for a better one. A better URL is tried first from then
-   * on, also when the URL is to be found again. An upgrade cut short (the
-   * feed paused or stopped) runs again with the next request.
+   * Let the upgrade swap the URL that just served a frame for a better one.
+   * It runs with the first frame, whether the URL was just found or kept
+   * from a request that failed (a camera that answered 503 while starting
+   * and then recovered). A better URL is tried first from then on, also
+   * when the URL is to be found again. An upgrade cut short (the feed paused
+   * or stopped) runs again with the next frame.
    * @private
+   * @param {JpegBytes} jpeg - the frame the kept URL just served
    * @param {RequestOptions} options
-   * @returns {Promise<JpegBytes>}
+   * @returns {Promise<JpegBytes>} the better URL's frame, or `jpeg`
    */
-  async resolve(options) {
-    const jpeg = await this.findPath(options);
+  async runUpgrade(jpeg, options) {
     const upgrade = this.upgrade;
     if (!upgrade || this.path === null) return jpeg;
-    let better;
-    try {
-      better = await upgrade({ path: this.path, jpeg }, options);
-    } catch (err) {
-      // Find the URL again next time, then look again
-      this.path = null;
-      throw err;
-    }
+    const better = await upgrade({ path: this.path, jpeg }, options);
     this.upgrade = null;
     if (!better) return jpeg;
     this.paths = [better.path, ...this.paths.filter(path => path !== better.path)];

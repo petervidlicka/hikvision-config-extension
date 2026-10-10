@@ -222,7 +222,8 @@ describe('full-size stills', () => {
   it('keeps the plain still when the sized one is refused, not an image, or no bigger', async () => {
     const answers = [
       () => answer(400, 'badParameters'),
-      () => answer(503, 'serviceUnavailable'),
+      () => answer(404, null),
+      () => answer(403, 'lowPrivilege'),
       () => new NotAnImageError({ method: 'GET', path: sized, contentType: 'text/html' }),
       nvrStill, // firmware that ignores the size
     ];
@@ -236,13 +237,52 @@ describe('full-size stills', () => {
     }
   });
 
-  it('decides nothing when the sized request gets no answer, and serves the plain still meanwhile', async () => {
-    const timeout = new TimeoutError({ method: 'GET', path: sized, address: 'h:80', timeoutMs: 10000 });
-    const device = fakeDevice({ [plain]: nvrStill, [sized]: () => timeout });
+  it('decides nothing when the sized request gets no answer or a busy one, and serves the plain still meanwhile', async () => {
+    const answers = [
+      () => new TimeoutError({ method: 'GET', path: sized, address: 'h:80', timeoutMs: 10000 }),
+      () => answer(503, 'serviceUnavailable'), // the camera dropped for a moment
+      () => new IsapiError({ method: 'GET', path: sized, httpStatus: 503, status: null }),
+      () => new IsapiError({ method: 'GET', path: sized, httpStatus: 403, status: { statusCode: 2, statusString: 'Device Busy', subStatusCode: null, subStatusString: null } }),
+      () => answer(500, 'deviceError'),
+    ];
+    for (const sizedAnswer of answers) {
+      const device = fakeDevice({ [plain]: nvrStill, [sized]: sizedAnswer });
+      const { source, decided } = mainSource(nvrCamera, device);
+      expect(jpegSize(await source.next())).toEqual({ width: 704, height: 576 });
+      // This feed keeps the plain still; nothing is remembered, so the channel's next feed looks again
+      await source.next();
+      expect(device.calls).toEqual([plain, sized, plain]);
+      expect([decided, source.path, source.failures]).toEqual([[], plain, 0]);
+    }
+  });
+
+  it('looks with the first frame after the channel recovers, also when the URL was kept from a failure', async () => {
+    let starting = true;
+    const device = fakeDevice({ [plain]: () => (starting ? noCamera() : nvrStill()), [sized]: nvrFullStill });
     const { source, decided } = mainSource(nvrCamera, device);
-    expect(jpegSize(await source.next())).toEqual({ width: 704, height: 576 });
-    expect(decided).toEqual([]);
-    expect(source.path).toBe(plain);
+    // A camera still starting: the device answers 503, and the plain URL is kept
+    await expect(source.next()).rejects.toBeInstanceOf(IsapiError);
+    await expect(source.next()).rejects.toBeInstanceOf(IsapiError);
+    expect([source.path, source.noSignal]).toEqual([plain, true]);
+    starting = false;
+    expect(jpegSize(await source.next())).toEqual({ width: 1920, height: 1088 });
+    await source.next();
+    expect(device.calls).toEqual([plain, plain, plain, sized, sized]);
+    expect([decided, source.path, source.failures]).toEqual([[sized], sized, 0]);
+  });
+
+  it('looks once a camera listed offline delivers its first frame', async () => {
+    let online = false;
+    const device = fakeDevice({ [plain]: () => (online ? nvrStill() : noCamera()), [sized]: nvrFullStill });
+    const decided = [];
+    const source = new SnapshotSource(snapshotPaths(nvrCamera, 'main'), device.fetchSnapshot, {
+      offline: true,
+      upgrade: fullSizeUpgrade({ channel: nvrCamera, streamSize: mainStream, fetchSnapshot: device.fetchSnapshot, remember: path => decided.push(path) }),
+    });
+    await expect(source.next()).rejects.toBeInstanceOf(IsapiError);
+    online = true;
+    expect(jpegSize(await source.next())).toEqual({ width: 1920, height: 1088 });
+    expect([device.calls, decided]).toEqual([[plain, plain, sized], [sized]]);
   });
 
   it('looks again after a pause cut it short', async () => {
@@ -280,6 +320,12 @@ describe('full-size stills', () => {
     ({ source, decided } = mainSource(camera, device));
     await source.next();
     expect([device.calls, decided]).toEqual([[plain, sub], [null]]);
+
+    // A sub stream busy for a moment shows nothing about it: the next feed looks again
+    device = fakeDevice({ [plain]: sizedFrame(2688, 1520), [sub]: noCamera });
+    ({ source, decided } = mainSource(camera, device));
+    await source.next();
+    expect([device.calls, decided]).toEqual([[plain, sub], []]);
 
     // An analog channel serving the same small still on both streams, like the DS-7604NI's IP cameras
     device = fakeDevice({ [plain]: nvrStill, [sub]: nvrStill, [sized]: nvrFullStill });
