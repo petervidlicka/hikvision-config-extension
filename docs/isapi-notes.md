@@ -58,6 +58,17 @@ uses the 22×18 cell grid.
   the slider is locked and the stored level is sent back unchanged, never
   snapped to a guessed step: the DS-7604NI stores a level between steps as the
   step below (37 became 20).
+- **Region without grid is the legacy ROI mode.** When `regionType@opt` offers
+  `region` but not `grid`, the web UI doesn't draw polygons: it shows the
+  stored regions as rectangles scaled by `normalizedScreenWidth/Height`
+  (`transRegionToPlugin`) and writes the plugin's coordinates back in those
+  units. No device seen so far uses this mode, so its scale and Y direction
+  are unverified. The extension uses polygons only when the capabilities offer
+  both, and shows the regions read-only ("Editing regions isn't supported for
+  this camera yet") for region-only cameras and for any motion document that
+  declares a coordinate space other than 1000, instead of saving them at an
+  assumed scale. Saving then sends the area (`regionType`, `gridMap`,
+  `RegionList`) back as loaded, with the other settings changed.
 - Max polygons: `MotionDetectionLayout > RegionList@size` in capabilities (default 4).
 - Max points per polygon: `MotionDetectionLayout > regionEdgesNum@max` + 1 (default 5).
 - Saving polygons: removes every `<Region>`, appends the new ones to `RegionList`,

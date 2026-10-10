@@ -274,8 +274,9 @@ function picturesOn(day) {
  * (e.g. ['4']); their snapshots answer 503 serviceUnavailable, as an empty
  * channel's do on the DS-7604NI. `privacy.read(path)` shows the privacy
  * masks a channel stores, `triggers.read(channel)` its motion trigger.
- * `motionDocs` replaces a channel's motion document (by channel id; the
- * others are the DS-7604NI's channel 1).
+ * `motionDocs` and `motionCaps` replace a channel's motion document and
+ * capabilities (by channel id; the others are the DS-7604NI's channel 1, and
+ * channel 2 offers only the grid).
  *
  * Every day has `recordings` (wall-clock times; the search answers for the
  * day it starts on) and a stored picture at 00:46:08, and `searches` lists
@@ -321,6 +322,8 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     triggers: createTriggerStore(),
     /** @type {Record<string, string>} a channel's motion document instead of the DS-7604NI's */
     motionDocs: {},
+    /** @type {Record<string, string>} a channel's motion capabilities (at both URLs) instead of the DS-7604NI's */
+    motionCaps: {},
     /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
     recordedFrames: /** @type {'real'|'ignoresTime'|'none'} */ ('real'),
     /** What /ISAPI/System/time says, e.g. "2026-10-25T15:00:00+01:00"; null: the browser's wall clock */
@@ -498,7 +501,9 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     }
     // Channel 2 is a camera that only supports the cell grid
     if (p.endsWith('/motionDetection/capabilities')) {
-      return xml(p.includes('/channels/2/') ? motionCapabilities.replace('opt="grid,region"', 'opt="grid"') : motionCapabilities);
+      const channel = channelOf(p);
+      return xml(device.motionCaps[channel] ??
+        (channel === '2' ? motionCapabilities.replace('opt="grid,region"', 'opt="grid"') : motionCapabilities));
     }
     if (p.endsWith('/motionDetection/layout/capabilities')) return xml(motionLayoutCapabilities);
     if (p.endsWith('/motionDetection')) return xml(device.motionDocs[channelOf(p)] ?? motionDetection);

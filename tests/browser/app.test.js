@@ -777,6 +777,49 @@ describe('config page', () => {
     expect($('sensitivityNote').style.display).toBe('none');
   });
 
+  it('shows the regions read-only on a camera that offers region mode without the grid, and saves the rest', async () => {
+    device.motionCaps['1'] = fixtures.motionCapabilitiesNvr.replace('opt="grid,region"', 'opt="region"');
+    try {
+      await reloadMotion();
+      expect(state.motionMode).toBe('readonly');
+      expect($('motionReadOnlyNote').style.display).toBe('');
+      expect($('motionReadOnlyNote').textContent).toContain('Editing regions isn’t supported for this camera yet');
+      expect($('motionRegionInstructions').style.display).toBe('none');
+      expect($('clearMotionRegionsBtn').parentElement.style.display).toBe('none');
+      expect(state.motionRegions.map(r => r.points.length)).toEqual([5]);
+      expect($('motionRegionList').textContent).toContain('Region 1 (5 pts)');
+      expect($('motionRegionList').querySelector('[data-delete-motion]')).toBeNull();
+
+      // Clicks neither draw nor delete
+      const { click, dblclick } = canvasPointer();
+      click(0.1, 0.1); click(0.3, 0.1); click(0.3, 0.3); dblclick(0.1, 0.3);
+      $('drawCanvas').dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true, button: 2, clientX: $('drawCanvas').getBoundingClientRect().left + 0.75 * $('drawCanvas').getBoundingClientRect().width,
+        clientY: $('drawCanvas').getBoundingClientRect().top + 0.5 * $('drawCanvas').getBoundingClientRect().height,
+      }));
+      expect([state.drawingPoints.length, state.motionRegions.length]).toEqual([0, 1]);
+
+      // Saving sends the other settings, and the stored area exactly as loaded
+      $('motionToggle').click();
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      const { body } = device.puts.at(-1);
+      expect(body).toContain('<enabled>false</enabled>');
+      expect(body).toContain('<regionType>grid</regionType>');
+      expect(body).toContain(`<gridMap>${fixtures.motionDetectionNvr.match(/<gridMap>([^<]+)</)[1]}</gridMap>`);
+      const regionList = (xml) => /<RegionList[\s\S]*<\/RegionList>/.exec(xml)?.[0];
+      expect(regionList(body)).toBe(regionList(fixtures.motionDetectionNvr));
+    } finally {
+      delete device.motionCaps['1'];
+    }
+    await reloadMotion();
+    expect(state.motionMode).toBe('region');
+    expect($('motionReadOnlyNote').style.display).toBe('none');
+    expect($('clearMotionRegionsBtn').parentElement.style.display).toBe('');
+    expect($('motionRegionList').querySelector('[data-delete-motion]')).not.toBeNull();
+  });
+
   it('stops all four feeds after one retry when the device rejects the password mid-session', async () => {
     $('liveViewSectionTab').click();
     $('gridViewTab').click();

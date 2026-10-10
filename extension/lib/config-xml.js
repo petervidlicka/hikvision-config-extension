@@ -154,6 +154,9 @@ export function snapSensitivity(value, { min, max, step }) {
  * @property {boolean} detectHuman
  * @property {boolean} detectVehicle
  * @property {DevicePoint[][]} regions - polygons, device coordinates
+ * @property {Size|null} screen - the coordinate space the document declares
+ *   (normalizedScreenWidth/Height, as legacy ROI-mode cameras do), or null
+ *   for the usual 0–1000; a dimension it leaves out counts as 1000
  */
 
 /**
@@ -191,16 +194,22 @@ export function readCoordinates(el) {
  * tool keeps it in. Device units are 0–1000 on both axes with Y from the
  * BOTTOM (MOTION_COORDINATE_SCALE); the picture has Y=0 at the top, so Y is
  * flipped. Values off the 0–1000 range are clamped onto the picture.
+ *
+ * A document that declares another coordinate space (MotionConfig.screen)
+ * is scaled by it instead, with Y from the bottom as in the privacy masks'
+ * space. That is an assumption, used only to show such regions: the editor
+ * never saves them (see motionEditMode).
  * @param {DevicePoint[]} points - one region, as readMotionConfig returns it
+ * @param {Size|null} [screen] - the document's coordinate space; null for 0–1000
  * @returns {ImagePoint[]}
  * @example
  * motionRegionToImage([{x: 250, y: 1000}, {x: 500, y: 0}])
  * // → [{x: 0.25, y: 0}, {x: 0.5, y: 1}]: the top edge, then the bottom edge
  */
-export function motionRegionToImage(points) {
-  /** @param {number} v - device units */
-  const fraction = v => clamp(v, 0, MOTION_COORDINATE_SCALE) / MOTION_COORDINATE_SCALE;
-  return points.map(p => ({ x: fraction(p.x), y: 1 - fraction(p.y) }));
+export function motionRegionToImage(points, screen = null) {
+  const width = screen?.width ?? MOTION_COORDINATE_SCALE;
+  const height = screen?.height ?? MOTION_COORDINATE_SCALE;
+  return points.map(p => ({ x: clamp(p.x, 0, width) / width, y: 1 - clamp(p.y, 0, height) / height }));
 }
 
 /**
@@ -288,6 +297,8 @@ export function readMotionConfig(doc) {
   const cols = intText(gridEl, 'columnGranularity');
   const gridMap = findDescendant(root, 'gridMap')?.textContent?.trim();
   const highlight = childText(root, 'enableHighlight');
+  const screenWidth = parseInt(findDescendant(root, 'normalizedScreenWidth')?.textContent ?? '', 10);
+  const screenHeight = parseInt(findDescendant(root, 'normalizedScreenHeight')?.textContent ?? '', 10);
 
   return {
     enabled: childText(root, 'enabled') === 'true',
@@ -304,29 +315,48 @@ export function readMotionConfig(doc) {
     regions: childElements(xmlPath(layout, 'layout', 'RegionList'), 'Region')
       .map(readCoordinates)
       .filter(points => points.length >= 3),
+    screen: screenWidth > 0 || screenHeight > 0
+      ? { width: screenWidth > 0 ? screenWidth : MOTION_COORDINATE_SCALE, height: screenHeight > 0 ? screenHeight : MOTION_COORDINATE_SCALE }
+      : null,
   };
 }
 
 /**
- * How the motion editor works on a camera: polygons ('region') or the cell
- * grid ('grid').
- * @typedef {'region'|'grid'} MotionEditMode
+ * How the motion editor works on a camera: polygons ('region'), the cell
+ * grid ('grid'), or the stored regions shown but not edited ('readonly'),
+ * with the area sent back as loaded.
+ * @typedef {'region'|'grid'|'readonly'} MotionEditMode
  */
 
 /**
- * Which editor a camera's motion area gets. Polygons when its capabilities
- * offer them. Without capabilities (or a regionType list in them), the grid
- * whenever the document has one, as Hikvision's web UI falls back to: saving
- * polygons switches the camera to region mode and zeroes its gridMap, which
- * on a grid-only camera would wipe the real detection area. Polygons then
- * only for a document without a grid.
+ * Which editor a camera's motion area gets.
+ *
+ * Polygons, in the 0–1000 space, only when the capabilities offer both
+ * region and grid, as in Hikvision's web UI ("multi-region"). A camera that
+ * offers region without grid is in the legacy ROI mode, whose rectangles
+ * the web UI scales by normalizedScreenWidth/Height; so is a document that
+ * declares a space other than 0–1000. No camera seen so far works that way,
+ * so their regions are shown read-only rather than saved at a guessed scale.
+ *
+ * The grid when the capabilities offer only it. Without capabilities (or a
+ * regionType list in them), the grid whenever the document has one, as the
+ * web UI falls back to: saving polygons switches the camera to region mode
+ * and zeroes its gridMap, which on a grid-only camera would wipe the real
+ * detection area. Polygons then only for a document without a grid.
  * @param {MotionCapabilities} caps
  * @param {MotionConfig} md - the loaded document
  * @returns {MotionEditMode}
  */
 export function motionEditMode(caps, md) {
-  if (!caps.regionTypes.length) return md.grid ? 'grid' : 'region';
-  return caps.regionTypes.includes('region') || !md.grid ? 'region' : 'grid';
+  const usualScale = !md.screen ||
+    (md.screen.width === MOTION_COORDINATE_SCALE && md.screen.height === MOTION_COORDINATE_SCALE);
+  const types = caps.regionTypes;
+  if (!types.length) {
+    if (md.grid) return 'grid';
+    return usualScale ? 'region' : 'readonly';
+  }
+  if (types.includes('region') && types.includes('grid')) return usualScale ? 'region' : 'readonly';
+  return types.includes('grid') && md.grid ? 'grid' : 'readonly';
 }
 
 /**
@@ -337,7 +367,9 @@ export function motionEditMode(caps, md) {
  * each <Region> in an empty namespace (`<Region xmlns="">`).
  *
  * In grid mode (`mode: "grid"`, for cameras without polygon support) only
- * gridMap changes and the region list is left alone.
+ * gridMap changes and the region list is left alone. In `mode: "readonly"`
+ * the detection area (regionType, gridMap, RegionList) is sent back exactly
+ * as loaded and `regions` is ignored.
  *
  * Detection targets go in the layout's <targetType> as a comma-separated
  * list ("human,vehicle", or empty for none), created in an empty namespace
@@ -363,6 +395,7 @@ export function applyMotionConfig(doc, config) {
   }
   writeTargetTypes(layout, config.targetTypes);
   setChildText(root, 'enableHighlight', config.dynamicAnalysis);
+  if (config.mode === 'readonly') return;
 
   if (config.mode === 'grid') {
     const grid = config.grid;

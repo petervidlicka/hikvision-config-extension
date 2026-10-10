@@ -1,7 +1,10 @@
 /**
- * Motion detection tool: draw polygon regions, sensitivity and targets.
- * Regions are kept as fractions of the picture (lib/shapes.js) and become
- * device units only when saved.
+ * Motion detection tool: draw polygon regions (or mark grid cells on cameras
+ * without polygons), sensitivity and targets. Regions are kept as fractions
+ * of the picture (lib/shapes.js) and become device units only when saved.
+ * Which editor a camera gets, and what is kept as stored because the camera
+ * doesn't say, is decided in lib/config-xml.js (motionEditMode,
+ * readMotionCapabilities).
  */
 
 import {
@@ -44,7 +47,7 @@ export const motionTool = {
       <label>Sensitivity <span id="sensitivityVal">40</span></label>
       <input type="range" id="sensitivitySlider" min="0" max="100" step="20" value="40" />
       <div class="slider-note" id="sensitivityNote" style="display:none">
-        Kept as stored: this camera doesn't list the levels it accepts.
+        Kept as stored: this camera doesn’t list the levels it accepts.
       </div>
     </div>
     <div class="toggle-row" id="dynamicAnalysisRow">
@@ -63,6 +66,10 @@ export const motionTool = {
       <strong>Double-click</strong> or click near the start to close the shape.
       <strong>Right-click</strong> a region to delete it.
       Up to <span id="motionMaxRegions">4</span> regions, <span id="motionPointRange">4–10</span> corners each.
+    </div>
+    <div class="instructions" id="motionReadOnlyNote" style="display:none">
+      Editing regions isn’t supported for this camera yet. Its regions are shown as stored,
+      and saving keeps them as they are.
     </div>
     <div class="instructions" id="motionGridInstructions" style="display:none">
       This camera uses a detection grid.
@@ -183,6 +190,7 @@ export const motionTool = {
   },
 
   onMouseDown(pos, e) {
+    if (state.motionMode === 'readonly') return;
     if (state.motionMode === 'grid') {
       const cell = gridCellAt(pos);
       if (!cell || !state.motionGrid) return;
@@ -289,7 +297,7 @@ export const motionTool = {
         byId('sensitivityVal').textContent = String(md.sensitivity);
       }
 
-      state.motionRegions = md.regions.map(points => ({ points: motionRegionToImage(points) }));
+      state.motionRegions = md.regions.map(points => ({ points: motionRegionToImage(points, md.screen) }));
       state.drawingPoints = [];
 
       state.dynamicAnalysis = md.dynamicAnalysis;
@@ -402,14 +410,15 @@ export const motionTool = {
 
 };
 
-/** Render the region list in the sidebar. */
+/** Render the region list in the sidebar; read-only regions can't be deleted. */
 function updateRegionList() {
   const list = byId('motionRegionList');
   if (!list) return;
+  const editable = state.motionMode !== 'readonly';
   list.innerHTML = state.motionRegions.map((r, i) => `
     <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;font-family:var(--mono)">
       <span style="color:var(--text-dim)">Region ${i + 1} (${r.points.length} pts)</span>
-      <button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete-motion="${i}">x</button>
+      ${editable ? `<button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete-motion="${i}">x</button>` : ''}
     </div>
   `).join('');
 
@@ -467,10 +476,14 @@ function applyCapabilities() {
   byId('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';
   byId('detectVehicleLabel').style.display = caps.targetTypes.includes('vehicle') ? '' : 'none';
   byId('targetDetectionRow').style.display = caps.targetTypes.length ? '' : 'none';
-  const grid = state.motionMode === 'grid';
-  byId('motionRegionInstructions').style.display = grid ? 'none' : '';
-  byId('motionGridInstructions').style.display = grid ? '' : 'none';
-  byId('motionRegionList').style.display = grid ? 'none' : '';
+  const mode = state.motionMode;
+  byId('motionRegionInstructions').style.display = mode === 'region' ? '' : 'none';
+  byId('motionGridInstructions').style.display = mode === 'grid' ? '' : 'none';
+  byId('motionReadOnlyNote').style.display = mode === 'readonly' ? '' : 'none';
+  byId('motionRegionList').style.display = mode === 'grid' ? 'none' : '';
+  // Nothing to clear when the regions can't be edited
+  const clearGroup = byId('clearMotionRegionsBtn').parentElement;
+  if (clearGroup) clearGroup.style.display = mode === 'readonly' ? 'none' : '';
 }
 
 /**

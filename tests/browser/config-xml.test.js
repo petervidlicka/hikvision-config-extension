@@ -217,6 +217,53 @@ describe('motion detection', () => {
     expect(motionEditMode({ ...caps, regionTypes: ['grid'] }, nvr)).toBe('grid');
   });
 
+  it('edits polygons only where the camera offers region and grid, and shows other regions read-only', () => {
+    const nvr = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    const caps = readMotionCapabilities(parseXml(fixtures.motionCapabilitiesNvr));
+    // Region without grid is the legacy ROI mode, whose scale isn't known for sure
+    expect(motionEditMode({ ...caps, regionTypes: ['region'] }, nvr)).toBe('readonly');
+    // Grid only, but the document has no grid to edit
+    const noGrid = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace(/<gridMap>[^<]*<\/gridMap>/, '')));
+    expect(motionEditMode({ ...caps, regionTypes: ['grid'] }, noGrid)).toBe('readonly');
+
+    // A document in another coordinate space than 0–1000
+    const roi = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace('<regionType>grid</regionType>',
+      '<regionType>region</regionType><normalizedScreenSize><normalizedScreenWidth>704</normalizedScreenWidth>' +
+      '<normalizedScreenHeight>576</normalizedScreenHeight></normalizedScreenSize>')));
+    expect(roi.screen).toEqual({ width: 704, height: 576 });
+    expect(motionEditMode(caps, roi)).toBe('readonly');
+    expect(motionEditMode(readMotionCapabilities(null), { ...roi, grid: null })).toBe('readonly');
+    // …but its grid is still the grid
+    expect(motionEditMode({ ...caps, regionTypes: ['grid'] }, roi)).toBe('grid');
+    // Declaring 1000 changes nothing; one dimension left out counts as 1000
+    const declared = (xml) => readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace('<regionType>grid</regionType>', xml)));
+    expect(motionEditMode(caps, declared('<normalizedScreenWidth>1000</normalizedScreenWidth><normalizedScreenHeight>1000</normalizedScreenHeight>')))
+      .toBe('region');
+    expect(declared('<normalizedScreenHeight>576</normalizedScreenHeight>').screen).toEqual({ width: 1000, height: 576 });
+    expect(nvr.screen).toBeNull();
+  });
+
+  it('shows regions of another coordinate space where they are, Y from the bottom', () => {
+    expect(motionRegionToImage([{ x: 0, y: 576 }, { x: 352, y: 144 }, { x: 800, y: -1 }], { width: 704, height: 576 }))
+      .toEqual([{ x: 0, y: 0 }, { x: 0.5, y: 0.75 }, { x: 1, y: 1 }]);
+  });
+
+  it('sends a read-only area back as loaded, with the other settings', () => {
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    const area = (xml) => [/<regionType>[^<]*</, /<gridMap>[^<]*</, /<RegionList[\s\S]*<\/RegionList>/].map(re => re.exec(xml)?.[0]);
+    const before = area(serializeXml(doc));
+    applyMotionConfig(doc, {
+      mode: 'readonly', enabled: false, sensitivity: 60, dynamicAnalysis: false, targetTypes: ['vehicle'],
+      regions: [[{ x: 0, y: 0 }, { x: 1000, y: 0 }, { x: 1000, y: 1000 }]],
+    });
+    const body = serializeXml(doc);
+    expect(area(body)).toEqual(before);
+    for (const field of ['<enabled>false</enabled>', '<sensitivityLevel>60</sensitivityLevel>',
+      '<enableHighlight>false</enableHighlight>', '<targetType>vehicle</targetType>']) {
+      expect(body).toContain(field);
+    }
+  });
+
   it('edits the grid when the capabilities can’t be read and the camera has one, as the web UI does', () => {
     const none = readMotionCapabilities(null);
     expect(motionEditMode(none, readMotionConfig(parseXml(fixtures.motionDetectionNvr)))).toBe('grid');
