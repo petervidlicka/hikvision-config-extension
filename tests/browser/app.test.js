@@ -177,11 +177,22 @@ describe('config page', () => {
     expect($('pbTimestamp').textContent).toMatch(/^14:0\d/);
   });
 
-  it('explains when a device has no frames from recordings', async () => {
-    device.recordedFrames = false;
+  it('detects a device that returns the live image whatever the time', async () => {
+    device.recordedFrames = 'ignoresTime'; // what the DS-7604 does
     document.querySelectorAll('.channel-item')[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
     await vi.waitFor(() => expect($('pbInfo').textContent).toContain('doesn’t provide still images'));
     expect(state.playback.framesSupported).toBe(false);
+    expect($('pbPlayPauseBtn').disabled).toBe(true);
+  });
+
+  it('opens stored pictures from their timeline markers', async () => {
+    expect($('pbInfo').textContent).toContain('1 stored picture');
+    const wrap = $('pbTimelineWrap').getBoundingClientRect();
+    const x = wrap.left + wrap.width * ((46 * 60 + 8) / 86400);
+    $('pbTimelineWrap').dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: x, clientY: wrap.top + 5 }));
+    await vi.waitFor(() => expect($('statusText').textContent).toBe('Stored picture from 00:46:08'));
+    expect(device.requests).toContain('GET /picture/Streaming/tracks/103/');
+    expect($('pbTimestamp').textContent).toBe('00:46:08');
   });
 
   it('stops everything after one failed login when the device rejects the password', async () => {

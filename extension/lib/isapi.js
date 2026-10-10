@@ -10,7 +10,7 @@
 
 import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
 import {
-  SEARCH_PAGE_SIZE, buildCalendarXml, buildSearchXml, parseCalendar, parseSearchResult, toDeviceTime,
+  SEARCH_PAGE_SIZE, buildCalendarXml, buildSearchXml, parseCalendar, parsePictureResult, parseSearchResult, toDeviceTime,
 } from './playback.js';
 import { childElements, childText, parseXml, serializeXml } from './xml.js';
 
@@ -25,6 +25,7 @@ export function rethrowAuthError(err) {
 
 /** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
 /** @typedef {import('./playback.js').Recording} Recording */
+/** @typedef {import('./playback.js').StoredPicture} StoredPicture */
 
 /** Stop paging a recording search after this many results. */
 const MAX_SEARCH_RESULTS = 2000;
@@ -275,9 +276,60 @@ export const Isapi = {
   },
 
   /**
+   * Pictures on a channel's picture track (track …03) in a time range.
+   * @param {DeviceConfig} config
+   * @param {string} channelId
+   * @param {Date} start
+   * @param {Date} end
+   * @returns {Promise<StoredPicture[]>} sorted by time
+   */
+  async searchPictures(config, channelId, start, end) {
+    const searchId = crypto.randomUUID();
+    /** @type {StoredPicture[]} */
+    const pictures = [];
+    for (let position = 0; position < MAX_SEARCH_RESULTS; position += SEARCH_PAGE_SIZE) {
+      const body = buildSearchXml({ searchId, trackId: `${channelId}03`, start, end, position });
+      const resp = await this.request(config, 'POST', '/ISAPI/ContentMgmt/search', body);
+      const page = parsePictureResult(parseXml(String(resp.data)));
+      pictures.push(...page.pictures);
+      if (page.status !== 'MORE' || page.pictures.length === 0) break;
+    }
+    return pictures.sort((a, b) => a.time.getTime() - b.time.getTime());
+  },
+
+  /**
+   * Fetch a stored picture by the URI a picture search returned. Only URIs
+   * on the connected device are followed.
+   * @param {DeviceConfig} config
+   * @param {string} uri
+   * @returns {Promise<Blob>}
+   */
+  async getStoredPicture(config, uri) {
+    const url = new URL(uri);
+    if (url.hostname !== config.host || url.protocol !== 'http:') {
+      throw new Error('Picture is not on the connected device');
+    }
+    const resp = await this.request(config, 'GET', url.pathname + url.search);
+    return new Blob([/** @type {ArrayBuffer} */ (resp.data)], { type: 'image/jpeg' });
+  },
+
+  /**
+   * Whether the device really serves stills from recordings. Some firmware
+   * accepts the starttime parameter but ignores it and returns the live
+   * image, so ask for a moment long before any recording: a device that
+   * honours the time can't return an image for it.
+   * @param {DeviceConfig} config
+   * @param {string} channelId
+   * @returns {Promise<boolean>}
+   */
+  async ignoresRecordedFrameTime(config, channelId) {
+    return (await this.getRecordedFrame(config, channelId, new Date(2000, 0, 1))) !== null;
+  },
+
+  /**
    * A still image from recorded video at a moment. Not part of documented
    * ISAPI, so only some firmware supports it; returns null when the device
-   * doesn't answer with a JPEG.
+   * doesn't answer with a JPEG. Check ignoresRecordedFrameTime() first.
    * @param {DeviceConfig} config
    * @param {string} channelId
    * @param {Date} time
