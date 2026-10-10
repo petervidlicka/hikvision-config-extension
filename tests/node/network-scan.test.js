@@ -8,7 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { checkActivation, parseActivateStatus } from '../../extension/lib/device-probe.js';
 import {
-  NOT_ACTIVATED_HINT, candidateSubnets, describeFoundDevice, describeScanResults, scanForHikvision,
+  NOT_ACTIVATED_HINT, candidateSubnets, describeFoundDevice, describeScanProgress, describeScanResults, scanForHikvision,
 } from '../../extension/lib/network-scan.js';
 
 const DEVICE_INFO = '/ISAPI/System/deviceInfo';
@@ -169,7 +169,14 @@ describe('scanForHikvision', () => {
       { ip: '172.21.0.31', port: 80, confirmed: false, activated: null },
       { ip: '172.21.0.32', port: 80, confirmed: true, activated: true },
     ]);
-    expect(onFound.mock.calls.map(([device]) => device.ip)).toEqual(['172.21.0.30', '172.21.0.31', '172.21.0.32']);
+    // Each address as first found, then .30 again once it confirmed on 8080, so a list
+    // shown while scanning ends up as the result; .31 and .32 on 8080 are no better
+    expect(onFound.mock.calls.map(([device]) => device)).toEqual([
+      { ip: '172.21.0.30', port: 80, confirmed: false, activated: null },
+      { ip: '172.21.0.31', port: 80, confirmed: false, activated: null },
+      { ip: '172.21.0.32', port: 80, confirmed: true, activated: true },
+      { ip: '172.21.0.30', port: 8080, confirmed: true, activated: true },
+    ]);
   });
 
   it('moves on past empty subnets', async () => {
@@ -266,6 +273,15 @@ describe('result texts', () => {
     expect(describeFoundDevice({ ip: '192.168.0.64', port: 80, confirmed: true, activated: false }))
       .toEqual({ label: 'Hikvision NVR / Camera • Port 80', note: NOT_ACTIVATED_HINT });
     expect(NOT_ACTIVATED_HINT).toBe('Not activated — activate it with Hikvision SADP or its web page first');
+  });
+
+  it('shows how far the scan has got in the current subnet, and how many devices it found', () => {
+    expect(describeScanProgress({ subnet: '192.168.0', probed: 0, total: 508 }, 0))
+      .toEqual({ percent: 0, text: 'Scanning 192.168.0.x…' });
+    expect(describeScanProgress({ subnet: '192.168.0', probed: 127, total: 508 }, 1))
+      .toEqual({ percent: 25, text: 'Scanning 192.168.0.x… found 1 device' });
+    expect(describeScanProgress({ subnet: '10.0.0', probed: 508, total: 508 }, 2))
+      .toEqual({ percent: 100, text: 'Scanning 10.0.0.x… found 2 devices' });
   });
 
   it('counts devices as Hikvision only when all of them confirmed it', () => {

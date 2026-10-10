@@ -129,6 +129,30 @@ export function describeScanResults(devices) {
 }
 
 /**
+ * How far a scan has got.
+ * @typedef {object} ScanProgress
+ * @property {string} subnet - the subnet being scanned, e.g. "192.168.0"
+ * @property {number} probed - probes done in this subnet
+ * @property {number} total - probes this subnet takes: 254 addresses × ports
+ */
+
+/**
+ * What the progress bar and the line above it show while a scan runs.
+ * @param {ScanProgress} progress
+ * @param {number} foundCount - addresses found so far
+ * @returns {{percent: number, text: string}}
+ * @example
+ * describeScanProgress({ subnet: '192.168.0', probed: 127, total: 508 }, 1)
+ * // → {percent: 25, text: 'Scanning 192.168.0.x… found 1 device'}
+ */
+export function describeScanProgress({ subnet, probed, total }, foundCount) {
+  return {
+    percent: total > 0 ? (probed / total) * 100 : 0,
+    text: `Scanning ${subnet}.x…` + (foundCount ? ` found ${foundCount} device${foundCount > 1 ? 's' : ''}` : ''),
+  };
+}
+
+/**
  * Scan subnets one at a time and stop after the first subnet that contains a
  * device — the remaining subnets are only guesses, so scanning them would
  * just make the user wait. Each address is listed once: when it answers on
@@ -140,10 +164,12 @@ export function describeScanResults(devices) {
  * @param {readonly number[]} [options.ports] - HTTP ports to try each address on
  * @param {AbortSignal} [options.signal] - cancels the scan
  * @param {number} [options.probeTimeoutMs] - how long to wait for each request
- * @param {(device: FoundDevice) => void} [options.onFound] - called once per address found
- * @param {(progress: {subnet: string, probed: number, total: number}) => void} [options.onProgress]
- *   `probed` counts the probes done in the current subnet, out of `total` (254 addresses × ports).
- * @returns {Promise<FoundDevice[]>} in address order
+ * @param {(device: FoundDevice) => void} [options.onFound] - called when an address is first
+ *   found, and again for the same `ip` when a better answer from it replaces the one passed
+ *   before (it confirmed on another port), so a list shown as devices are found stays right.
+ *   Count addresses by `ip`, not calls.
+ * @param {(progress: ScanProgress) => void} [options.onProgress] - called after each probe
+ * @returns {Promise<FoundDevice[]>} in address order, the best answer from each address
  */
 export async function scanForHikvision({
   subnets, ports = PROBE_PORTS, signal, onFound, onProgress, probeTimeoutMs = PROBE_TIMEOUT_MS,
@@ -153,8 +179,9 @@ export async function scanForHikvision({
   /** @param {FoundDevice} device */
   const record = (device) => {
     const known = found.get(device.ip);
-    if (!known) onFound?.(device);
-    if (!known || preferred(device, known, ports)) found.set(device.ip, device);
+    if (known && !preferred(device, known, ports)) return;
+    found.set(device.ip, device);
+    onFound?.(device);
   };
 
   for (const subnet of subnets) {

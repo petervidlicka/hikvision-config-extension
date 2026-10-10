@@ -2,7 +2,9 @@
  * Local network scan for Hikvision devices, and the connection form steps.
  */
 
-import { candidateSubnets, describeFoundDevice, describeScanResults, scanForHikvision } from '../lib/network-scan.js';
+import {
+  candidateSubnets, describeFoundDevice, describeScanProgress, describeScanResults, scanForHikvision,
+} from '../lib/network-scan.js';
 import { dom, state } from './state.js';
 import { errorMessage, showToast } from './ui.js';
 
@@ -55,18 +57,19 @@ export async function startScan() {
   state.scanAbort?.abort();
   const abort = new AbortController();
   state.scanAbort = abort;
-  let foundCount = 0;
+  /** Addresses found so far; one may be reported again with a better answer. @type {Set<string>} */
+  const foundIps = new Set();
 
   try {
     const devices = await scanForHikvision({
       // The last-used host's subnet is the best guess at where the device lives
       subnets: candidateSubnets([dom.hostInput.value.trim()]),
       signal: abort.signal,
-      onFound: () => { foundCount++; },
-      onProgress: ({ subnet, probed, total }) => {
-        dom.scanProgressFill.style.width = `${(probed / total) * 100}%`;
-        dom.scanStatusText.textContent = `Scanning ${subnet}.x…` +
-          (foundCount ? ` found ${foundCount} device${foundCount > 1 ? 's' : ''}` : '');
+      onFound: ({ ip }) => { foundIps.add(ip); },
+      onProgress: (progress) => {
+        const { percent, text } = describeScanProgress(progress, foundIps.size);
+        dom.scanProgressFill.style.width = `${percent}%`;
+        dom.scanStatusText.textContent = text;
       },
     });
     if (!abort.signal.aborted) showScanResults(devices);
