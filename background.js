@@ -43,7 +43,7 @@ function xmlToObj(xmlStr) {
       const inner = tag.content;
       // Check if inner content has child elements
       const hasChildElements = /<[a-zA-Z][\w.-]*[\s>]/.test(inner);
-      const value = hasChildElements ? parseNode(inner) : inner.trim();
+      const value = hasChildElements ? parseNode(inner) : decodeXmlEntities(inner.trim());
       addToObj(obj, tag.name, value);
     }
 
@@ -169,6 +169,16 @@ function xmlToObj(xmlStr) {
   return parseNode(innerXml);
 }
 
+/** Decode the predefined XML entities and numeric character references. */
+function decodeXmlEntities(text) {
+  const named = { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" };
+  return text.replace(/&(?:#x([0-9a-fA-F]+)|#(\d+)|(lt|gt|amp|quot|apos));/g, (m, hex, dec, name) => {
+    if (name) return named[name];
+    const code = parseInt(hex ?? dec, hex ? 16 : 10);
+    return code <= 0x10FFFF ? String.fromCodePoint(code) : m;
+  });
+}
+
 /**
  * Return the local name of the XML root element.
  */
@@ -179,14 +189,27 @@ function xmlRootName(xmlStr) {
 
 /* ── Message handler (replaces Express routes) ──────────────────────────── */
 
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // Only our own extension pages may drive the device; this worker holds
+  // an authenticated session and would otherwise act as an open proxy.
+  if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL(''))) {
+    return false;
+  }
   handleMessage(msg).then(sendResponse).catch(err => {
-    sendResponse({ success: false, error: err.message || String(err) });
+    sendResponse({ success: false, error: err.message || String(err), code: err.code });
   });
   return true; // keep channel open for async response
 });
 
+/** Rethrow auth failures so fallbacks don't retry with known-bad credentials. */
+function rethrowAuthError(err) {
+  if (err instanceof AuthError) throw err;
+}
+
 async function handleMessage(msg) {
+  if (msg.channelId !== undefined && !/^\d{1,4}$/.test(String(msg.channelId))) {
+    throw new Error(`Invalid channel ID: ${msg.channelId}`);
+  }
   switch (msg.action) {
     case 'testConnection': return testConnection(msg.config);
     case 'getChannels':    return getChannels(msg.config);
@@ -197,7 +220,6 @@ async function handleMessage(msg) {
     case 'putPrivacyMask':      return putPrivacyMask(msg.config, msg.channelId, msg.xml);
     case 'getEventTriggers':    return getEventTriggers(msg.config, msg.channelId);
     case 'putEventTriggers':    return putEventTriggers(msg.config, msg.channelId, msg.xml);
-    case 'scanNetwork':         return scanNetwork();
     default:
       throw new Error(`Unknown action: ${msg.action}`);
   }
@@ -206,6 +228,8 @@ async function handleMessage(msg) {
 /* ── ISAPI handlers ─────────────────────────────────────────────────────── */
 
 async function testConnection(config) {
+  // Explicit user action — allow one fresh attempt even if these credentials failed before.
+  forgetRejectedCredentials(config);
   const resp = await digestFetch(config, 'GET', '/ISAPI/System/deviceInfo');
   const device = xmlToObj(resp.data);
   return { success: true, device };
@@ -244,7 +268,8 @@ async function getChannels(config) {
       if (channels.length > 0) {
         return { success: true, channels };
       }
-    } catch {
+    } catch (err) {
+      rethrowAuthError(err);
       // Try next endpoint
     }
   }
@@ -256,7 +281,8 @@ async function getChannels(config) {
     try {
       await digestFetch(config, 'GET', `/ISAPI/Streaming/channels/${id}01/picture`);
       probed.push({ id: String(id), name: `Channel ${id}` });
-    } catch {
+    } catch (err) {
+      rethrowAuthError(err);
       // Channel doesn't exist or no camera connected
     }
   }
@@ -278,7 +304,8 @@ async function getSnapshot(config, channelId) {
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     const base64 = btoa(binary);
     return { success: true, dataUrl: `data:image/jpeg;base64,${base64}` };
-  } catch {
+  } catch (err) {
+    rethrowAuthError(err);
     // Fallback URL format
     const resp = await digestFetch(config, 'GET', `/ISAPI/Streaming/channels/${channelId}/picture`);
     const bytes = new Uint8Array(resp.data);
@@ -307,7 +334,8 @@ async function getPrivacyMask(config, channelId) {
     const root = xmlRootName(resp.data);
     const privacyMask = root === 'PrivacyMask' ? parsed : (parsed.PrivacyMask || parsed.privacyMask || parsed);
     return { success: true, privacyMask, rawXml: resp.data };
-  } catch {
+  } catch (err) {
+    rethrowAuthError(err);
     // Try alternative endpoint
     const resp = await digestFetch(config, 'GET', `/ISAPI/System/Video/inputs/channels/${channelId}/privacyMask/regions`);
     const parsed = xmlToObj(resp.data);
@@ -328,7 +356,8 @@ async function getEventTriggers(config, channelId) {
     const resp = await digestFetch(config, 'GET', `/ISAPI/Event/triggers/VMD-${channelId}`);
     const parsed = xmlToObj(resp.data);
     return { success: true, eventTrigger: parsed, rawXml: resp.data };
-  } catch {
+  } catch (err) {
+    rethrowAuthError(err);
     // Fall back: fetch all triggers and filter for VMD on this channel
   }
 
@@ -347,7 +376,8 @@ async function getEventTriggers(config, channelId) {
     if (vmd) {
       return { success: true, eventTrigger: vmd, rawXml: resp.data };
     }
-  } catch {
+  } catch (err) {
+    rethrowAuthError(err);
     // Neither endpoint works
   }
 
@@ -359,108 +389,7 @@ async function putEventTriggers(config, channelId, xml) {
     const resp = await digestFetch(config, 'PUT', `/ISAPI/Event/triggers/VMD-${channelId}`, xml);
     return { success: true, response: resp.data };
   } catch (err) {
+    rethrowAuthError(err);
     throw new Error('Failed to save event triggers: ' + err.message);
   }
-}
-
-/* ── Network Scanner ─────────────────────────────────────────────────────── */
-
-/**
- * Scan the local /24 subnet(s) for Hikvision devices by probing
- * /ISAPI/System/deviceInfo on every host in parallel.
- * Resolves after all probes finish or after 9.5 seconds, whichever is first.
- *
- * Subnet detection strategy:
- *  1. Try chrome.system.network.getNetworkInterfaces() (requires "system.network" permission)
- *  2. Fall back to the most common home/office subnets so the scan still
- *     works even if the API is unavailable or the extension hasn't been
- *     reloaded after the permission was added.
- */
-async function scanNetwork() {
-  const subnets = new Set();
-
-  // ── Step 1: try the native network API ──────────────────────────────────
-  try {
-    if (chrome.system?.network) {
-      const ifaces = await new Promise((resolve, reject) => {
-        chrome.system.network.getNetworkInterfaces((result) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-          } else {
-            resolve(result || []);
-          }
-        });
-      });
-
-      for (const iface of ifaces) {
-        const addr = iface.address || '';
-        if (
-          addr.includes('.') &&
-          !addr.startsWith('127.') &&
-          !addr.startsWith('169.254.') &&
-          !addr.startsWith('0.')
-        ) {
-          const parts = addr.split('.');
-          subnets.add(`${parts[0]}.${parts[1]}.${parts[2]}`);
-        }
-      }
-    }
-  } catch {
-    // API unavailable or extension hasn't been reloaded yet — fall through
-  }
-
-  // ── Step 2: fall back to common home/office subnets ─────────────────────
-  if (subnets.size === 0) {
-    for (const s of ['192.168.0', '192.168.1', '192.168.2', '10.0.0', '10.0.1']) {
-      subnets.add(s);
-    }
-  }
-
-  const foundDevices = [];
-  const PROBE_TIMEOUT_MS = 2500; // per-IP timeout
-  const TOTAL_TIMEOUT_MS = 9500; // hard ceiling for the whole scan
-
-  /**
-   * Probe a single IP. Returns the device object if it looks like a
-   * Hikvision NVR/camera (401 on ISAPI endpoint), or nothing on failure.
-   */
-  const probeIP = async (ip) => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-    try {
-      const resp = await fetch(`http://${ip}/ISAPI/System/deviceInfo`, {
-        method: 'GET',
-        signal: controller.signal,
-        cache: 'no-store',
-      });
-      clearTimeout(timer);
-      // Hikvision ISAPI always returns 401 for unauthenticated requests
-      if (resp.status === 401 || resp.status === 200) {
-        const wwwAuth = resp.headers.get('www-authenticate') || '';
-        // Only add if it looks like a Digest-auth protected ISAPI endpoint
-        if (resp.status === 401 || wwwAuth.toLowerCase().includes('digest')) {
-          foundDevices.push({ ip, port: 80 });
-        }
-      }
-    } catch {
-      // Connection refused, DNS failure, abort — not a reachable Hikvision device
-    } finally {
-      clearTimeout(timer);
-    }
-  };
-
-  // Build the full IP list for all subnets
-  const allIPs = [];
-  for (const subnet of subnets) {
-    for (let i = 1; i <= 254; i++) {
-      allIPs.push(`${subnet}.${i}`);
-    }
-  }
-
-  // Race all probes against the total timeout; collect results as they arrive
-  const allProbes = Promise.all(allIPs.map(probeIP));
-  const totalTimeoutP = new Promise(resolve => setTimeout(resolve, TOTAL_TIMEOUT_MS));
-  await Promise.race([allProbes, totalTimeoutP]);
-
-  return { success: true, devices: foundDevices };
 }

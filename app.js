@@ -32,7 +32,7 @@ const state = {
   gridExpandedCell: null,
   // UI state (formerly loose variables)
   configExpanded: false,
-  scanProgressInterval: null,
+  scanAbort: null, // AbortController for a running network scan
 };
 
 // ─── DOM Cache ──────────────────────────────────────────────────────────────
@@ -129,12 +129,33 @@ function sendMsg(msg) {
       } else if (!response) {
         reject(new Error('No response from background'));
       } else if (!response.success) {
-        reject(new Error(response.error || 'Unknown error'));
+        const err = new Error(response.error || 'Unknown error');
+        err.code = response.code;
+        if (err.code === 'AUTH_FAILED') handleAuthFailure();
+        reject(err);
       } else {
         resolve(response);
       }
     });
   });
+}
+
+/**
+ * The device rejected our credentials mid-session (password changed, device
+ * reset, account locked). Stop every feed immediately — each further request
+ * counts as a failed login and Hikvision locks the account after a few.
+ */
+function handleAuthFailure() {
+  if (!state.connected) return;
+  disconnect();
+  showConnectionForm();
+  dom.passInput.value = '';
+  showToast('The device rejected the login. Re-enter the password to reconnect.', 'error');
+}
+
+/** Display name for a channel, falling back to its number. */
+function channelLabel(ch) {
+  return ch.name || ch.inputPort || `Channel ${ch.id}`;
 }
 
 function showToast(msg, type = 'info') {
@@ -1257,6 +1278,9 @@ function toggleConfig() {
 
 // ─── Network Scanner ─────────────────────────────────────────────────────────
 
+/** Broad access granted only while a scan runs (see startScan). */
+const SCAN_ORIGINS = 'http://*/*';
+
 function showScanIntro() {
   dom.scanIntro.style.display = 'block';
   dom.scanProgress.style.display = 'none';
@@ -1272,36 +1296,57 @@ function showConnectionForm() {
 }
 
 async function startScan() {
+  // Scanning has to probe every address on the subnet, so it needs access to
+  // all http:// origins. Ask only for the duration of the scan.
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ origins: [SCAN_ORIGINS] });
+  } catch (err) {
+    showToast('Could not request network access: ' + err.message, 'error');
+    return;
+  }
+  if (!granted) {
+    showToast('Scanning needs network access. You can enter the IP manually instead.', 'error');
+    return;
+  }
+
   dom.scanIntro.style.display = 'none';
   dom.scanProgress.style.display = 'block';
   dom.scanResults.style.display = 'none';
   dom.connectionForm.style.display = 'none';
 
   dom.scanProgressFill.style.width = '0%';
-  dom.scanStatusText.innerHTML = 'Scanning your local network<br>for Hikvision devices…';
+  dom.scanStatusText.textContent = 'Scanning your local network for Hikvision devices…';
 
-  const startTime = Date.now();
-  const TOTAL_MS = 10000;
-  state.scanProgressInterval = setInterval(() => {
-    const pct = Math.min(100, ((Date.now() - startTime) / TOTAL_MS) * 100);
-    dom.scanProgressFill.style.width = pct + '%';
-    if (pct >= 100) clearInterval(state.scanProgressInterval);
-  }, 100);
+  state.scanAbort?.abort();
+  const abort = new AbortController();
+  state.scanAbort = abort;
+  let foundCount = 0;
 
   try {
-    const data = await sendMsg({ action: 'scanNetwork' });
-    clearInterval(state.scanProgressInterval);
-    dom.scanProgressFill.style.width = '100%';
-    showScanResults(data.devices || []);
+    const devices = await scanForHikvision({
+      // The last-used host's subnet is the best guess at where the device lives
+      subnets: candidateSubnets([dom.hostInput.value.trim()]),
+      signal: abort.signal,
+      onFound: () => { foundCount++; },
+      onProgress: ({ subnet, probed }) => {
+        dom.scanProgressFill.style.width = `${(probed / 254) * 100}%`;
+        dom.scanStatusText.textContent = `Scanning ${subnet}.x…` +
+          (foundCount ? ` found ${foundCount} device${foundCount > 1 ? 's' : ''}` : '');
+      },
+    });
+    if (!abort.signal.aborted) showScanResults(devices);
   } catch (err) {
-    clearInterval(state.scanProgressInterval);
     showToast('Scan error: ' + err.message, 'error');
     showScanResults([]);
+  } finally {
+    if (state.scanAbort === abort) state.scanAbort = null;
+    chrome.permissions.remove({ origins: [SCAN_ORIGINS] }).catch(() => {});
   }
 }
 
 function cancelScan() {
-  clearInterval(state.scanProgressInterval);
+  state.scanAbort?.abort();
   showScanIntro();
 }
 
@@ -1345,18 +1390,28 @@ async function connect() {
     return;
   }
 
+  // Access is granted per device. This must be the first await so Chrome
+  // still treats the call as part of the click / Enter key press.
+  let granted = false;
+  try {
+    granted = await chrome.permissions.request({ origins: [`http://${host}/*`] });
+  } catch {
+    showToast(`"${host}" is not a valid IP address or hostname`, 'error');
+    return;
+  }
+  if (!granted) {
+    showToast('Access to the device was not granted, so the extension cannot reach it.', 'error');
+    return;
+  }
+
   state.config = { host, port: parseInt(port), username, password };
   dom.connectBtn.innerHTML = '<span class="loading"></span> Connecting...';
   dom.connectBtn.disabled = true;
   setStatus('Connecting to ' + host + '...');
 
-  // Save connection details
-  const saveData = { host, port, username, savePassword: dom.savePassCheck.checked };
-  if (saveData.savePassword) saveData.password = password;
-  chrome.storage.local.set(saveData);
-
   try {
     const data = await sendMsg({ action: 'testConnection', config: state.config });
+    saveConnectionDetails(host, port, username, password);
 
     state.connected = true;
     dom.statusDot.classList.add('connected');
@@ -1380,6 +1435,21 @@ async function connect() {
     dom.connectBtn.disabled = false;
     if (dom.connectBtn.querySelector('.loading')) dom.connectBtn.textContent = 'Connect';
   }
+}
+
+/**
+ * Remember connection details. The password goes to session storage (memory
+ * only, cleared when Chrome closes) unless the user opted to keep it on disk.
+ */
+function saveConnectionDetails(host, port, username, password) {
+  const remember = dom.savePassCheck.checked;
+  chrome.storage.local.set({ host, port, username, savePassword: remember });
+  if (remember) {
+    chrome.storage.local.set({ password });
+  } else {
+    chrome.storage.local.remove('password');
+  }
+  chrome.storage.session.set({ password });
 }
 
 function disconnect() {
@@ -1434,7 +1504,13 @@ async function loadChannels() {
     state.channels.forEach((ch, i) => {
       const div = document.createElement('div');
       div.className = 'channel-item' + (i === 0 ? ' active' : '');
-      div.innerHTML = `<div class="ch-num">${ch.id}</div><span>${ch.name || ch.inputPort || ('Channel ' + ch.id)}</span>`;
+      // Names come from the device — never parse them as HTML
+      const num = document.createElement('div');
+      num.className = 'ch-num';
+      num.textContent = ch.id;
+      const label = document.createElement('span');
+      label.textContent = channelLabel(ch);
+      div.append(num, label);
       div.addEventListener('click', () => selectChannel(ch.id, div));
       dom.channelList.appendChild(div);
     });
@@ -1677,12 +1753,13 @@ function switchToGridView() {
   cells.forEach((cell, idx) => {
     const picker = cell.querySelector('.grid-channel-picker');
 
-    picker.innerHTML = '<option value="">— empty —</option>' +
-      state.channels.map(ch => {
-        const name = ch.name || ch.inputPort || `Channel ${ch.id}`;
-        const selected = state.gridCellChannels[idx] === ch.id ? ' selected' : '';
-        return `<option value="${ch.id}"${selected}>${name}</option>`;
-      }).join('');
+    picker.replaceChildren(
+      new Option('— empty —', ''),
+      ...state.channels.map(ch => {
+        const selected = state.gridCellChannels[idx] === ch.id;
+        return new Option(channelLabel(ch), ch.id, selected, selected);
+      }),
+    );
 
     picker.onchange = () => {
       state.gridCellChannels[idx] = picker.value || null;
@@ -1800,12 +1877,17 @@ document.addEventListener('keydown', (e) => {
 
 // ─── Load Saved Credentials ─────────────────────────────────────────────────
 
-chrome.storage.local.get(['host', 'port', 'username', 'password', 'savePassword'], (data) => {
+chrome.storage.local.get(['host', 'port', 'username', 'password', 'savePassword'], async (data) => {
   if (data.host) dom.hostInput.value = data.host;
   if (data.port) dom.portInput.value = data.port;
   if (data.username) dom.userInput.value = data.username;
   if (data.savePassword) {
     dom.savePassCheck.checked = true;
     if (data.password) dom.passInput.value = data.password;
+    return;
   }
+  // Clean up a password left on disk by older versions that saved it unconditionally
+  if (data.password) chrome.storage.local.remove('password');
+  const session = await chrome.storage.session.get('password');
+  if (session.password) dom.passInput.value = session.password;
 });
