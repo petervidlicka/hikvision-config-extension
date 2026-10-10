@@ -1073,17 +1073,44 @@ describe('config page', () => {
     $('connectBtn').click();
     await vi.waitFor(() => expect(toast()).toBe('Connection failed: Device rejected the username or password'));
     expect(device.failedLogins).toBe(1);
-    expect(device.requests.slice(-2)).toEqual(['GET /ISAPI/Security/userCheck', 'GET /ISAPI/Security/userCheck']);
+    // Then whether the device has been activated (it has), asked without a login
+    expect(device.requests.slice(-3)).toEqual(['GET /ISAPI/Security/userCheck', 'GET /ISAPI/Security/userCheck', 'GET /SDK/activateStatus']);
+    await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+  });
+
+  it('says to activate a device that hasn’t been activated, asking it without a login', async () => {
+    device.failedLogins = 0;
+    device.activated = false;
+    try {
+      $('connectBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('Connection failed: This device hasn’t been activated yet — ' +
+        'activate it with Hikvision SADP or its web page first, then connect with the admin password you set there'));
+      expect(device.failedLogins).toBe(1);
+      expect(device.activationChecks.at(-1)).toEqual({ authorization: null, credentials: 'omit' });
+      await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+
+      // Firmware without /SDK/activateStatus: the plain message
+      device.activated = null;
+      $('toast').textContent = '';
+      $('connectBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('Connection failed: Device rejected the username or password'));
+      expect(device.requests.at(-1)).toBe('GET /SDK/activateStatus');
+    } finally {
+      device.activated = true;
+    }
     await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
   });
 
   it('says how many attempts are left before the device locks this computer out', async () => {
     device.loginLock = { lockStatus: 'unlock', unlockTime: 0, retryLoginTime: 2 };
     device.failedLogins = 0;
+    const activationChecks = device.activationChecks.length;
     $('connectBtn').click();
     await vi.waitFor(() => expect(toast())
       .toBe('Connection failed: Wrong user name or password — 2 attempts left before the device locks this computer out'));
     expect(device.failedLogins).toBe(1);
+    // An explained rejection comes from an activated device: nothing more to ask
+    expect(device.activationChecks).toHaveLength(activationChecks);
     await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
   });
 
@@ -1109,5 +1136,22 @@ describe('config page', () => {
     expect(state.connected).toBe(false);
     expect(toast()).toBe('The device has temporarily locked logins from this computer — try again in 10 min');
     expect($('passInput').value).toBe('test-pass');
+  });
+
+  it('shows each device a scan found with its port, says which need activating, and fills in that port', async () => {
+    const { showScanResults } = await import('../../extension/src/scan.js');
+    showScanResults([
+      { ip: '192.168.0.64', port: 8080, confirmed: true, activated: false },
+      { ip: '192.168.0.70', port: 80, confirmed: false, activated: null },
+    ]);
+    expect($('scanResultsText').textContent).toBe('Found 2 devices that may be Hikvision. Click one to connect:');
+    const cards = [...document.querySelectorAll('#scanDeviceList .scan-device-card')];
+    expect(cards.map(card => [...card.children].map(el => el.textContent))).toEqual([
+      ['192.168.0.64', 'Hikvision NVR / Camera • Port 8080', 'Not activated — activate it with Hikvision SADP or its web page first'],
+      ['192.168.0.70', 'Possible Hikvision device • Port 80'],
+    ]);
+    cards[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    expect($('connectionForm').style.display).toBe('block');
+    expect([$('hostInput').value, $('portInput').value]).toEqual(['192.168.0.64', '8080']);
   });
 });

@@ -520,3 +520,41 @@ in XML (`statusValue`, `lockStatus` lock/unlock, `unlockTime` in seconds,
 same (`locked`, `unlockSeconds`, `attemptsLeft`) when a 401 body has them.
 Not verified on the DS-7604NI, since it costs a failed login: whether V4.75
 sends that body, and whether it does for paths other than userCheck.
+
+## Finding devices (network scan)
+
+Hikvision's own tools find devices with SADP (UDP multicast), which an
+extension can't send, so the scan probes likely /24 subnets over HTTP
+(`lib/network-scan.js`, `lib/device-probe.js`).
+
+A device that answers an unauthenticated `GET /ISAPI/System/deviceInfo`
+with 401 and a Digest challenge is a candidate. That alone is a weak
+fingerprint: the DS-7604NI answers 401 Digest for any `/ISAPI` path, even one
+that doesn't exist, its realm is an opaque id (`0123456789abcdef01234567`)
+rather than a model, and routers, NAS boxes and other brands' cameras that
+protect every page answer the same way. So each candidate is then asked
+`GET /SDK/activateStatus`, also without credentials, as the web UI's login
+page does before it shows (`getDeviceActiveStat`). The DS-7604NI answers
+200 without a login:
+
+```xml
+<ActivateStatus version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<Activated>true</Activated>
+</ActivateStatus>
+```
+
+- Root element `ActivateStatus` (by local name): a confirmed Hikvision, and
+  `<Activated>` says whether it has been activated.
+- Anything else (404, another body, no answer in time): the candidate stays
+  listed as a possible Hikvision device. Older firmware may not have the
+  endpoint, so it is never dropped.
+- `Activated` false: the card says to activate it with SADP or its web page
+  first. Until then it has no admin password, so no login works. Unverified:
+  whether a device that isn't activated answers deviceInfo with 401 Digest at
+  all, so such a device may not be found.
+
+The scan never sends credentials (`credentials: 'omit'`), so a probe can't
+count as a failed login. Connect asks the same question after a rejected
+login the device didn't explain (no lock, no attempts left): when the device
+says it isn't activated, the message says to activate it instead of asking
+for another password.

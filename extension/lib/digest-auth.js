@@ -211,8 +211,9 @@ export const HOST_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9](?:[a-zA-Z0-9-]{0
 
 /**
  * Build the device base URL, rejecting anything that isn't a bare host and
- * port so a crafted host value can't redirect requests elsewhere.
- * @param {DeviceConfig} config
+ * port so a crafted host value can't redirect requests elsewhere. Only the
+ * address is needed, so requests made without a login use it too.
+ * @param {Pick<DeviceConfig, 'host'|'port'>} config
  * @returns {string}
  */
 export function buildBaseUrl(config) {

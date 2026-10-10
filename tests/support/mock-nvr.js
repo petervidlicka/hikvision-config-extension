@@ -68,6 +68,16 @@ export function responseStatusXml(path, { statusCode, statusString, subStatusCod
     '</ResponseStatus>\n';
 }
 
+/**
+ * The DS-7604NI's answer to an unauthenticated GET /SDK/activateStatus.
+ * @param {boolean} activated
+ */
+function activateStatusXml(activated) {
+  return '<?xml version="1.0" encoding="UTF-8" ?>\n' +
+    '<ActivateStatus version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n' +
+    `<Activated>${activated}</Activated>\n</ActivateStatus>\n`;
+}
+
 /** The 401 page the DS-7604NI (V4.75) sends with every challenge. */
 const UNAUTHORIZED_HTML = '<!DOCTYPE html>\n<head>\n    <title>Unauthorized</title>\n</head>\n<body>\n' +
   '<h2>Access Error: 401 -- Unauthorized</h2>\n<pre></pre>\n</body>\n</html>\n';
@@ -270,7 +280,10 @@ function picturesOn(day) {
  * password changed on the device (each with a fresh nonce, like V4.75;
  * `failedLogins` counts the ones that carried credentials), `loginLock`
  * makes a rejected userCheck say the device has locked this computer out or
- * how many attempts are left, `failures` answers "METHOD /path" with an error status
+ * how many attempts are left, `activated` is what /SDK/activateStatus says
+ * (answered without a login, as the DS-7604NI does; null: firmware without
+ * it, 404) and `activationChecks` records each of those requests' Authorization
+ * header and credentials mode, `failures` answers "METHOD /path" with an error status
  * (only the first `times` requests, when set), `holds` keeps "METHOD /path"
  * unanswered until its promise settles, `writeStatus` changes what a
  * successful PUT or DELETE reports (e.g. statusCode 7, reboot required), and
@@ -313,6 +326,10 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     fullSizeStill: FULL_SIZE_STILL,
     requests: [], urls: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
     unreachable: false, failedLogins: 0, noncesIssued: 0, digestAuth: false, authorized: 0,
+    /** What /SDK/activateStatus says; null: firmware without it */
+    activated: /** @type {boolean|null} */ (true),
+    /** @type {{authorization: string|null, credentials: RequestCredentials|undefined}[]} */
+    activationChecks: [],
     /** @type {null | {lockStatus: 'lock'|'unlock', unlockTime: number, retryLoginTime: number}} */
     loginLock: null,
     /** @type {Record<string, {httpStatus: number, statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string, times?: number}>} */
@@ -393,6 +410,11 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (hold) await hold;
     if (device.unreachable) throw new TypeError('Failed to fetch');
     const authorization = new Headers(opts.headers).get('Authorization');
+    // Answered without a login, whatever the login state, like the DS-7604NI's
+    if (method === 'GET' && p === '/SDK/activateStatus') {
+      device.activationChecks.push({ authorization, credentials: opts.credentials });
+      return device.activated === null ? new Response('', { status: 404 }) : xml(activateStatusXml(device.activated));
+    }
     if (device.rejectAuth) {
       if (authorization) device.failedLogins++;
       const explained = authorization && device.loginLock && p === '/ISAPI/Security/userCheck';

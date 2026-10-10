@@ -14,7 +14,8 @@
   In the console, `mockDevice` exposes requests and saved XML; set
   `mockDevice.rejectAuth = true` to simulate a password change on the device
   (add `mockDevice.loginLock = {lockStatus: 'lock', unlockTime: 1800, retryLoginTime: 0}`
-  to see the lock message at Connect),
+  to see the lock message at Connect, or `mockDevice.activated = false` to see
+  the one for a device that hasn't been activated),
   `mockDevice.unreachable = true` for a wrong IP address,
   `mockDevice.offlineChannels = ['4']` before Connect to see a disconnected camera
   (its feed shows "No signal"; set it while viewing a channel to see a camera

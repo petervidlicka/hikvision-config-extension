@@ -4,9 +4,10 @@
  */
 
 import { applyStreamSizes } from '../lib/channels.js';
-import { forgetDigestSessions } from '../lib/digest-auth.js';
+import { NOT_ACTIVATED_MESSAGE, checkActivation } from '../lib/device-probe.js';
+import { AuthError, forgetDigestSessions } from '../lib/digest-auth.js';
 import { NetworkError } from '../lib/errors.js';
-import { Isapi } from '../lib/isapi.js';
+import { Isapi, TIMEOUT_MS } from '../lib/isapi.js';
 import { clearFrame, stopAllGridFeeds, stopSnapshotFeed } from './feed.js';
 import { showConnectionForm, showScanIntro } from './scan.js';
 import { dom, state } from './state.js';
@@ -14,8 +15,6 @@ import { ToolRegistry } from './tools/registry.js';
 import { channelLabel, errorMessage, setStatus, showToast } from './ui.js';
 import { selectChannel, switchSection } from './views.js';
 import { resetPlayback } from './playback.js';
-
-/** @typedef {import('../lib/digest-auth.js').AuthError} AuthError */
 
 /**
  * The device rejected our credentials mid-session (password changed, device
@@ -89,7 +88,7 @@ export async function connect() {
 
     await loadChannels();
   } catch (err) {
-    showToast('Connection failed: ' + connectFailureMessage(err, host, port), 'error');
+    showToast('Connection failed: ' + await connectFailureMessage(err, host, port), 'error');
     setStatus('Connection failed');
     dom.statusDot.classList.remove('connected');
   } finally {
@@ -101,16 +100,41 @@ export async function connect() {
 /**
  * Why Connect failed, in words the user can act on. When nothing answers at
  * all (refused, unreachable or timed out), the address is almost always
- * wrong, so say which address was tried.
+ * wrong, so say which address was tried. When the device refuses the login
+ * without saying why, it may not have been activated yet: then no password
+ * works, so asking for another would only cost failed logins. The device
+ * is asked without a login, which costs no attempt.
  * @param {unknown} err
  * @param {string} host
  * @param {string} port
- * @returns {string}
+ * @returns {Promise<string>}
  */
-function connectFailureMessage(err, host, port) {
-  return err instanceof NetworkError
-    ? `No response from ${host}:${port} — check the IP address and port`
-    : errorMessage(err);
+async function connectFailureMessage(err, host, port) {
+  if (err instanceof NetworkError) return `No response from ${host}:${port} — check the IP address and port`;
+  if (isUnexplainedRejection(err) && await isNotActivated(host, port)) return NOT_ACTIVATED_MESSAGE;
+  return errorMessage(err);
+}
+
+/**
+ * A rejected login the device didn't explain: no lock and no attempts left,
+ * which only an activated device's accounts have.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function isUnexplainedRejection(err) {
+  return err instanceof AuthError && !err.locked && err.attemptsLeft === undefined;
+}
+
+/**
+ * Whether the device says it hasn't been activated. Not knowing (older
+ * firmware without /SDK/activateStatus, or no answer) counts as activated.
+ * @param {string} host
+ * @param {string} port
+ * @returns {Promise<boolean>}
+ */
+async function isNotActivated(host, port) {
+  const status = await checkActivation({ host, port }, { timeoutMs: TIMEOUT_MS.connect });
+  return status?.activated === false;
 }
 
 /**
