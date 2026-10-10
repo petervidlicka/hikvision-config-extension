@@ -32,7 +32,7 @@ const state = {
   gridExpandedCell: null,
   // UI state (formerly loose variables)
   configExpanded: false,
-  scanProgressInterval: null,
+  scanAbort: null, // AbortController for a running network scan
 };
 
 // ─── DOM Cache ──────────────────────────────────────────────────────────────
@@ -1316,32 +1316,37 @@ async function startScan() {
   dom.connectionForm.style.display = 'none';
 
   dom.scanProgressFill.style.width = '0%';
-  dom.scanStatusText.innerHTML = 'Scanning your local network<br>for Hikvision devices…';
+  dom.scanStatusText.textContent = 'Scanning your local network for Hikvision devices…';
 
-  const startTime = Date.now();
-  const TOTAL_MS = 10000;
-  state.scanProgressInterval = setInterval(() => {
-    const pct = Math.min(100, ((Date.now() - startTime) / TOTAL_MS) * 100);
-    dom.scanProgressFill.style.width = pct + '%';
-    if (pct >= 100) clearInterval(state.scanProgressInterval);
-  }, 100);
+  state.scanAbort?.abort();
+  const abort = new AbortController();
+  state.scanAbort = abort;
+  let foundCount = 0;
 
   try {
-    const data = await sendMsg({ action: 'scanNetwork' });
-    clearInterval(state.scanProgressInterval);
-    dom.scanProgressFill.style.width = '100%';
-    showScanResults(data.devices || []);
+    const devices = await scanForHikvision({
+      // The last-used host's subnet is the best guess at where the device lives
+      subnets: candidateSubnets([dom.hostInput.value.trim()]),
+      signal: abort.signal,
+      onFound: () => { foundCount++; },
+      onProgress: ({ subnet, probed }) => {
+        dom.scanProgressFill.style.width = `${(probed / 254) * 100}%`;
+        dom.scanStatusText.textContent = `Scanning ${subnet}.x…` +
+          (foundCount ? ` found ${foundCount} device${foundCount > 1 ? 's' : ''}` : '');
+      },
+    });
+    if (!abort.signal.aborted) showScanResults(devices);
   } catch (err) {
-    clearInterval(state.scanProgressInterval);
     showToast('Scan error: ' + err.message, 'error');
     showScanResults([]);
   } finally {
+    if (state.scanAbort === abort) state.scanAbort = null;
     chrome.permissions.remove({ origins: [SCAN_ORIGINS] }).catch(() => {});
   }
 }
 
 function cancelScan() {
-  clearInterval(state.scanProgressInterval);
+  state.scanAbort?.abort();
   showScanIntro();
 }
 
