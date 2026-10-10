@@ -1,9 +1,9 @@
 /**
  * Network scanner with a stubbed fetch: finds devices that ask for a Digest
- * login, confirms them with an unauthenticated /SDK/activateStatus (keeping
- * those that don't confirm as possible devices), caps concurrency, stops
- * after the first subnet with a hit, and cancels. Also the texts the results
- * show.
+ * login on port 80 or 8080, confirms them with an unauthenticated
+ * /SDK/activateStatus (keeping those that don't confirm as possible devices),
+ * caps concurrency, stops after the first subnet with a hit, and cancels.
+ * Also what each probe costs in scan time, and the texts the results show.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { checkActivation, parseActivateStatus } from '../../extension/lib/device-probe.js';
@@ -42,8 +42,8 @@ const answers = new Map([
   // A router's own pages, and a NAS behind Basic
   ['192.168.0.1:80', { [DEVICE_INFO]: { status: 404 } }],
   ['192.168.0.50:80', { [DEVICE_INFO]: { status: 401, headers: { 'www-authenticate': 'Basic realm="x"' } } }],
-  // A new camera that hasn't been activated
-  ['192.168.0.64:80', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: activateStatus(false) }],
+  // A new camera moved to port 8080 that hasn't been activated
+  ['192.168.0.64:8080', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: activateStatus(false) }],
   // Something else behind Digest, or firmware without activateStatus
   ['192.168.0.70:80', { [DEVICE_INFO]: DIGEST }],
   ['10.0.0.20:80', { [DEVICE_INFO]: { status: 401, headers: { 'www-authenticate': 'Digest realm="y"' } } }],
@@ -54,6 +54,11 @@ const answers = new Map([
   ['172.20.0.4:80', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: { status: 200, hang: true } }],
   ['172.20.0.5:80', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: { status: 200, slowBody: true } }],
   ['172.20.0.6:80', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: { status: 200, body: '<ActivateStatus><Activated>maybe</Activated></ActivateStatus>' } }],
+  // One device answering on both ports: confirmed only on 8080, and possible on both
+  ['172.21.0.30:80', { [DEVICE_INFO]: DIGEST }],
+  ['172.21.0.30:8080', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: activateStatus(true) }],
+  ['172.21.0.31:80', { [DEVICE_INFO]: DIGEST }],
+  ['172.21.0.31:8080', { [DEVICE_INFO]: DIGEST }],
 ]);
 const hosts = new Set([...answers.keys()].map(key => key.split(':')[0]));
 
@@ -101,7 +106,10 @@ beforeEach(() => {
     setTimeout(() => done(() => resolve(new Response(body, { status: answer.status, headers: answer.headers ?? {} }))), 5);
   }));
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+});
 
 /** The /SDK/activateStatus requests made, as "host:port". */
 const activationChecks = () => stats.requests
@@ -109,47 +117,63 @@ const activationChecks = () => stats.requests
   .map(r => `${r.url.hostname}:${r.url.port || 80}`);
 
 describe('candidateSubnets', () => {
-  it('puts known hosts first and ignores non-IPs', () => {
-    expect(candidateSubnets(['10.0.0.5', 'not-an-ip', '']).slice(0, 3)).toEqual(['10.0.0', '192.168.0', '192.168.1']);
+  it('puts known hosts first, then the common subnets, then the popular routers’ own', () => {
+    expect(candidateSubnets(['10.0.0.5', 'not-an-ip', ''])).toEqual([
+      '10.0.0', '192.168.0', '192.168.1', '192.168.2', '10.0.1',
+      '192.168.178', '192.168.50', '192.168.88', '192.168.100',
+    ]);
   });
 });
 
 describe('scanForHikvision', () => {
-  it('finds devices that ask for a Digest login, and stops after the first subnet with a hit', async () => {
+  it('finds devices that ask for a Digest login on port 80 or 8080, and stops after the first subnet with a hit', async () => {
     const found = await scanForHikvision({ subnets: ['192.168.0', '10.0.0'], probeTimeoutMs: 50 });
     expect(found).toEqual([
-      { ip: '192.168.0.64', port: 80, confirmed: true, activated: false },
+      { ip: '192.168.0.64', port: 8080, confirmed: true, activated: false },
       { ip: '192.168.0.70', port: 80, confirmed: false, activated: null },
       { ip: '192.168.0.108', port: 80, confirmed: true, activated: true },
     ]);
-    expect(stats.probes).toBe(254);
+    // Every address on both ports, one port after the other
+    expect(stats.probes).toBe(2 * 254);
+    const probedPorts = stats.requests.filter(r => r.url.pathname === DEVICE_INFO).map(r => r.url.port || '80');
+    expect(probedPorts.indexOf('8080')).toBe(254);
     expect(stats.maxInFlight).toBeLessThanOrEqual(48);
   });
 
   it('asks only the candidates whether they are Hikvision, and never with credentials', async () => {
     await scanForHikvision({ subnets: ['192.168.0'], probeTimeoutMs: 50 });
-    expect(activationChecks().sort()).toEqual(['192.168.0.108:80', '192.168.0.64:80', '192.168.0.70:80']);
+    expect(activationChecks().sort()).toEqual(['192.168.0.108:80', '192.168.0.64:8080', '192.168.0.70:80']);
     for (const { url, credentials, cache } of stats.requests) {
       expect({ url: url.href, credentials, cache }).toEqual({ url: url.href, credentials: 'omit', cache: 'no-store' });
     }
   });
 
   it('keeps a candidate whose activateStatus is missing, odd or too slow as a possible device', async () => {
-    const found = await scanForHikvision({ subnets: ['172.20.0'], probeTimeoutMs: 50 });
+    const found = await scanForHikvision({ subnets: ['172.20.0'], ports: [80], probeTimeoutMs: 50 });
     expect(found).toEqual([1, 2, 3, 4, 5, 6].map(n => ({ ip: `172.20.0.${n}`, port: 80, confirmed: n === 6, activated: null })));
+  });
+
+  it('lists an address once, on the port that confirmed it, else on port 80', async () => {
+    const onFound = vi.fn();
+    const found = await scanForHikvision({ subnets: ['172.21.0'], probeTimeoutMs: 50, onFound });
+    expect(found).toEqual([
+      { ip: '172.21.0.30', port: 8080, confirmed: true, activated: true },
+      { ip: '172.21.0.31', port: 80, confirmed: false, activated: null },
+    ]);
+    expect(onFound.mock.calls.map(([device]) => device.ip)).toEqual(['172.21.0.30', '172.21.0.31']);
   });
 
   it('moves on past empty subnets', async () => {
     const found = await scanForHikvision({ subnets: ['192.168.9', '10.0.0'], probeTimeoutMs: 50 });
     expect(found).toEqual([{ ip: '10.0.0.20', port: 80, confirmed: false, activated: null }]);
-    expect(stats.probes).toBe(2 * 254);
+    expect(stats.probes).toBe(2 * 2 * 254);
   });
 
-  it('reports progress out of every address', async () => {
+  it('reports progress out of every address on every port', async () => {
     const progress = vi.fn();
     await scanForHikvision({ subnets: ['192.168.9'], probeTimeoutMs: 20, onProgress: progress });
-    expect(progress).toHaveBeenCalledTimes(254);
-    expect(progress).toHaveBeenLastCalledWith({ subnet: '192.168.9', probed: 254, total: 254 });
+    expect(progress).toHaveBeenCalledTimes(508);
+    expect(progress).toHaveBeenLastCalledWith({ subnet: '192.168.9', probed: 508, total: 508 });
   });
 
   it('stops promptly when cancelled', async () => {
@@ -159,15 +183,29 @@ describe('scanForHikvision', () => {
     await scanForHikvision({ subnets: ['172.16.0', '172.16.1'], signal: abort.signal });
     expect(Date.now() - started).toBeLessThan(500);
   });
+
+  // The cost of trying a second port: an address with nothing on it takes a whole
+  // probe timeout per port, through the same pool of 48
+  it.each([
+    { ports: [80], rounds: 6 },
+    { ports: [80, 8080], rounds: 11 },
+  ])('takes $rounds probe timeouts for an empty subnet on ports $ports', async ({ ports, rounds }) => {
+    vi.useFakeTimers();
+    const started = Date.now();
+    const scan = scanForHikvision({ subnets: ['192.168.9'], ports, probeTimeoutMs: 1200 });
+    await vi.runAllTimersAsync();
+    await scan;
+    expect(Date.now() - started).toBe(rounds * 1200);
+  });
 });
 
 describe('checkActivation', () => {
   it('asks without credentials and reads the answer', async () => {
     expect(await checkActivation({ host: '192.168.0.108', port: '80' }, { timeoutMs: 50 })).toEqual({ activated: true });
-    expect(await checkActivation({ host: '192.168.0.64', port: 80 }, { timeoutMs: 50 })).toEqual({ activated: false });
+    expect(await checkActivation({ host: '192.168.0.64', port: 8080 }, { timeoutMs: 50 })).toEqual({ activated: false });
     expect(stats.requests.map(r => [r.url.href, r.credentials])).toEqual([
       ['http://192.168.0.108/SDK/activateStatus', 'omit'],
-      ['http://192.168.0.64/SDK/activateStatus', 'omit'],
+      ['http://192.168.0.64:8080/SDK/activateStatus', 'omit'],
     ]);
   });
 

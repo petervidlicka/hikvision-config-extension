@@ -7,6 +7,19 @@
  * of connections together overflows Chrome's socket pool and the OS ARP
  * queue, and real devices then miss their timeout.
  *
+ * Each address is tried on HTTP port 80 and on 8080, where devices moved off
+ * the default port often are. Both ports share the one pool, so an address
+ * with nothing on it costs a timeout per port: a subnet with nothing on it
+ * takes 11 rounds of PROBE_TIMEOUT_MS (about 13 s) instead of 6 (about
+ * 7 s), and a scan that finds nothing in any of the nine subnets about 2 min.
+ * Growing the pool to win that back would bring back the overflow above.
+ * The cost only falls on subnets without a device, since the scan stops after
+ * the first subnet with one, and the user can cancel at any time. The whole
+ * subnet is tried on one port before the next, so two connections to one
+ * address never wait on the same ARP lookup (some systems hold only one
+ * packet per pending lookup and drop the other, which then misses its
+ * timeout).
+ *
  * A device that asks for a Digest login like ISAPI does is a candidate; one
  * that also answers /SDK/activateStatus is a confirmed Hikvision (see
  * lib/device-probe.js). Candidates that don't confirm are still listed, as
@@ -17,8 +30,19 @@
 
 import { asksForDigestLogin, checkActivation } from './device-probe.js';
 
-/** Subnets most home/office routers hand out, tried after any known subnet. */
-export const COMMON_SUBNETS = ['192.168.0', '192.168.1', '192.168.2', '10.0.0', '10.0.1'];
+/**
+ * Subnets home and office routers hand out, tried after any known subnet:
+ * the most common defaults, then those of popular routers (AVM Fritz!Box
+ * 192.168.178, Asus 192.168.50, MikroTik 192.168.88, many ISP routers
+ * 192.168.100), which are only reached when nothing was found earlier.
+ */
+export const COMMON_SUBNETS = Object.freeze([
+  '192.168.0', '192.168.1', '192.168.2', '10.0.0', '10.0.1',
+  '192.168.178', '192.168.50', '192.168.88', '192.168.100',
+]);
+
+/** HTTP ports a device is looked for on, in order of preference: the default, then the usual alternative. */
+export const PROBE_PORTS = Object.freeze([80, 8080]);
 
 export const PROBE_CONCURRENCY = 48;
 export const PROBE_TIMEOUT_MS = 1200;
@@ -102,42 +126,72 @@ export function describeScanResults(devices) {
 /**
  * Scan subnets one at a time and stop after the first subnet that contains a
  * device — the remaining subnets are only guesses, so scanning them would
- * just make the user wait.
+ * just make the user wait. Each address is listed once: when it answers on
+ * more than one port, on the one that confirmed it is a Hikvision, else on
+ * the first of `ports`.
  *
  * @param {object} options
- * @param {string[]} options.subnets - prefixes from candidateSubnets()
+ * @param {readonly string[]} options.subnets - prefixes from candidateSubnets()
+ * @param {readonly number[]} [options.ports] - HTTP ports to try each address on
  * @param {AbortSignal} [options.signal] - cancels the scan
  * @param {number} [options.probeTimeoutMs] - how long to wait for each request
- * @param {(device: FoundDevice) => void} [options.onFound]
+ * @param {(device: FoundDevice) => void} [options.onFound] - called once per address found
  * @param {(progress: {subnet: string, probed: number, total: number}) => void} [options.onProgress]
- *   `probed` counts the addresses checked in the current subnet, out of `total` (254).
+ *   `probed` counts the probes done in the current subnet, out of `total` (254 addresses × ports).
  * @returns {Promise<FoundDevice[]>} in address order
  */
-export async function scanForHikvision({ subnets, signal, onFound, onProgress, probeTimeoutMs = PROBE_TIMEOUT_MS }) {
-  /** @type {FoundDevice[]} */
-  const found = [];
+export async function scanForHikvision({
+  subnets, ports = PROBE_PORTS, signal, onFound, onProgress, probeTimeoutMs = PROBE_TIMEOUT_MS,
+}) {
+  /** The best answer from each address. @type {Map<string, FoundDevice>} */
+  const found = new Map();
+  /** @param {FoundDevice} device */
+  const record = (device) => {
+    const known = found.get(device.ip);
+    if (!known) onFound?.(device);
+    if (!known || preferred(device, known, ports)) found.set(device.ip, device);
+  };
 
   for (const subnet of subnets) {
-    let probed = 0;
-    const queue = Array.from({ length: 254 }, (_, i) => `${subnet}.${i + 1}`);
+    const queue = subnetProbes(subnet, ports);
     const total = queue.length;
+    let probed = 0;
     const worker = async () => {
       while (queue.length > 0 && !signal?.aborted) {
-        const ip = /** @type {string} */ (queue.shift());
-        const device = await probeHikvision(ip, 80, { signal, timeoutMs: probeTimeoutMs });
-        if (device && !signal?.aborted) {
-          found.push(device);
-          onFound?.(device);
-        }
+        const { ip, port } = /** @type {{ip: string, port: number}} */ (queue.shift());
+        const device = await probeHikvision(ip, port, { signal, timeoutMs: probeTimeoutMs });
+        if (device && !signal?.aborted) record(device);
         probed++;
         onProgress?.({ subnet, probed, total });
       }
     };
     await Promise.all(Array.from({ length: PROBE_CONCURRENCY }, worker));
 
-    if (signal?.aborted || found.length > 0) break;
+    if (signal?.aborted || found.size > 0) break;
   }
 
-  found.sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
-  return found;
+  return [...found.values()].sort((a, b) => a.ip.localeCompare(b.ip, undefined, { numeric: true }));
+}
+
+/**
+ * Every address of a /24 subnet on every port, one port after the other.
+ * @param {string} subnet - e.g. "192.168.0"
+ * @param {readonly number[]} ports
+ * @returns {{ip: string, port: number}[]}
+ */
+function subnetProbes(subnet, ports) {
+  return ports.flatMap(port => Array.from({ length: 254 }, (_, i) => ({ ip: `${subnet}.${i + 1}`, port })));
+}
+
+/**
+ * Whether a device's answer on one port beats its answer on another: a
+ * confirmed Hikvision first, then the port earlier in the list.
+ * @param {FoundDevice} candidate
+ * @param {FoundDevice} current
+ * @param {readonly number[]} ports
+ * @returns {boolean}
+ */
+function preferred(candidate, current, ports) {
+  if (candidate.confirmed !== current.confirmed) return candidate.confirmed;
+  return ports.indexOf(candidate.port) < ports.indexOf(current.port);
 }

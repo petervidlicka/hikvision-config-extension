@@ -558,3 +558,22 @@ count as a failed login. Connect asks the same question after a rejected
 login the device didn't explain (no lock, no attempts left): when the device
 says it isn't activated, the message says to activate it instead of asking
 for another password.
+
+Each address is tried on port 80 and on 8080, the usual alternative for a
+device whose web port was moved, and the card shows the port it answered on
+(an address that answers on both is listed once, on the port that confirmed
+it, else on 80). The optional host permission `http://*/*` the scan asks for
+covers both: a match pattern without a port matches every port. Both ports
+go through the one pool of 48 probes, and an address with nothing on it costs
+a whole probe timeout (1.2 s) per port. Measured with the test mock, a subnet
+with nothing on it takes 11 timeouts (about 13 s) instead of 6 (about 7 s).
+Subnets are tried in order (the last-used host's, then 192.168.0, .1, .2,
+10.0.0, 10.0.1, then the defaults of AVM Fritz!Box 192.168.178, Asus
+192.168.50, MikroTik 192.168.88 and many ISP routers 192.168.100), and the
+scan stops after the first subnet with a device. So the extra time only falls
+on subnets without one, and a scan that finds nothing anywhere takes about
+2 minutes (before: five subnets on one port, about 36 s). The pool isn't
+grown to win the time back, since that is what kept Chrome's socket pool and
+the OS ARP queue from overflowing, which made real devices miss their timeout.
+The whole subnet is tried on port 80 before 8080, so two connections to one
+address never wait on the same ARP lookup.

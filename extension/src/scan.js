@@ -8,7 +8,11 @@ import { errorMessage, showToast } from './ui.js';
 
 // ─── Network Scanner ─────────────────────────────────────────────────────────
 
-/** Broad access granted only while a scan runs (see startScan). */
+/**
+ * Broad access granted only while a scan runs (see startScan). A match
+ * pattern without a port matches every port, so this covers the scan's
+ * port 8080 probes too.
+ */
 export const SCAN_ORIGINS = 'http://*/*';
 
 export function showScanIntro() {
