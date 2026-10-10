@@ -162,6 +162,29 @@ export class TimeoutError extends NetworkError {
 }
 
 /**
+ * The device answered a request for an image successfully, but not with an
+ * image (an empty body, a page, another format), so there is nothing to show.
+ * Separate from IsapiError, which is an error answer the device explained:
+ * this URL may simply not be how this firmware serves pictures, so a
+ * snapshot fallback moves on to the next one (see lib/snapshots.js).
+ */
+export class NotAnImageError extends Error {
+  /**
+   * @param {object} init
+   * @param {string} init.method
+   * @param {string} init.path
+   * @param {string|null} init.contentType - what the device said it sent
+   */
+  constructor({ method, path, contentType }) {
+    super('The device didn’t send an image for this camera. Its firmware may not provide snapshots this way.');
+    this.name = 'NotAnImageError';
+    this.method = method;
+    this.path = path;
+    this.contentType = contentType;
+  }
+}
+
+/**
  * A save that takes more than one request failed partway, and putting the
  * device back as it was failed too, so it may now have neither the old nor
  * the new settings. The message tells the user what may be lost and what to
@@ -197,7 +220,8 @@ export class WriteRollbackError extends Error {
  *   requests only add delay and load
  * - 503 serviceUnavailable or deviceBusy: try again later, not elsewhere. An
  *   empty channel's snapshot answers 503 on this NVR, so moving on to the
- *   next URL would spend every candidate on each frame.
+ *   next URL would spend every candidate on each frame (lib/snapshots.js
+ *   keeps that URL and asks it less and less often instead).
  * @param {unknown} err
  * @returns {boolean}
  * @example

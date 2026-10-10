@@ -16,7 +16,9 @@
   (add `mockDevice.loginLock = {lockStatus: 'lock', unlockTime: 1800, retryLoginTime: 0}`
   to see the lock message at Connect),
   `mockDevice.unreachable = true` for a wrong IP address,
-  `mockDevice.offlineChannels = ['4']` before Connect to see a disconnected camera,
+  `mockDevice.offlineChannels = ['4']` before Connect to see a disconnected camera
+  (its feed shows "No signal"; set it while viewing a channel to see a camera
+  stop answering, and back to [] to see it recover),
   `mockDevice.writeStatus = {statusCode: 7, statusString: 'Reboot Required', subStatusCode: 'rebootRequired'}`
   for a save that needs a reboot, or add an error answer to
   `mockDevice.failures` (see tests/support/mock-nvr.js).

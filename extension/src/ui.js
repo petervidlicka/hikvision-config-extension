@@ -8,12 +8,22 @@ import { dom, state } from './state.js';
 /** @typedef {import('../lib/isapi.js').WriteResult} WriteResult */
 
 /**
+ * A channel with its kind, which decides the ISAPI URL family, and whether
+ * the device lists it online. A channel missing from the list counts as an
+ * analog one.
+ * @param {string} channelId
+ * @returns {Channel}
+ */
+export function channelInfo(channelId) {
+  return state.channels.find(ch => ch.id === channelId) ?? { id: channelId, name: '', kind: 'analog' };
+}
+
+/**
  * The active channel with its kind, which decides the ISAPI URL family.
  * @returns {Channel}
  */
 export function activeChannelInfo() {
-  return state.channels.find(ch => ch.id === state.activeChannel)
-    ?? { id: state.activeChannel ?? '', name: '', kind: 'analog' };
+  return channelInfo(state.activeChannel ?? '');
 }
 
 /**

@@ -80,10 +80,14 @@ function userCheckRejectedXml({ lockStatus, unlockTime, retryLoginTime }) {
     `<retryLoginTime>${retryLoginTime}</retryLoginTime>\n</userCheck>\n`;
 }
 
-/** What the DS-7604NI answers for a resource it doesn't have, or a write that succeeded. */
+/**
+ * What the DS-7604NI answers for a resource it doesn't have, a write that
+ * succeeded, or a snapshot of a channel without a camera (HTTP 503).
+ */
 export const STATUS = {
   notSupport: { statusCode: 4, statusString: 'Invalid Operation', subStatusCode: 'notSupport' },
   ok: { statusCode: 1, statusString: 'OK', subStatusCode: 'ok' },
+  serviceUnavailable: { statusCode: 2, statusString: 'Device Busy', subStatusCode: 'serviceUnavailable' },
 };
 
 /** Direct children of `el` with the given local name. */
@@ -205,8 +209,9 @@ function todaysPictures() {
  * unanswered until its promise settles, `writeStatus` changes what a
  * successful PUT or DELETE reports (e.g. statusCode 7, reboot required), and
  * `offlineChannels` lists the cameras the NVR's status reports disconnected
- * (e.g. ['4']). `privacy.read(path)` shows the privacy masks a channel stores,
- * `triggers.read(channel)` its motion trigger.
+ * (e.g. ['4']); their snapshots answer 503 serviceUnavailable, as an empty
+ * channel's do on the DS-7604NI. `privacy.read(path)` shows the privacy
+ * masks a channel stores, `triggers.read(channel)` its motion trigger.
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
@@ -308,8 +313,12 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       return xml(channelStatus.replace(/(<id>(\d+)<\/id>[\s\S]*?<online>)true</g,
         (all, head, id) => (device.offlineChannels.includes(id) ? `${head}false<` : all)));
     }
-    if (/^\/ISAPI\/Streaming\/channels\/\d+0[12]\/picture$/.test(p)) {
+    // Live frames, directly or through StreamingProxy (the DS-7604NI serves the same frame on both)
+    const snapshot = p.match(/^\/ISAPI\/(?:Streaming|ContentMgmt\/StreamingProxy)\/channels\/(\d+)0[12]\/picture$/);
+    if (snapshot) {
       opts.signal?.throwIfAborted();
+      // What a disconnected camera's snapshot answers isn't verified; an empty channel's is this
+      if (device.offlineChannels.includes(snapshot[1])) return xml(responseStatusXml(p, STATUS.serviceUnavailable), 503);
       device.inFlightSnapshots++;
       device.maxInFlightSnapshots = Math.max(device.maxInFlightSnapshots, device.inFlightSnapshots);
       // Like a real connection, an aborted request stops occupying the device

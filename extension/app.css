@@ -271,6 +271,26 @@ input::placeholder { color: #555568; }
   cursor: crosshair;
 }
 
+/* The live feed stopped delivering frames: say so, and dim the last frame as stale */
+.feed-overlay {
+  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 12px;
+  pointer-events: none;
+}
+.canvas-container.no-signal .feed-overlay { display: block; }
+.canvas-container.no-signal #videoFeed,
+.grid-cell.no-signal img.grid-feed { filter: grayscale(1) brightness(0.45); }
+
 .no-feed { text-align: center; color: var(--text-dim); }
 .no-feed .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.3; }
 .no-feed p { font-size: 14px; }
@@ -565,6 +585,16 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 12px;
   color: var(--text-dim);
   opacity: 0.5;
+}
+/* Over the cell's last frame, which is positioned */
+.grid-cell.no-signal .grid-no-feed {
+  position: relative;
+  z-index: 1;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  opacity: 1;
 }
 
 /* ── Network Scanner ── */

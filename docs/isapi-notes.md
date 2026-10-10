@@ -243,6 +243,35 @@ The limit includes downloading the body, so full-size JPEGs (main stream,
 stored pictures, stills from recordings) get 10 s and sub-stream frames 5 s:
 an 8 MP frame of about 1.5 MB takes about 6 s over a 2 Mbps remote link.
 
+## Live snapshots
+
+A channel's current frame is a JPEG at `/ISAPI/Streaming/channels/{id}01/picture`
+(main stream) or `…/{id}02/picture` (sub stream). The web UI uses
+`/ISAPI/ContentMgmt/StreamingProxy/channel/{id}{ss}/Picture` for IP cameras;
+the DS-7604NI serves the same frame at `…/StreamingProxy/channels/{id}02/picture`
+(plural, lower case), with `Content-Type: image/jpeg`. It answers the bare
+channel ID (`/channels/1/picture`) with 400 `badXmlContent`, and a channel
+without a camera with 503 `serviceUnavailable` within about 30 ms.
+
+`lib/snapshots.js` tries, in order: the stream asked for, the main stream
+(for a camera without a sub-stream), StreamingProxy for an IP camera, then
+the bare ID. It keeps the first URL that serves a frame, so each later frame
+is one request, and only looks again after 4 failed requests in a row. A URL
+where the device answered with an error other than "not here" (503,
+`lowPrivilege`) is kept too, as the next URLs would answer the same; a
+successful answer that isn't a JPEG (no `FF D8` start) counts as "not here".
+`digestFetch` reads an answer as bytes when its Content-Type is `image/*` or
+its URL has `/picture` in any letter case.
+
+While requests fail, the feed waits 0.5, 1, 2, 4, 8 s, then 10 s between them
+(instead of a request every 200 ms, or three when every URL was tried each
+time), and a frame resets it. After 2 failures in a row the view shows "No
+signal" over the last frame, dimmed as stale. A camera the NVR lists offline
+(`<online>false`) starts that way, with slow retries, but is still asked,
+since the camera may be back. What the DS-7604NI answers for a disconnected
+camera's snapshot hasn't been verified (no camera was unplugged); the mock
+answers 503 like an empty channel.
+
 ## Logins and lockout
 
 The device locks a computer (by IP address) out after a few failed logins,

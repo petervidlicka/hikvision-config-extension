@@ -10,7 +10,7 @@
  * answered "not here", stop on anything that would fail the same way again.
  *
  * Depends on lib/channels.js, lib/config-xml.js, lib/digest-auth.js,
- * lib/errors.js and lib/xml.js.
+ * lib/errors.js, lib/playback.js, lib/snapshots.js and lib/xml.js.
  */
 
 import {
@@ -21,12 +21,13 @@ import {
   AuthError, digestFetch, forgetDigestSessions, forgetRejectedCredentials, rejectCredentials,
 } from './digest-auth.js';
 import {
-  IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError, parseLoginStatus,
-  parseResponseStatus,
+  IsapiError, NotAnImageError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError,
+  parseLoginStatus, parseResponseStatus,
 } from './errors.js';
 import {
   buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey, toDeviceTime,
 } from './playback.js';
+import { SnapshotSource, isJpeg, snapshotPaths } from './snapshots.js';
 import {
   childElements, childText, cloneXml, findDescendant, parseXml, parseXmlOrNull, serializeXml,
 } from './xml.js';
@@ -41,6 +42,7 @@ import {
 /** @typedef {import('./digest-auth.js').RequestOptions} RequestOptions */
 /** @typedef {import('./playback.js').Recording} Recording */
 /** @typedef {import('./playback.js').StoredPicture} StoredPicture */
+/** @typedef {import('./snapshots.js').SnapshotStream} SnapshotStream */
 
 /**
  * Stop paging one search after this many requests. At up to 50 matches a
@@ -78,8 +80,14 @@ export const TIMEOUT_MS = Object.freeze({
 /** The explicit login check of Hikvision's web UI and SDK (see Isapi.checkLogin). */
 const USER_CHECK_PATH = '/ISAPI/Security/userCheck';
 
-/** A sub-stream (SD) snapshot: stream ID channel × 100 + 2. */
-const SUB_STREAM_PICTURE = /\/Streaming\/channels\/\d+02\/picture(?:\?|$)/;
+/** A picture URL, in any letter case (see lib/digest-auth.js). */
+const PICTURE_PATH = /\/picture(?:[/?]|$)/i;
+
+/** A sub-stream (SD) snapshot, direct or through StreamingProxy: stream ID channel × 100 + 2. */
+const SUB_STREAM_PICTURE = /\/Streaming(?:Proxy)?\/channels\/\d+02\/picture(?:\?|$)/i;
+
+/** Read at most this much of a snapshot answer that isn't an image for the device's explanation. */
+const MAX_STATUS_BYTES = 4096;
 
 /**
  * Time limit for a request whose caller doesn't set one.
@@ -90,7 +98,7 @@ const SUB_STREAM_PICTURE = /\/Streaming\/channels\/\d+02\/picture(?:\?|$)/;
 export function defaultTimeoutMs(method, path) {
   switch (method.toUpperCase()) {
     case 'GET':
-      if (!path.includes('/picture')) return TIMEOUT_MS.read;
+      if (!PICTURE_PATH.test(path)) return TIMEOUT_MS.read;
       return SUB_STREAM_PICTURE.test(path) ? TIMEOUT_MS.picture : TIMEOUT_MS.fullPicture;
     case 'POST': return TIMEOUT_MS.search;
     default: return TIMEOUT_MS.write;
@@ -365,38 +373,67 @@ export const Isapi = {
   },
 
   /**
-   * Fetch one JPEG frame. Stream IDs are channel × 100 + 1 for the main
-   * (HD) stream and + 2 for the sub (SD) stream, which is smaller and faster.
-   * Falls back to the main stream when a camera has no sub-stream, and to
-   * the bare channel ID for firmware that uses that. A busy device, an
-   * unavailable camera (503) or a timeout ends the attempt for this frame
-   * rather than trying every URL each time.
+   * Fetch one JPEG frame of a channel, finding the URL that serves it (see
+   * snapshotPaths in lib/snapshots.js): the stream asked for, then the main
+   * stream for a camera without a sub-stream, StreamingProxy for an IP
+   * camera, and the bare channel ID. A busy device, an unavailable camera
+   * (503) or a timeout ends the attempt rather than trying every URL.
+   *
+   * For a live feed use snapshotSource instead, which finds the URL once and
+   * keeps it.
    *
    * When no URL has the frame, the first URL's error is the one thrown: it
    * is the stream the user asked for. The bare channel ID is only a guess,
    * and the DS-7604NI answers it with 400 badXmlContent, which would explain
    * nothing.
    * @param {DeviceConfig} config
-   * @param {string} channelId
-   * @param {'main'|'sub'} [stream]
-   * @param {RequestOptions} [options] - e.g. the live feed's abort signal
+   * @param {Pick<Channel, 'id'|'kind'>} channel
+   * @param {SnapshotStream} [stream]
+   * @param {RequestOptions} [options] - e.g. an abort signal
    * @returns {Promise<Blob>}
    */
-  async getSnapshot(config, channelId, stream = 'main', options = {}) {
-    const ids = stream === 'sub' ? [`${channelId}02`, `${channelId}01`] : [`${channelId}01`];
-    ids.push(channelId);
-    /** @type {unknown} */
-    let firstError;
-    for (const id of ids) {
-      try {
-        const resp = await this.request(config, 'GET', `/ISAPI/Streaming/channels/${id}/picture`, null, options);
-        return new Blob([resp.data], { type: 'image/jpeg' });
-      } catch (err) {
-        if (!isFallbackError(err)) throw err;
-        firstError ??= err;
-      }
+  async getSnapshot(config, channel, stream = 'main', options = {}) {
+    return this.snapshotSource(config, channel, stream).next(options);
+  },
+
+  /**
+   * A channel's live frames, for polling: finds the URL that serves them on
+   * the first request, then asks only that one, and backs off while
+   * requests fail (see SnapshotSource and pollSnapshots in lib/snapshots.js).
+   * A camera the device lists as offline starts out with no signal and slow
+   * retries.
+   * @param {DeviceConfig} config
+   * @param {Pick<Channel, 'id'|'kind'|'online'>} channel
+   * @param {SnapshotStream} [stream]
+   * @returns {SnapshotSource}
+   */
+  snapshotSource(config, channel, stream = 'main') {
+    return new SnapshotSource(
+      snapshotPaths(channel, stream),
+      (path, options) => this.fetchSnapshot(config, path, options),
+      { offline: channel.online === false },
+    );
+  },
+
+  /**
+   * One frame from one snapshot URL. A successful answer that isn't a JPEG
+   * fails too, so it never reaches an <img>: with the device's reason when
+   * the body is a ResponseStatus, else with NotAnImageError.
+   * @param {DeviceConfig} config
+   * @param {string} path - a snapshot URL, e.g. "/ISAPI/Streaming/channels/102/picture"
+   * @param {RequestOptions} [options]
+   * @returns {Promise<Blob>} image/jpeg
+   * @throws {IsapiError|NotAnImageError} besides the errors of request()
+   */
+  async fetchSnapshot(config, path, options = {}) {
+    const resp = await this.request(config, 'GET', path, null, options);
+    const bytes = typeof resp.data === 'string' ? new TextEncoder().encode(resp.data) : new Uint8Array(resp.data);
+    if (isJpeg(bytes)) return new Blob([bytes], { type: 'image/jpeg' });
+    const status = parseResponseStatus(new TextDecoder().decode(bytes.subarray(0, MAX_STATUS_BYTES)));
+    if (status && status.statusCode !== STATUS_OK) {
+      throw new IsapiError({ method: 'GET', path, httpStatus: resp.status, status });
     }
-    throw firstError;
+    throw new NotAnImageError({ method: 'GET', path, contentType: resp.headers.get('Content-Type') });
   },
 
   /**
@@ -675,7 +712,7 @@ export const Isapi = {
       try {
         const resp = await this.request(config, 'GET', path);
         const bytes = new Uint8Array(/** @type {ArrayBuffer} */ (resp.data));
-        if (bytes[0] === 0xff && bytes[1] === 0xd8) return new Blob([bytes], { type: 'image/jpeg' });
+        if (isJpeg(bytes)) return new Blob([bytes], { type: 'image/jpeg' });
       } catch (err) {
         if (!(err instanceof IsapiError)) throw err;
       }

@@ -103,6 +103,68 @@ describe('config page', () => {
     expect(device.maxInFlightSnapshots).toBe(1);
   });
 
+  it('says "No signal" over the stale frame when the camera stops answering, asks less often, and recovers', async () => {
+    const snapshot = 'GET /ISAPI/Streaming/channels/101/picture';
+    const since = device.requests.length;
+    const asked = () => device.requests.slice(since).filter(r => r === snapshot).length;
+    device.failures[snapshot] = { httpStatus: 503, ...STATUS.serviceUnavailable };
+    try {
+      await vi.waitFor(() => expect(dom.canvasContainer.classList.contains('no-signal')).toBe(true), { timeout: 5000 });
+      expect($('feedOverlay').checkVisibility()).toBe(true);
+      expect($('feedOverlay').textContent).toBe('No signal');
+      expect(dom.videoFeed.src).toMatch(/^blob:/); // the last frame stays on screen, dimmed
+      expect($('statusText').textContent).toMatch(/^Failed to get video feed: The device is busy or the camera isn’t available/);
+      // Two failed requests half a second apart, not one every 200 ms
+      expect(asked()).toBe(2);
+    } finally {
+      delete device.failures[snapshot];
+    }
+    // The next retry, a second later, gets a frame (and the one after it may be on its way)
+    await vi.waitFor(() => expect(dom.canvasContainer.classList.contains('no-signal')).toBe(false), { timeout: 5000 });
+    expect($('feedOverlay').checkVisibility()).toBe(false);
+    expect(asked()).toBeLessThanOrEqual(4);
+    expect($('statusText').textContent).toBe('Live view');
+  });
+
+  it('shows a camera the NVR lists offline as "No signal" in the grid at once, asking it only now and then', async () => {
+    // Channel 4 was listed offline at Connect; its snapshots now answer 503 too
+    expect(state.channels[3].online).toBe(false);
+    device.offlineChannels = ['4'];
+    const since = device.requests.length;
+    try {
+      $('gridViewTab').click();
+      const cell = document.querySelectorAll('.grid-cell')[3];
+      expect(cell.classList.contains('no-signal')).toBe(true);
+      expect(cell.querySelector('.grid-no-feed').textContent).toBe('No signal');
+      expect(cell.querySelector('.grid-no-feed').checkVisibility()).toBe(true);
+      await new Promise(r => setTimeout(r, 1000));
+      expect(device.requests.slice(since).filter(r => r.includes('/channels/402/'))).toEqual(['GET /ISAPI/Streaming/channels/402/picture']);
+      expect(cell.querySelector('.grid-no-feed').getAttribute('title')).toMatch(/camera isn’t available/);
+      // The other cells are still loading or showing frames
+      expect(document.querySelectorAll('.grid-cell.no-signal')).toHaveLength(1);
+    } finally {
+      device.offlineChannels = [];
+      $('singleViewTab').click();
+    }
+  });
+
+  it('doesn’t pass off the previous channel’s frame as an offline camera’s last one', async () => {
+    const channelItems = () => document.querySelectorAll('.channel-item');
+    device.offlineChannels = ['4'];
+    try {
+      await vi.waitFor(() => expect(dom.videoFeed.src).toMatch(/^blob:/), { timeout: 3000 });
+      channelItems()[3].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(dom.canvasContainer.classList.contains('no-signal')).toBe(true);
+      expect(dom.videoFeed.hasAttribute('src')).toBe(false);
+    } finally {
+      device.offlineChannels = [];
+      channelItems()[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    }
+    expect(dom.canvasContainer.classList.contains('no-signal')).toBe(false);
+    // The drawing steps below need channel 1's frame on screen
+    await vi.waitFor(() => expect(dom.videoFeed.naturalWidth).toBeGreaterThan(0), { timeout: 3000 });
+  });
+
   it('loads motion detection with the device limits', async () => {
     $('configSectionTab').click();
     await vi.waitFor(() => expect(state.motionDoc).not.toBeNull());

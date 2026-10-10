@@ -4,9 +4,10 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthError } from '../../extension/lib/digest-auth.js';
-import { IsapiError, NetworkError, TimeoutError, WriteRollbackError } from '../../extension/lib/errors.js';
+import { IsapiError, NetworkError, NotAnImageError, TimeoutError, WriteRollbackError } from '../../extension/lib/errors.js';
 import { readPrivacyMask } from '../../extension/lib/config-xml.js';
 import { Isapi, TIMEOUT_MS, defaultTimeoutMs } from '../../extension/lib/isapi.js';
+import { RESOLVE_AGAIN_AFTER_FAILURES } from '../../extension/lib/snapshots.js';
 import { childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import { NVR_HOST, STATUS, createMockNvr, responseStatusXml } from '../support/mock-nvr.js';
 import { fixtures } from './fixtures.js';
@@ -38,6 +39,11 @@ function mockDevice(routes) {
 const statusRoute = (status, statusCode, subStatusCode, statusString = 'Error') => ({
   status, body: responseStatusXml('/x', { statusCode, statusString, subStatusCode }),
 });
+
+/** A channel wired to the device, as getChannels lists it; snapshot URLs depend on the kind. */
+const analog = (id) => ({ id, name: '', kind: 'analog' });
+/** An IP camera behind an NVR. */
+const digital = (id) => ({ id, name: '', kind: 'digital' });
 
 let configSeq = 0;
 /** Fresh credentials per test so the rejected-credentials guard doesn't leak between tests. */
@@ -136,24 +142,24 @@ describe('Isapi', () => {
 
   it('falls back to the main stream when a camera has no sub-stream', async () => {
     const calls = mockDevice({ '/ISAPI/Streaming/channels/301/picture': { body: new Uint8Array([0xff, 0xd8]) } });
-    const blob = await Isapi.getSnapshot(testConfig(), '3', 'sub');
+    const blob = await Isapi.getSnapshot(testConfig(), analog('3'), 'sub');
     expect(blob.size).toBe(2);
     expect(calls).toEqual(['/ISAPI/Streaming/channels/302/picture', '/ISAPI/Streaming/channels/301/picture']);
   });
 
   it('returns snapshots as JPEG blobs', async () => {
     mockDevice({ '/ISAPI/Streaming/channels/101/picture': { body: new Uint8Array([0xff, 0xd8, 0xff]) } });
-    const blob = await Isapi.getSnapshot(testConfig(), '1');
+    const blob = await Isapi.getSnapshot(testConfig(), analog('1'));
     expect([blob.type, blob.size]).toEqual(['image/jpeg', 3]);
   });
 
   it('stops snapshot fallbacks when the camera isn’t available (503) or the device is slow', async () => {
     let calls = mockDevice({ '/ISAPI/Streaming/channels/501/picture': statusRoute(503, 2, 'serviceUnavailable', 'Device Busy') });
-    await expect(Isapi.getSnapshot(testConfig(), '5')).rejects.toMatchObject({ httpStatus: 503, subStatusCode: 'serviceUnavailable' });
+    await expect(Isapi.getSnapshot(testConfig(), analog('5'))).rejects.toMatchObject({ httpStatus: 503, subStatusCode: 'serviceUnavailable' });
     expect(calls).toEqual(['/ISAPI/Streaming/channels/501/picture']);
 
     calls = mockDevice({ '/ISAPI/Streaming/channels/102/picture': { hang: true } });
-    await expect(Isapi.getSnapshot(testConfig(), '1', 'sub', { timeoutMs: 50 })).rejects.toBeInstanceOf(TimeoutError);
+    await expect(Isapi.getSnapshot(testConfig(), analog('1'), 'sub', { timeoutMs: 50 })).rejects.toBeInstanceOf(TimeoutError);
     expect(calls).toEqual(['/ISAPI/Streaming/channels/102/picture']);
   });
 
@@ -162,7 +168,7 @@ describe('Isapi', () => {
       '/ISAPI/Streaming/channels/101/picture': statusRoute(403, 4, 'notSupport'),
       '/ISAPI/Streaming/channels/1/picture': { body: new Uint8Array([0xff, 0xd8]) },
     });
-    expect((await Isapi.getSnapshot(testConfig(), '1')).size).toBe(2);
+    expect((await Isapi.getSnapshot(testConfig(), analog('1'))).size).toBe(2);
     expect(calls).toEqual(['/ISAPI/Streaming/channels/101/picture', '/ISAPI/Streaming/channels/1/picture']);
   });
 
@@ -172,7 +178,7 @@ describe('Isapi', () => {
       '/ISAPI/Streaming/channels/101/picture': statusRoute(403, 4, 'notSupport'),
       '/ISAPI/Streaming/channels/1/picture': statusRoute(400, 6, 'badXmlContent'),
     });
-    const err = await Isapi.getSnapshot(testConfig(), '1').catch(e => e);
+    const err = await Isapi.getSnapshot(testConfig(), analog('1')).catch(e => e);
     expect(err).toMatchObject({ path: '/ISAPI/Streaming/channels/101/picture', subStatusCode: 'notSupport' });
     expect(err.message).toMatch(/doesn’t support this/);
   });
@@ -180,7 +186,7 @@ describe('Isapi', () => {
   it('aborts a snapshot when the caller’s signal fires', async () => {
     mockDevice({ '/ISAPI/Streaming/channels/101/picture': { hang: true } });
     const controller = new AbortController();
-    const pending = Isapi.getSnapshot(testConfig(), '1', 'main', { signal: controller.signal });
+    const pending = Isapi.getSnapshot(testConfig(), analog('1'), 'main', { signal: controller.signal });
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
   });
@@ -192,16 +198,111 @@ describe('Isapi', () => {
 
     // A signal that fires after its frame arrived (the feed stopping later) changes nothing
     const finished = new AbortController();
-    await Isapi.getSnapshot(config, '1', 'sub', { signal: finished.signal });
+    await Isapi.getSnapshot(config, analog('1'), 'sub', { signal: finished.signal });
     finished.abort();
     expect(device.inFlightSnapshots).toBe(0);
 
     const stopped = new AbortController();
-    const pending = Isapi.getSnapshot(config, '1', 'sub', { signal: stopped.signal });
+    const pending = Isapi.getSnapshot(config, analog('1'), 'sub', { signal: stopped.signal });
     await vi.waitFor(() => expect(device.inFlightSnapshots).toBe(1));
     stopped.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     expect([device.inFlightSnapshots, device.maxInFlightSnapshots]).toEqual([0, 1]);
+  });
+
+  it('tries StreamingProxy for an IP camera before the bare channel ID', async () => {
+    const calls = mockDevice({
+      '/ISAPI/ContentMgmt/StreamingProxy/channels/302/picture': { body: new Uint8Array([0xff, 0xd8]) },
+    });
+    expect((await Isapi.getSnapshot(testConfig(), digital('3'), 'sub')).size).toBe(2);
+    expect(calls).toEqual([
+      '/ISAPI/Streaming/channels/302/picture',
+      '/ISAPI/Streaming/channels/301/picture',
+      '/ISAPI/ContentMgmt/StreamingProxy/channels/302/picture',
+    ]);
+  });
+
+  it('finds the snapshot URL once, then asks only that one', async () => {
+    const calls = mockDevice({
+      '/ISAPI/Streaming/channels/302/picture': statusRoute(403, 4, 'notSupport'),
+      '/ISAPI/Streaming/channels/301/picture': { body: new Uint8Array([0xff, 0xd8]) },
+    });
+    const source = Isapi.snapshotSource(testConfig(), analog('3'), 'sub');
+    for (let i = 0; i < 3; i++) await source.next();
+    expect(calls).toEqual([
+      '/ISAPI/Streaming/channels/302/picture',
+      '/ISAPI/Streaming/channels/301/picture',
+      '/ISAPI/Streaming/channels/301/picture',
+      '/ISAPI/Streaming/channels/301/picture',
+    ]);
+  });
+
+  it('takes an answer that isn’t a JPEG as no picture, and tries the next URL', async () => {
+    // A page instead of an image, and a refusal sent with HTTP 200
+    const calls = mockDevice({
+      '/ISAPI/Streaming/channels/101/picture': { body: '<html>Login</html>', headers: { 'Content-Type': 'text/html' } },
+      '/ISAPI/ContentMgmt/StreamingProxy/channels/101/picture': { body: responseStatusXml('/x', STATUS.notSupport) },
+      '/ISAPI/Streaming/channels/1/picture': { body: new Uint8Array([0xff, 0xd8]) },
+    });
+    expect((await Isapi.getSnapshot(testConfig(), digital('1'))).type).toBe('image/jpeg');
+    expect(calls).toHaveLength(3);
+
+    mockDevice({ '/ISAPI/Streaming/channels/101/picture': { body: new Uint8Array([0x3c, 0x68]) } });
+    const err = await Isapi.fetchSnapshot(testConfig(), '/ISAPI/Streaming/channels/101/picture').catch(e => e);
+    expect(err).toBeInstanceOf(NotAnImageError);
+    expect(err.message).toMatch(/didn’t send an image/);
+    mockDevice({ '/ISAPI/Streaming/channels/101/picture': { body: responseStatusXml('/x', STATUS.notSupport) } });
+    await expect(Isapi.fetchSnapshot(testConfig(), '/ISAPI/Streaming/channels/101/picture'))
+      .rejects.toMatchObject({ name: 'IsapiError', httpStatus: 200, subStatusCode: 'notSupport' });
+  });
+
+  it('asks a camera that doesn’t answer once per request, ever less often, until it is back', async () => {
+    const device = createMockNvr({ snapshotDelayMs: 5 });
+    vi.stubGlobal('fetch', device.fetch);
+    const config = { host: NVR_HOST, port: 80, username: `user${++configSeq}`, password: 'pw' };
+    device.offlineChannels = ['4']; // its snapshots answer 503, like an empty channel
+
+    const source = Isapi.snapshotSource(config, digital('4'), 'sub');
+    const delays = [];
+    for (let i = 0; i < 3; i++) {
+      await expect(source.next()).rejects.toMatchObject({ httpStatus: 503, subStatusCode: 'serviceUnavailable' });
+      delays.push(source.retryDelayMs);
+    }
+    expect(device.requests.filter(r => r.endsWith('/picture'))).toEqual(Array(3).fill('GET /ISAPI/Streaming/channels/402/picture'));
+    expect(delays).toEqual([500, 1000, 2000]);
+    expect(source.noSignal).toBe(true);
+
+    device.offlineChannels = [];
+    expect((await source.next()).type).toBe('image/jpeg');
+    expect([source.failures, source.retryDelayMs, source.noSignal]).toEqual([0, 0, false]);
+  });
+
+  it('finds the URL again after several failures in a row', async () => {
+    const device = createMockNvr({ snapshotDelayMs: 5 });
+    vi.stubGlobal('fetch', device.fetch);
+    const config = { host: NVR_HOST, port: 80, username: `user${++configSeq}`, password: 'pw' };
+    const source = Isapi.snapshotSource(config, analog('2'), 'sub');
+    await source.next();
+    expect(source.path).toBe('/ISAPI/Streaming/channels/202/picture');
+
+    // The camera on channel 2 is replaced by one without a sub-stream
+    device.failures['GET /ISAPI/Streaming/channels/202/picture'] = { httpStatus: 403, ...STATUS.notSupport };
+    for (let i = 0; i < RESOLVE_AGAIN_AFTER_FAILURES; i++) await expect(source.next()).rejects.toBeInstanceOf(IsapiError);
+    const before = device.requests.length;
+    await source.next();
+    expect(device.requests.slice(before)).toEqual([
+      'GET /ISAPI/Streaming/channels/202/picture', 'GET /ISAPI/Streaming/channels/201/picture',
+    ]);
+    expect(source.path).toBe('/ISAPI/Streaming/channels/201/picture');
+  });
+
+  it('starts a camera the NVR lists offline with no signal and slow retries, but still asks', async () => {
+    const calls = mockDevice({ '/ISAPI/Streaming/channels/402/picture': statusRoute(503, 2, 'serviceUnavailable') });
+    const source = Isapi.snapshotSource(testConfig(), { ...digital('4'), online: false }, 'sub');
+    expect(source.noSignal).toBe(true);
+    await expect(source.next()).rejects.toMatchObject({ httpStatus: 503 });
+    expect(calls).toEqual(['/ISAPI/Streaming/channels/402/picture']);
+    expect(source.retryDelayMs).toBeGreaterThanOrEqual(8000);
   });
 
   it('loads /privacyMask/regions only when the device has no /privacyMask', async () => {
@@ -327,6 +428,9 @@ describe('request time limits', () => {
   it('gives each kind of request its own budget', () => {
     expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/102/picture')).toBe(TIMEOUT_MS.picture);
     expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/1202/picture')).toBe(TIMEOUT_MS.picture);
+    expect(defaultTimeoutMs('GET', '/ISAPI/ContentMgmt/StreamingProxy/channels/102/picture')).toBe(TIMEOUT_MS.picture);
+    expect(defaultTimeoutMs('GET', '/ISAPI/ContentMgmt/StreamingProxy/channel/102/Picture?snapShotImageType=JPEG'))
+      .toBe(TIMEOUT_MS.fullPicture);
     // Full-size JPEGs may take seconds to download over a slow link
     expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/101/picture')).toBe(TIMEOUT_MS.fullPicture);
     expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/1/picture')).toBe(TIMEOUT_MS.fullPicture);

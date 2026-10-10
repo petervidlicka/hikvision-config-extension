@@ -117,6 +117,11 @@ describe('digestFetch against a mock device', () => {
         res.writeHead(503, { 'Content-Type': 'application/xml' });
         return void res.end(responseStatus(req.url, 2, 'Device Busy', 'serviceUnavailable'));
       }
+      // A JPEG labelled as one, and one at the web UI's spelling of a snapshot URL, labelled as anything
+      if (req.url === '/ISAPI/still' || req.url.startsWith('/ISAPI/ContentMgmt/StreamingProxy/channel/101/Picture')) {
+        res.writeHead(200, { 'Content-Type': req.url === '/ISAPI/still' ? 'image/jpeg' : 'application/octet-stream' });
+        return void res.end(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
+      }
       res.writeHead(200);
       res.end('<ok/>');
     };
@@ -306,6 +311,15 @@ describe('digestFetch against a mock device', () => {
     await expect(digestFetch(cfg, 'GET', '/ISAPI/Streaming/channels/501/picture')).rejects.toMatchObject({
       httpStatus: 503, statusString: 'Device Busy', subStatusCode: 'serviceUnavailable',
     });
+  });
+
+  it('reads images as bytes by their Content-Type, or from a picture URL in any letter case', async () => {
+    const still = await digestFetch(cfg, 'GET', '/ISAPI/still');
+    expect(still.data).toBeInstanceOf(ArrayBuffer);
+    expect([...new Uint8Array(/** @type {ArrayBuffer} */ (still.data))]).toEqual([0xff, 0xd8, 0xff, 0xd9]);
+    const webUi = await digestFetch(cfg, 'GET', '/ISAPI/ContentMgmt/StreamingProxy/channel/101/Picture?snapShotImageType=JPEG');
+    expect(webUi.data).toBeInstanceOf(ArrayBuffer);
+    expect((await digestFetch(cfg, 'GET', '/ISAPI/System/deviceInfo')).data).toBe('<ok/>');
   });
 
   it('times out without touching the cached challenge or the rejected credentials', async () => {

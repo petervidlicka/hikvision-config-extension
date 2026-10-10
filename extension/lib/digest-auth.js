@@ -374,6 +374,25 @@ const retries = new Map();
 const MAX_LOGIN_BODY_BYTES = 16 * 1024;
 
 /**
+ * A picture URL, in any letter case: snapshots (…/channels/101/picture),
+ * stored pictures (/picture/Streaming/tracks/…), and the web UI's own
+ * spelling (…/StreamingProxy/channel/101/Picture).
+ */
+const PICTURE_PATH = /\/picture(?:[/?]|$)/i;
+
+/**
+ * Whether a successful answer's body is binary: an image by its Content-Type,
+ * or anything from a picture URL, in case firmware labels its JPEGs
+ * otherwise (callers check what they got, see Isapi.fetchSnapshot).
+ * @param {Response} resp
+ * @param {string} urlPath
+ * @returns {boolean}
+ */
+function isBinaryAnswer(resp, urlPath) {
+  return /^image\//i.test(resp.headers.get('Content-Type') ?? '') || PICTURE_PATH.test(urlPath);
+}
+
+/**
  * @param {string} baseUrl
  * @param {DeviceConfig} config
  * @returns {string} key that doesn't contain the password itself
@@ -461,7 +480,8 @@ function throwIfRejected(key) {
  * @param {string} urlPath - path and query, e.g. "/ISAPI/System/deviceInfo"
  * @param {string|null} [body] - XML for PUT/POST
  * @param {RequestOptions} [options] - no time limit unless `timeoutMs` is given
- * @returns {Promise<DigestResponse>} snapshots ("/picture") as ArrayBuffer, everything else as text
+ * @returns {Promise<DigestResponse>} images (by Content-Type, or from a "/picture" URL in any
+ *   letter case) as ArrayBuffer, everything else as text
  * @throws {AuthError} the device rejected the credentials (now or earlier)
  * @throws {IsapiError} the device answered with an error status
  * @throws {TimeoutError} no complete answer within `timeoutMs`
@@ -471,7 +491,6 @@ function throwIfRejected(key) {
 export async function digestFetch(config, method, urlPath, body = null, { signal, timeoutMs } = {}) {
   const baseUrl = buildBaseUrl(config);
   const url = `${baseUrl}${urlPath}`;
-  const isImage = urlPath.includes('/picture');
   const credKey = credentialKey(baseUrl, config);
   throwIfRejected(credKey);
 
@@ -619,7 +638,7 @@ export async function digestFetch(config, method, urlPath, body = null, { signal
   }
 
   /** @type {() => Promise<string|ArrayBuffer>} */
-  const readBody = () => (isImage ? resp.arrayBuffer() : resp.text());
+  const readBody = () => (isBinaryAnswer(resp, urlPath) ? resp.arrayBuffer() : resp.text());
   const data = await network(readBody);
   return { status: resp.status, headers: resp.headers, data };
 }
