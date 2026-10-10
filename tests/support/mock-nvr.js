@@ -83,7 +83,10 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       device.inFlightSnapshots--;
       return new Response(await frame(), { status: 200 });
     }
-    if (p.endsWith('/motionDetection/capabilities')) return xml(motionCapabilities);
+    // Channel 2 is a camera that only supports the cell grid
+    if (p.endsWith('/motionDetection/capabilities')) {
+      return xml(p.includes('/channels/2/') ? motionCapabilities.replace('opt="grid,region"', 'opt="grid"') : motionCapabilities);
+    }
     if (p.endsWith('/motionDetection')) return xml(motionDetection);
     if (p.endsWith('/privacyMask')) return xml(privacyMask);
     if (/\/Event\/triggers\/VMD-\d+$/.test(p)) return xml(eventTrigger);

@@ -139,6 +139,28 @@ describe('config page', () => {
     expect(body).toContain('<outputIOPortID>2</outputIOPortID>');
   });
 
+  it('edits the cell grid on a grid-only camera', async () => {
+    $('configTabs').querySelector('[data-tool="motion"]').click();
+    document.querySelectorAll('.channel-item')[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect(state.motionMode).toBe('grid'));
+    expect($('motionGridInstructions').style.display).toBe('');
+    expect($('motionRegionInstructions').style.display).toBe('none');
+    expect($('dynamicAnalysisRow').style.display).toBe(''); // the fixture has the field
+
+    const { click } = canvasPointer();
+    $('clearMotionRegionsBtn').click();
+    click(0.01, 0.01); // top-left cell
+    expect(state.motionGrid.cells[0][0]).toBe(true);
+
+    const puts = device.puts.length;
+    $('saveMotionBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+    const { path, body } = device.puts.at(-1);
+    expect(path).toBe('/ISAPI/ContentMgmt/InputProxy/channels/2/video/motionDetection');
+    expect(body).toContain('<regionType>grid</regionType>');
+    expect(body).toContain('<gridMap>800000' + '0'.repeat(102) + '</gridMap>');
+  });
+
   it('stops everything after one failed login when the device rejects the password', async () => {
     $('liveViewSectionTab').click();
     device.rejectAuth = true;

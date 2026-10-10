@@ -37,6 +37,9 @@
  * @property {{points: CanvasPoint[]}[]} motionRegions
  * @property {CanvasPoint[]} drawingPoints - corners of the polygon being drawn
  * @property {MotionCapabilities} motionCaps - device limits, refreshed on load
+ * @property {'region'|'grid'} motionMode - polygons, or cells for grid-only cameras
+ * @property {import('../lib/config-xml.js').MotionGrid|null} motionGrid - cells in grid mode
+ * @property {boolean|null} gridPaintValue - while dragging in grid mode: painting (true) or erasing
  * @property {boolean} motionEnabled
  * @property {number} sensitivity
  * @property {boolean} dynamicAnalysis
