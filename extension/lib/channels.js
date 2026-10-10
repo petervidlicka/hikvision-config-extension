@@ -7,7 +7,8 @@
  * A hybrid DVR has both. Hikvision's web UI and SDK always read both and list
  * the analog inputs first, then the IP cameras, so this does the same
  * (mergeChannelLists). Firmware with neither list still lists its streams
- * (StreamingChannel, /ISAPI/Streaming/channels).
+ * (StreamingChannel, /ISAPI/Streaming/channels), each naming the analog
+ * input or IP camera it streams (readStreamingChannels).
  *
  * Whether an IP camera is connected comes from a third document
  * (InputProxyChannelStatus, /ISAPI/ContentMgmt/InputProxy/channels/status),
@@ -69,22 +70,78 @@ export function readChannelList(root, kind) {
 }
 
 /**
- * Read the stream list of firmware that has no channel list. Stream ids are
- * channel × 100 + stream (101 and 102 are channel 1's main and sub stream,
- * 201 channel 2's main stream), so each channel is listed once, under the
- * name of its first stream.
+ * Read the stream list of firmware that has no channel list. A channel has
+ * several streams (101 and 102 are channel 1's main and sub stream, 201
+ * channel 2's main stream), so each channel is listed once, under the name of
+ * its first stream.
+ *
+ * Which channel a stream belongs to, and so which URLs configure it, comes
+ * from the input its <Video> names (see streamInput): an NVR's IP camera
+ * names <dynVideoInputChannelID>, an analog input <videoInputChannelID>.
+ * Listing an NVR's cameras as analog would send their settings to the analog
+ * URLs, which an NVR need not have.
+ *
+ * A stream's <channelName> may be only its own number ("101" on the
+ * DS-7604NI) rather than the camera's name, so a name that is only digits is
+ * left out and the channel is shown by its number (see channelLabel in
+ * src/ui.js).
  * @param {Element} root - the StreamingChannelList element
  * @returns {Channel[]}
+ * @example
+ * // <StreamingChannel><id>101</id><channelName>101</channelName>
+ * //   <Video><dynVideoInputChannelID>1</dynVideoInputChannelID></Video></StreamingChannel>
+ * readStreamingChannels(list) // → [{id: '1', name: '', kind: 'digital'}]
  */
 export function readStreamingChannels(root) {
   /** @type {Map<string, Channel>} */
   const channels = new Map();
   for (const el of childElements(root, 'StreamingChannel')) {
-    const id = String(Math.floor(parseInt(childText(el, 'id') ?? '', 10) / 100));
+    const streamId = childText(el, 'id') ?? '';
+    const { id, kind } = streamInput(el, streamId);
     if (channels.has(id)) continue;
-    channels.set(id, { id, name: childText(el, 'name') || childText(el, 'channelName') || '', kind: 'analog' });
+    channels.set(id, { id, name: streamCameraName(el, streamId), kind });
   }
   return [...channels.values()].filter(hasNumericId);
+}
+
+/**
+ * The input elements a stream's <Video> may name, with the kind of channel
+ * each marks, as the web UI writes them (<dynVideoInputChannelID> for a
+ * channel above the analog count). A stream naming both is taken for an IP camera.
+ */
+const STREAM_INPUT_TAGS = /** @type {const} */ ([
+  ['digital', 'dynVideoInputChannelID'],
+  ['analog', 'videoInputChannelID'],
+]);
+
+/**
+ * The channel a stream belongs to and its kind. The input the stream names
+ * is the channel number the per-channel URLs take; a stream naming none (or
+ * no number) counts by its id (channel × 100 + stream), as an analog input
+ * unless it named an IP camera's input.
+ * @param {Element} el - a StreamingChannel element
+ * @param {string} streamId - its <id>
+ * @returns {{id: string, kind: Channel['kind']}}
+ */
+function streamInput(el, streamId) {
+  const video = childElement(el, 'Video');
+  const named = STREAM_INPUT_TAGS.find(([, tag]) => childElement(video, tag));
+  const kind = named?.[0] ?? 'analog';
+  const input = named ? childText(video, named[1]) ?? '' : '';
+  const id = /^\d+$/.test(input) ? String(Number(input)) : String(Math.floor(parseInt(streamId, 10) / 100));
+  return { id, kind };
+}
+
+/**
+ * A stream's camera name, leaving out one that only numbers the stream: the
+ * stream's own id, or any name that is only digits.
+ * @param {Element} el - a StreamingChannel element
+ * @param {string} streamId - its <id>
+ * @returns {string} empty when the stream has no name of its own
+ */
+function streamCameraName(el, streamId) {
+  return [childText(el, 'name'), childText(el, 'channelName')]
+    .find(name => name && name !== streamId && !/^\d+$/.test(name)) ?? '';
 }
 
 /**

@@ -5,7 +5,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthError } from '../../extension/lib/digest-auth.js';
 import { IsapiError, NetworkError, NotAnImageError, TimeoutError, WriteRollbackError } from '../../extension/lib/errors.js';
-import { applyStreamSizes, readMainStreamSizes } from '../../extension/lib/channels.js';
+import { applyStreamSizes, readMainStreamSizes, readStreamingChannels } from '../../extension/lib/channels.js';
 import { readPrivacyMask } from '../../extension/lib/config-xml.js';
 import { Isapi, TIMEOUT_MS, defaultTimeoutMs } from '../../extension/lib/isapi.js';
 import { jpegSize } from '../../extension/lib/picture-size.js';
@@ -87,6 +87,51 @@ describe('Isapi', () => {
     expect(await Isapi.getChannels(testConfig())).toEqual([
       { id: '1', name: 'Front', kind: 'analog' },
       { id: '2', name: '', kind: 'analog' },
+    ]);
+  });
+
+  it('lists an NVR’s cameras from its stream list as IP cameras, by number rather than stream name', async () => {
+    // The DS-7604NI's stream list, when neither channel list answers
+    const calls = mockDevice({
+      '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'notSupport'),
+      '/ISAPI/Streaming/channels': { body: fixtures.streamingChannelsNvr },
+    });
+    const channels = await Isapi.getChannels(testConfig());
+    // Every stream names <dynVideoInputChannelID> and is called after itself ("101")
+    expect(channels).toStrictEqual(['1', '2', '3', '4'].map(id => digital(id)));
+    expect(calls).toEqual(['/ISAPI/System/Video/inputs/channels', '/ISAPI/ContentMgmt/InputProxy/channels', '/ISAPI/Streaming/channels']);
+    expect(Isapi.motionDetectionPath(channels[1])).toBe('/ISAPI/ContentMgmt/InputProxy/channels/2/video/motionDetection');
+  });
+
+  it('takes a stream’s channel and kind from the input it names, and its name only when it isn’t a number', () => {
+    const list = (...streams) => parseXml(`<StreamingChannelList>${streams.join('')}</StreamingChannelList>`).documentElement;
+    /** A stream: its id, what its <Video> names and the names it carries. */
+    const stream = (id, input, names = '') => `<StreamingChannel><id>${id}</id>${names}<Video>${input}</Video></StreamingChannel>`;
+    const ip = (n) => `<dynVideoInputChannelID>${n}</dynVideoInputChannelID>`;
+    const wired = (n) => `<videoInputChannelID>${n}</videoInputChannelID>`;
+    expect(readStreamingChannels(list(
+      stream(101, wired(1), '<channelName>Gate</channelName>'),
+      stream(102, wired(1), '<channelName>Gate</channelName>'),
+      // The input's number, not the stream's: both streams are channel 5's
+      stream(201, ip(5), '<channelName>201</channelName>'),
+      stream(502, ip(5), '<channelName>Driveway</channelName>'),
+      stream(301, ip(3), '<channelName>7</channelName>'),
+      stream(401, ip(''), '<name>12</name><channelName>Yard</channelName>'),
+      stream('main', ip(8), '<channelName>main</channelName>'),
+      stream(601, `${ip(6)}${wired(6)}`),
+      stream(901, '', '<channelName>Hall</channelName>'),
+      stream('sub', ''),
+    ))).toStrictEqual([
+      { id: '1', name: 'Gate', kind: 'analog' },
+      // Named by its first stream, whose name only numbers it
+      { id: '5', name: '', kind: 'digital' },
+      { id: '3', name: '', kind: 'digital' },
+      // An input that isn't a number: still an IP camera, numbered by its stream
+      { id: '4', name: 'Yard', kind: 'digital' },
+      { id: '8', name: '', kind: 'digital' },
+      { id: '6', name: '', kind: 'digital' },
+      // Naming no input, it counts as an analog input numbered by its stream, as before
+      { id: '9', name: 'Hall', kind: 'analog' },
     ]);
   });
 

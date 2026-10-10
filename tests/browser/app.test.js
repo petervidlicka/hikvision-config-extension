@@ -1154,4 +1154,31 @@ describe('config page', () => {
     expect($('connectionForm').style.display).toBe('block');
     expect([$('hostInput').value, $('portInput').value]).toEqual(['192.168.0.64', '8080']);
   });
+
+  it('lists an NVR’s cameras by number from its stream list, and configures them as IP cameras', async () => {
+    // Firmware with neither channel list (the analog one is notSupport already)
+    const ipList = 'GET /ISAPI/ContentMgmt/InputProxy/channels';
+    device.failures[ipList] = { httpStatus: 403, ...STATUS.notSupport };
+    const since = device.requests.length;
+    try {
+      $('hostInput').value = NVR_HOST;
+      $('portInput').value = '80';
+      $('connectBtn').click();
+      await vi.waitFor(() => expect(state.channels).toHaveLength(4));
+    } finally {
+      delete device.failures[ipList];
+    }
+    expect(device.requests.slice(since)).toContain('GET /ISAPI/Streaming/channels');
+    // Each stream's <channelName> is its own number ("101"), not the camera's name
+    const items = [...document.querySelectorAll('.channel-item')];
+    expect(items.map(el => [el.querySelector('.ch-num')?.textContent, el.querySelector('span:not(.ch-num)')?.textContent]))
+      .toEqual([['1', 'Channel 1'], ['2', 'Channel 2'], ['3', 'Channel 3'], ['4', 'Channel 4']]);
+    expect(state.channels.map(ch => ch.kind)).toEqual(['digital', 'digital', 'digital', 'digital']);
+
+    $('configSectionTab').click();
+    $('configTabs').querySelector('[data-tool="motion"]').click();
+    await vi.waitFor(() => expect(device.requests.slice(since))
+      .toContain('GET /ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection'));
+    expect(device.requests.slice(since).some(r => r.includes('/ISAPI/System/Video/inputs/channels/'))).toBe(false);
+  });
 });

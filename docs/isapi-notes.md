@@ -30,6 +30,18 @@ cameras) lists all of them, and the extension does the same. As a guard it
 drops an IP entry whose id an analog input already has, which no device seen
 so far does. The DS-7604NI answers the analog list with 403 notSupport.
 
+Firmware with neither list still has the stream list
+(`/ISAPI/Streaming/channels`), and the extension then lists a channel per
+input the streams name. Each `StreamingChannel`'s `<Video>` names its input as
+the web UI writes it: `<dynVideoInputChannelID>` for an IP camera,
+`<videoInputChannelID>` for an analog input. That element gives the channel's
+kind and number; a stream naming neither counts as an analog input numbered
+by its id (101 and 102 are channel 1). On the DS-7604NI every stream names
+`<dynVideoInputChannelID>` (1 for streams 101 and 102), and its
+`<channelName>` is the stream's own number ("101"), not the camera's name,
+which only the InputProxy list has. So a name that is only digits is left
+out, and the channel is shown as "Channel N".
+
 The web UI marks an IP camera online from `<online>` in each
 `InputProxyChannelStatus` (it matches them to channels by position; the
 extension matches by `<id>`), and an analog input online when
