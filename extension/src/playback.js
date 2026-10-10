@@ -16,6 +16,7 @@ import { byId, dom, queryAll, state } from './state.js';
 import { errorMessage, setStatus } from './ui.js';
 
 /** @typedef {import('../lib/playback.js').Recording} Recording */
+/** @typedef {import('../lib/playback.js').RecordKind} RecordKind */
 /** @typedef {import('../lib/playback.js').StoredPicture} StoredPicture */
 
 /**
@@ -38,6 +39,19 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const PLAY_TICK_MS = 1000;
 /** How close (px) a click must be to a picture marker to open it. */
 const MARKER_HIT_PX = 6;
+/**
+ * Timeline colour per kind of recording. Like iVMS and the web UI, manual
+ * and command recordings get their own colours instead of the event red;
+ * command uses their teal, manual is orange because their yellow already
+ * marks stored pictures here.
+ * @type {Record<RecordKind, string>}
+ */
+const RECORD_COLORS = {
+  continuous: 'rgba(74, 108, 247, 0.6)',
+  manual: 'rgba(249, 115, 22, 0.75)',
+  command: 'rgba(21, 184, 155, 0.75)',
+  event: 'rgba(239, 68, 68, 0.75)',
+};
 
 /** @returns {PlaybackState} */
 export function initialPlaybackState() {
@@ -197,7 +211,7 @@ function setInfo(text) {
   byId('pbInfo').textContent = text;
 }
 
-/** Draw the day's recordings: continuous in blue, events in red. */
+/** Draw the day's recordings in their kind's colour (continuous blue, events red) and the stored pictures. */
 export function renderTimeline() {
   const pb = state.playback;
   const canvas = byId('pbTimeline', HTMLCanvasElement);
@@ -226,7 +240,7 @@ export function renderTimeline() {
   const toX = (t) => ((t.getTime() - pb.date.getTime()) / DAY_MS) * width;
   for (const r of pb.recordings) {
     if (pb.filter === 'events' && !r.isEvent) continue;
-    g.fillStyle = r.isEvent ? 'rgba(239, 68, 68, 0.75)' : 'rgba(74, 108, 247, 0.6)';
+    g.fillStyle = RECORD_COLORS[r.kind];
     const x1 = Math.max(0, toX(r.start));
     g.fillRect(x1, 4, Math.max(toX(r.end) - x1, 2), height - 8);
   }

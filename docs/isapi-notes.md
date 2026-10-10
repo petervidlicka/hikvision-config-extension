@@ -147,6 +147,35 @@ slots, answers "not here" or `methodNotAllowed`. For that firmware the
 extension sends a single PUT instead: unused slots are disabled and their
 coordinates emptied, so a deleted mask can't come back.
 
+## Playback search
+
+`POST /ISAPI/ContentMgmt/search` pages its results, and the DS-7604NI
+(firmware V4.75.206) doesn't page the way the request suggests:
+
+- **A page holds at most 64 matches**, however many `maxResults` asks for
+  (100 and 200 both returned 64; 40 returned 40). It honours
+  `searchResultPostion` exactly: position 64 starts with the 65th match.
+- **`numOfMatches` can't be trusted.** For a video search it is the total (139
+  on every page of one search); for a picture search (track `…03`) it is only
+  that page's count.
+
+So `Isapi.searchMatches` asks for 50 a page (the web UI's download page asks
+for 50, iVMS for 40) and starts each page after the matches it has received,
+ignoring `numOfMatches`. It stops when the status isn't `MORE`, or when a page
+brings no match it hasn't seen (an empty page, or firmware that ignores the
+position), and after 40 requests at most. Matches are de-duplicated by
+`playbackURI`. Stepping by 100, as the extension used to, skipped matches
+64–99: about 22 hours of a three-day search here.
+
+The record type is the last part of each match's `metadataDescriptor`. iVMS
+and the web UI's timebar give scheduled recording (`timing`, `CMR`), `manual`
+and `command` (started by a platform or alarm host) a colour each, and draw
+events (`motion`, `alarm`, `motionOrAlarm`, `smart` and any type they don't
+recognise) in their alarm colour. The extension sorts recordings into the same
+four kinds (`recordKind` in `lib/playback.js`; `personOrVehicel` is an event).
+Manual and command recordings are not events, so the events-only filter leaves
+them out. This NVR records on a schedule and only ever returns `timing`.
+
 ## Errors and write results
 
 Error answers carry a `<ResponseStatus>` body (`statusCode`, `statusString`,

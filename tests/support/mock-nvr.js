@@ -146,7 +146,7 @@ async function frame() {
   return canvas.convertToBlob({ type: 'image/jpeg' });
 }
 
-/** Today's recordings: continuous 08:00–08:30 and a motion event at 14:05. */
+/** Today's recordings: continuous 08:00–08:30, a manual one at 10:00 and a motion event at 14:05. */
 function todaysRecordings() {
   const d = new Date();
   const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -155,8 +155,8 @@ function todaysRecordings() {
     <timeSpan><startTime>${day}T${start}Z</startTime><endTime>${day}T${end}Z</endTime></timeSpan>
     <mediaSegmentDescriptor><playbackURI>rtsp://${NVR_HOST}/Streaming/tracks/101/?name=${start}</playbackURI></mediaSegmentDescriptor>
     <metadataMatches><metadataDescriptor>recordType.meta.std-cgi.com/${type}</metadataDescriptor></metadataMatches></searchMatchItem>`;
-  return `<CMSearchResult><responseStatusStrg>OK</responseStatusStrg><numOfMatches>2</numOfMatches><matchList>
-    ${item('08:00:00', '08:30:00', 'CMR')}${item('14:05:10', '14:06:40', 'VideoMotion')}</matchList></CMSearchResult>`;
+  return `<CMSearchResult><responseStatusStrg>OK</responseStatusStrg><numOfMatches>3</numOfMatches><matchList>
+    ${item('08:00:00', '08:30:00', 'CMR')}${item('10:00:00', '10:05:00', 'manual')}${item('14:05:10', '14:06:40', 'VideoMotion')}</matchList></CMSearchResult>`;
 }
 
 /** Today's picture track: one stored picture at 00:46:08. */

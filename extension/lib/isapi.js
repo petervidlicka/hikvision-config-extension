@@ -18,7 +18,7 @@ import {
   IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError, parseResponseStatus,
 } from './errors.js';
 import {
-  SEARCH_PAGE_SIZE, buildCalendarXml, buildSearchXml, parseCalendar, parsePictureResult, parseSearchResult, toDeviceTime,
+  buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey, toDeviceTime,
 } from './playback.js';
 import { childElement, childElements, childText, cloneXml, findDescendant, parseXml, serializeXml } from './xml.js';
 
@@ -32,8 +32,12 @@ import { childElement, childElements, childText, cloneXml, findDescendant, parse
 /** @typedef {import('./playback.js').Recording} Recording */
 /** @typedef {import('./playback.js').StoredPicture} StoredPicture */
 
-/** Stop paging a recording search after this many results. */
-const MAX_SEARCH_RESULTS = 2000;
+/**
+ * Stop paging one search after this many requests. At up to 50 matches a
+ * page that is 2000 matches, far more than one day holds; the bound only
+ * guards against firmware that keeps answering "MORE".
+ */
+export const MAX_SEARCH_REQUESTS = 40;
 
 /**
  * How long each kind of request may take before it fails with TimeoutError.
@@ -439,8 +443,40 @@ export const Isapi = {
   },
 
   /**
-   * All recordings of a channel's main stream in a time range, following the
-   * device's paging until it reports it's done.
+   * Every match of one search, following the device's paging. The DS-7604NI
+   * sends at most 64 matches a page however many maxResults asks for, and its
+   * numOfMatches means different things on different tracks, so each page
+   * starts where the matches received so far end. Paging stops when the
+   * device says it's done, or when a page brings nothing new: an empty page,
+   * or only repeats from firmware that ignores the position.
+   * @param {DeviceConfig} config
+   * @param {string} trackId - e.g. "101" for channel 1's main stream, "103" for its pictures
+   * @param {Date} start
+   * @param {Date} end
+   * @returns {Promise<Element[]>} searchMatchItem elements without repeats, in the order received
+   */
+  async searchMatches(config, trackId, start, end) {
+    const searchId = crypto.randomUUID();
+    /** @type {Map<string, Element>} */
+    const matches = new Map();
+    let position = 0;
+    for (let request = 0; request < MAX_SEARCH_REQUESTS; request++) {
+      const body = buildSearchXml({ searchId, trackId, start, end, position });
+      const resp = await this.request(config, 'POST', '/ISAPI/ContentMgmt/search', body);
+      const page = parseSearchPage(parseXml(String(resp.data)));
+      const known = matches.size;
+      for (const match of page.matches) {
+        const key = searchMatchKey(match);
+        if (!matches.has(key)) matches.set(key, match);
+      }
+      if (page.status !== 'MORE' || matches.size === known) break;
+      position += page.matches.length;
+    }
+    return [...matches.values()];
+  },
+
+  /**
+   * All recordings of a channel's main stream in a time range.
    * @param {DeviceConfig} config
    * @param {string} channelId
    * @param {Date} start
@@ -448,17 +484,8 @@ export const Isapi = {
    * @returns {Promise<Recording[]>} sorted by start time
    */
   async searchRecordings(config, channelId, start, end) {
-    const searchId = crypto.randomUUID();
-    /** @type {Recording[]} */
-    const recordings = [];
-    for (let position = 0; position < MAX_SEARCH_RESULTS; position += SEARCH_PAGE_SIZE) {
-      const body = buildSearchXml({ searchId, trackId: `${channelId}01`, start, end, position });
-      const resp = await this.request(config, 'POST', '/ISAPI/ContentMgmt/search', body);
-      const page = parseSearchResult(parseXml(String(resp.data)));
-      recordings.push(...page.recordings);
-      if (page.status !== 'MORE' || page.recordings.length === 0) break;
-    }
-    return recordings.sort((a, b) => a.start.getTime() - b.start.getTime());
+    const matches = await this.searchMatches(config, `${channelId}01`, start, end);
+    return parseRecordings(matches).sort((a, b) => a.start.getTime() - b.start.getTime());
   },
 
   /**
@@ -484,17 +511,8 @@ export const Isapi = {
    * @returns {Promise<StoredPicture[]>} sorted by time
    */
   async searchPictures(config, channelId, start, end) {
-    const searchId = crypto.randomUUID();
-    /** @type {StoredPicture[]} */
-    const pictures = [];
-    for (let position = 0; position < MAX_SEARCH_RESULTS; position += SEARCH_PAGE_SIZE) {
-      const body = buildSearchXml({ searchId, trackId: `${channelId}03`, start, end, position });
-      const resp = await this.request(config, 'POST', '/ISAPI/ContentMgmt/search', body);
-      const page = parsePictureResult(parseXml(String(resp.data)));
-      pictures.push(...page.pictures);
-      if (page.status !== 'MORE' || page.pictures.length === 0) break;
-    }
-    return pictures.sort((a, b) => a.time.getTime() - b.time.getTime());
+    const matches = await this.searchMatches(config, `${channelId}03`, start, end);
+    return parsePictures(matches).sort((a, b) => a.time.getTime() - b.time.getTime());
   },
 
   /**

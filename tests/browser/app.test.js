@@ -284,7 +284,9 @@ describe('config page', () => {
 
   it('shows the day’s recordings and frames in Playback', async () => {
     $('playbackSectionTab').click();
-    await vi.waitFor(() => expect($('pbInfo').textContent).toMatch(/^2 recordings, 32 min, 1 triggered by events\./));
+    // The manual recording isn't an event, as in iVMS and the web UI
+    await vi.waitFor(() => expect($('pbInfo').textContent).toMatch(/^3 recordings, 37 min, 1 triggered by events\./));
+    expect(state.playback.recordings.map(r => r.kind)).toEqual(['continuous', 'manual', 'event']);
     expect($('pbDateLabel').textContent).toBe('Today');
     expect($('pbTimestamp').textContent).toBe('08:00:00');
     expect(device.requests).toContain('GET /ISAPI/ContentMgmt/StreamingProxy/channels/201/picture');

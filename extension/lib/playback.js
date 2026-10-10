@@ -4,14 +4,32 @@
  * - Device times are local wall-clock time written with a "Z" suffix, e.g.
  *   "2026-10-10T14:05:00Z" means 14:05 on the device's clock, not UTC.
  * - The search request misspells its paging field as <searchResultPostion>.
+ * - A page holds at most 64 matches, however many <maxResults> asks for, so
+ *   the next page starts after the matches actually received.
  *
  * Depends on lib/xml.js.
  */
 
 import { childElement, childElements, childText, findDescendant, xmlPath } from './xml.js';
 
-/** Results per search page; the device answers "MORE" when there are more. */
-export const SEARCH_PAGE_SIZE = 100;
+/**
+ * Results to ask for per search page; the device answers "MORE" when there
+ * are more. The DS-7604NI never sends more than 64 a page, however many
+ * this asks for, so paging never relies on it. 50 is what the web UI's
+ * download page asks for (iVMS asks for 40); both stay under that cap.
+ */
+export const SEARCH_PAGE_SIZE = 50;
+
+/**
+ * Why a recording was made, in the categories Hikvision's own clients draw
+ * in separate colours (the iVMS playback timeline and the web UI's timebar):
+ * - continuous: the recording schedule ("timing", "CMR")
+ * - manual: someone started it by hand
+ * - command: a platform or alarm host started it
+ * - event: motion, alarm, smart events, and any type not recognised
+ * Only "event" counts as triggered by an event, as in both clients.
+ * @typedef {'continuous'|'manual'|'command'|'event'} RecordKind
+ */
 
 /**
  * A recorded stretch of video.
@@ -19,7 +37,8 @@ export const SEARCH_PAGE_SIZE = 100;
  * @property {Date} start - device wall-clock time, as a local Date
  * @property {Date} end
  * @property {string} uri - playbackURI, identifies the recording on the device
- * @property {boolean} isEvent - triggered by motion/alarm/etc rather than continuous
+ * @property {RecordKind} kind - why it was recorded, for its timeline colour
+ * @property {boolean} isEvent - kind is "event": what the events-only filter shows
  */
 
 /**
@@ -80,51 +99,108 @@ export function buildSearchXml({ searchId, trackId, start, end, position }) {
     '</CMSearchDescription>';
 }
 
+/** Record types of scheduled recording, lower-cased ("allrecord" is the search's own "any type"). */
+const CONTINUOUS_TYPES = new Set(['cmr', 'time', 'timing', 'continuous', 'allrecord']);
+
 /**
- * Whether a match was recorded because of an event. The record type is the
- * last part of its metadata descriptor, e.g. "recordType.meta.std-cgi.com/CMR"
- * for continuous recording or ".../VideoMotion" for motion.
- * @param {string} descriptor
+ * Why a match was recorded. The record type is the last part of its metadata
+ * descriptor, e.g. "recordType.meta.std-cgi.com/CMR" or
+ * "recordType.meta.hikvision.com/timing" for scheduled recording, ".../manual",
+ * ".../command" (the device's capabilities spell it "Command"), ".../motion".
+ * A type not listed here counts as an event, as in iVMS and the web UI.
+ * A match without a type counts as continuous, so that firmware which sends
+ * no type doesn't show every recording as an event.
+ * @param {string} descriptor - metadataDescriptor text
+ * @returns {RecordKind}
  */
-export function isEventRecordType(descriptor) {
-  const type = descriptor.split('/').pop() ?? '';
-  return type !== '' && !/^(CMR|time|timing|continuous|allrecord)$/i.test(type);
+export function recordKind(descriptor) {
+  const type = (descriptor.split('/').pop() ?? '').trim().toLowerCase();
+  if (type === '' || CONTINUOUS_TYPES.has(type)) return 'continuous';
+  if (type === 'manual' || type === 'command') return type;
+  return 'event';
 }
 
 /**
- * Parse one page of search results.
- * @param {XMLDocument} doc - CMSearchResult
- * @returns {{status: string, recordings: Recording[]}} status is "OK", "MORE" or "NO MATCHES"
+ * Whether a match was recorded because of an event, which decides what the
+ * events-only filter shows. Manual and command recordings aren't events.
+ * @param {string} descriptor - metadataDescriptor text
+ * @returns {boolean}
  */
-export function parseSearchResult(doc) {
+export function isEventRecordType(descriptor) {
+  return recordKind(descriptor) === 'event';
+}
+
+/**
+ * One page of search results, as the device sent it.
+ * @typedef {object} SearchPage
+ * @property {string} status - "OK", "MORE" or "NO MATCHES"
+ * @property {Element[]} matches - every <searchMatchItem> on the page,
+ *   including any that turn out unusable: the next page starts this many
+ *   results further on
+ */
+
+/**
+ * Read one page of search results. <numOfMatches> is deliberately ignored:
+ * on the DS-7604NI it is the total for a video search but only this page's
+ * count for a picture search, so it can't tell where the next page starts.
+ * @param {XMLDocument} doc - CMSearchResult
+ * @returns {SearchPage}
+ */
+export function parseSearchPage(doc) {
   const root = doc.documentElement;
+  return {
+    status: (childText(root, 'responseStatusStrg') ?? '').toUpperCase(),
+    matches: childElements(childElement(root, 'matchList'), 'searchMatchItem'),
+  };
+}
+
+/**
+ * What identifies a match across pages, for dropping repeats when a device
+ * pages unreliably: its playbackURI, which names the file and its times, or
+ * its times when it has no URI.
+ * @param {Element} match - searchMatchItem
+ * @returns {string}
+ */
+export function searchMatchKey(match) {
+  const uri = xmlPath(match, 'mediaSegmentDescriptor', 'playbackURI')?.textContent?.trim();
+  if (uri) return uri;
+  const span = childElement(match, 'timeSpan');
+  return `${childText(span, 'startTime') ?? ''}/${childText(span, 'endTime') ?? ''}`;
+}
+
+/**
+ * Recordings from search matches. Matches without valid times are skipped.
+ * @param {Element[]} matches - searchMatchItem elements
+ * @returns {Recording[]} in the order given
+ */
+export function parseRecordings(matches) {
   /** @type {Recording[]} */
   const recordings = [];
-  for (const item of childElements(childElement(root, 'matchList'), 'searchMatchItem')) {
-    const span = childElement(item, 'timeSpan');
+  for (const match of matches) {
+    const span = childElement(match, 'timeSpan');
     const start = parseDeviceTime(childText(span, 'startTime') ?? '');
     const end = parseDeviceTime(childText(span, 'endTime') ?? '');
     if (!start || !end) continue;
-    const descriptor = findDescendant(item, 'metadataDescriptor')?.textContent?.trim() ?? '';
+    const kind = recordKind(findDescendant(match, 'metadataDescriptor')?.textContent ?? '');
     recordings.push({
       start,
       end,
-      uri: xmlPath(item, 'mediaSegmentDescriptor', 'playbackURI')?.textContent?.trim() ?? '',
-      isEvent: isEventRecordType(descriptor),
+      uri: xmlPath(match, 'mediaSegmentDescriptor', 'playbackURI')?.textContent?.trim() ?? '',
+      kind,
+      isEvent: kind === 'event',
     });
   }
-  return { status: (childText(root, 'responseStatusStrg') ?? '').toUpperCase(), recordings };
+  return recordings;
 }
 
 /**
- * Pictures from a picture-track search: the same result format as video,
- * with one moment per match.
- * @param {XMLDocument} doc - CMSearchResult
- * @returns {{status: string, pictures: StoredPicture[]}}
+ * Pictures from picture-track matches: the same result format as video,
+ * with one moment per match. Matches without a URI to fetch are skipped.
+ * @param {Element[]} matches - searchMatchItem elements
+ * @returns {StoredPicture[]} in the order given
  */
-export function parsePictureResult(doc) {
-  const { status, recordings } = parseSearchResult(doc);
-  return { status, pictures: recordings.filter(r => r.uri).map(r => ({ time: r.start, uri: r.uri })) };
+export function parsePictures(matches) {
+  return parseRecordings(matches).filter(r => r.uri).map(r => ({ time: r.start, uri: r.uri }));
 }
 
 /**
