@@ -8,15 +8,37 @@
  * Depends on lib/digest-auth.js and lib/xml.js.
  */
 
+import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
+import { childElements, childText, parseXml, serializeXml } from './xml.js';
+
 /**
  * Rethrow auth failures so endpoint fallbacks don't retry with credentials
  * the device already rejected (each attempt counts towards its lockout).
+ * @param {unknown} err
  */
-function rethrowAuthError(err) {
+export function rethrowAuthError(err) {
   if (err instanceof AuthError) throw err;
 }
 
-const Isapi = {
+/** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
+
+/**
+ * A camera channel. `kind` says which URL family configures it: "analog"
+ * for cameras wired to the device, "digital" for IP cameras behind an NVR.
+ * @typedef {{id: string, name: string, kind: 'analog'|'digital'}} Channel
+ */
+
+/**
+ * Ways to read the channel list, in the order firmware tends to support them.
+ * @type {{path: string, tag: string, kind: Channel['kind']}[]}
+ */
+const CHANNEL_ENDPOINTS = [
+  { path: '/ISAPI/System/Video/inputs/channels', tag: 'VideoInputChannel', kind: 'analog' },
+  { path: '/ISAPI/ContentMgmt/InputProxy/channels', tag: 'InputProxyChannel', kind: 'digital' },
+  { path: '/ISAPI/Streaming/channels', tag: 'StreamingChannel', kind: 'analog' },
+];
+
+export const Isapi = {
   /**
    * Called once per AuthError. The UI uses this to stop polling and return
    * to the login form.
@@ -24,7 +46,13 @@ const Isapi = {
    */
   onAuthFailure: null,
 
-  /** digestFetch, plus the auth-failure hook. */
+  /**
+   * digestFetch, plus the auth-failure hook.
+   * @param {DeviceConfig} config
+   * @param {string} method
+   * @param {string} path
+   * @param {string|null} [body]
+   */
   async request(config, method, path, body = null) {
     try {
       return await digestFetch(config, method, path, body);
@@ -34,13 +62,23 @@ const Isapi = {
     }
   },
 
-  /** GET an ISAPI resource as an XML document. */
+  /**
+   * GET an ISAPI resource as an XML document.
+   * @param {DeviceConfig} config
+   * @param {string} path
+   * @returns {Promise<XMLDocument>}
+   */
   async getXml(config, path) {
     const resp = await this.request(config, 'GET', path);
-    return parseXml(resp.data);
+    return parseXml(String(resp.data));
   },
 
-  /** PUT an edited XML document back to the device. */
+  /**
+   * PUT an edited XML document back to the device.
+   * @param {DeviceConfig} config
+   * @param {string} path
+   * @param {XMLDocument} doc
+   */
   async putXml(config, path, doc) {
     await this.request(config, 'PUT', path, serializeXml(doc));
   },
@@ -48,6 +86,7 @@ const Isapi = {
   /**
    * Verify credentials and read the device's identity. An explicit user
    * action, so it may retry credentials the device rejected earlier.
+   * @param {DeviceConfig} config
    * @returns {Promise<{deviceName: string|null, model: string|null, firmwareVersion: string|null}>}
    */
   async getDeviceInfo(config) {
@@ -67,16 +106,11 @@ const Isapi = {
    * `kind` says which URL family configures the channel: "analog" for
    * cameras wired to the device, "digital" for IP cameras behind an NVR
    * (see videoInputBase).
-   * @returns {Promise<{id: string, name: string, kind: 'analog'|'digital'}[]>}
+   * @param {DeviceConfig} config
+   * @returns {Promise<Channel[]>}
    */
   async getChannels(config) {
-    const endpoints = [
-      { path: '/ISAPI/System/Video/inputs/channels', tag: 'VideoInputChannel', kind: 'analog' },
-      { path: '/ISAPI/ContentMgmt/InputProxy/channels', tag: 'InputProxyChannel', kind: 'digital' },
-      { path: '/ISAPI/Streaming/channels', tag: 'StreamingChannel', kind: 'analog' },
-    ];
-
-    for (const ep of endpoints) {
+    for (const ep of CHANNEL_ENDPOINTS) {
       try {
         const root = (await this.getXml(config, ep.path)).documentElement;
         let channels = childElements(root, ep.tag).map(el => ({
@@ -102,6 +136,7 @@ const Isapi = {
     }
 
     // Last resort: probe snapshots on the first 4 channels
+    /** @type {Channel[]} */
     const probed = [];
     for (let id = 1; id <= 4; id++) {
       try {
@@ -119,6 +154,8 @@ const Isapi = {
 
   /**
    * Fetch one JPEG frame from the channel's main stream.
+   * @param {DeviceConfig} config
+   * @param {string} channelId
    * @returns {Promise<Blob>}
    */
   async getSnapshot(config, channelId) {
@@ -137,7 +174,8 @@ const Isapi = {
    * Base path for a channel's video-input settings. IP cameras behind an NVR
    * are configured through InputProxy, as in Hikvision's own web UI; some
    * NVRs also answer on the analog path, but that isn't guaranteed.
-   * @param {{id: string, kind: 'analog'|'digital'}} channel
+   * @param {Pick<Channel, 'id'|'kind'>} channel
+   * @returns {string}
    */
   videoInputBase(channel) {
     return channel.kind === 'digital'
@@ -145,6 +183,7 @@ const Isapi = {
       : `/ISAPI/System/Video/inputs/channels/${channel.id}`;
   },
 
+  /** @param {Pick<Channel, 'id'|'kind'>} channel */
   motionDetectionPath(channel) {
     return `${this.videoInputBase(channel)}/motionDetection`;
   },
@@ -152,6 +191,8 @@ const Isapi = {
   /**
    * Motion detection capabilities (allowed region types, region and corner
    * limits, sensitivity steps, target types), or null if not available.
+   * @param {DeviceConfig} config
+   * @param {Pick<Channel, 'id'|'kind'>} channel
    * @returns {Promise<XMLDocument|null>}
    */
   async getMotionCapabilities(config, channel) {
@@ -166,6 +207,8 @@ const Isapi = {
   /**
    * Load the privacy mask config. Returns the path it came from so the save
    * goes back to the same resource.
+   * @param {DeviceConfig} config
+   * @param {Pick<Channel, 'id'|'kind'>} channel
    * @returns {Promise<{doc: XMLDocument, path: string}>}
    */
   async getPrivacyMask(config, channel) {
@@ -179,6 +222,7 @@ const Isapi = {
     }
   },
 
+  /** @param {string} channelId */
   eventTriggerPath(channelId) {
     return `/ISAPI/Event/triggers/VMD-${channelId}`;
   },
@@ -187,6 +231,8 @@ const Isapi = {
    * Load the motion-detection (VMD) event trigger for a channel. If the
    * per-trigger endpoint isn't available, pick it out of the full trigger
    * list into a document of its own, so a save only ever sends this trigger.
+   * @param {DeviceConfig} config
+   * @param {string} channelId
    * @returns {Promise<XMLDocument>}
    */
   async getEventTrigger(config, channelId) {

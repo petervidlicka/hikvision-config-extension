@@ -7,7 +7,7 @@
 
 /* ── Minimal MD5 (RFC 1321) ─────────────────────────────────────────────── */
 
-const md5 = (() => {
+export const md5 = (() => {
   const K = [
     0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,
     0xa8304613,0xfd469501,0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,
@@ -28,15 +28,21 @@ const md5 = (() => {
     6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21,
   ];
 
+  /** @param {string} str */
   function toUTF8(str) {
     return new TextEncoder().encode(str);
   }
 
+  /** @param {number} x @param {number} c */
   function leftRotate(x, c) {
     return ((x << c) | (x >>> (32 - c))) >>> 0;
   }
 
-  return function md5(input) {
+  /**
+   * @param {string|Uint8Array} input
+   * @returns {string} lowercase hex digest
+   */
+  return function digest(input) {
     const msg = typeof input === 'string' ? toUTF8(input) : input;
     const origLen = msg.length;
     const bitLen = origLen * 8;
@@ -102,13 +108,34 @@ const md5 = (() => {
   };
 })();
 
+/* ── Types ──────────────────────────────────────────────────────────────── */
+
+/**
+ * How to reach and log in to a device.
+ * @typedef {object} DeviceConfig
+ * @property {string} host - IPv4 address or hostname, no scheme or path
+ * @property {number|string} [port] - defaults to 80
+ * @property {string} username
+ * @property {string} password
+ */
+
+/** Parameters of a WWW-Authenticate Digest challenge, keys lowercased. @typedef {Record<string, string>} DigestChallenge */
+
+/**
+ * A challenge reused across requests; `nc` counts uses of its nonce.
+ * @typedef {{challenge: DigestChallenge, qop: 'auth'|null, nc: number}} DigestSession
+ */
+
+/** @typedef {{status: number, headers: Headers, data: string|ArrayBuffer}} DigestResponse */
+
 /* ── Errors ─────────────────────────────────────────────────────────────── */
 
 /**
  * The device rejected our credentials. Callers must not retry with the same
  * credentials: Hikvision locks the account after a handful of failed logins.
  */
-class AuthError extends Error {
+export class AuthError extends Error {
+  /** @param {string} message */
   constructor(message) {
     super(message);
     this.name = 'AuthError';
@@ -118,13 +145,15 @@ class AuthError extends Error {
 
 /* ── Input validation ───────────────────────────────────────────────────── */
 
-const HOST_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)$/;
+export const HOST_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)$/;
 
 /**
  * Build the device base URL, rejecting anything that isn't a bare host and
  * port so a crafted host value can't redirect requests elsewhere.
+ * @param {DeviceConfig} config
+ * @returns {string}
  */
-function buildBaseUrl(config) {
+export function buildBaseUrl(config) {
   const host = String(config?.host ?? '');
   const port = Number(config?.port || 80);
   if (!HOST_RE.test(host)) throw new Error(`Invalid host: ${host}`);
@@ -136,8 +165,13 @@ function buildBaseUrl(config) {
 
 /* ── Digest Auth helpers ────────────────────────────────────────────────── */
 
-/** Parse `key=value` / `key="quoted value"` pairs from one challenge. */
-function parseChallengeParams(str) {
+/**
+ * Parse `key=value` / `key="quoted value"` pairs from one challenge.
+ * @param {string} str
+ * @returns {DigestChallenge}
+ */
+export function parseChallengeParams(str) {
+  /** @type {DigestChallenge} */
   const params = {};
   const regex = /(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))/g;
   let match;
@@ -153,8 +187,10 @@ function parseChallengeParams(str) {
  * Parse the WWW-Authenticate header into the MD5 Digest challenge
  * (realm, nonce, qop, opaque, ...). A device may offer several challenges
  * (e.g. SHA-256 and MD5), which Headers.get() joins with ", ".
+ * @param {string} header
+ * @returns {DigestChallenge}
  */
-function parseDigestChallenge(header) {
+export function parseDigestChallenge(header) {
   const challenges = header
     .split(/,?\s*(?=Digest\s)/i)
     .filter(s => /^Digest\s/i.test(s))
@@ -172,38 +208,56 @@ function parseDigestChallenge(header) {
 /**
  * Pick the qop to use. The server may offer a list ("auth,auth-int");
  * we only implement "auth". No qop means legacy RFC 2069 digest.
+ * @param {string|undefined} qopParam
+ * @returns {'auth'|null}
  */
-function pickQop(qopParam) {
+export function pickQop(qopParam) {
   if (qopParam === undefined) return null;
   const options = qopParam.split(',').map(s => s.trim().toLowerCase());
   if (options.includes('auth')) return 'auth';
   throw new Error(`Unsupported digest qop: ${qopParam}`);
 }
 
-function randomHex(bytes) {
+/**
+ * @param {number} bytes
+ * @returns {string} 2 × `bytes` hex characters
+ */
+export function randomHex(bytes) {
   return Array.from(crypto.getRandomValues(new Uint8Array(bytes)))
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
-/** Quote a header parameter value, escaping `"` and `\`. */
-function quote(value) {
+/**
+ * Quote a header parameter value, escaping `"` and `\`.
+ * @param {string} value
+ */
+export function quote(value) {
   return `"${String(value).replace(/(["\\])/g, '\\$1')}"`;
 }
 
 /**
  * A server challenge we keep reusing until the device rejects it, so each
  * request costs one round trip instead of two. `nc` counts uses of the nonce.
+ * @param {string|null} wwwAuthHeader
+ * @returns {DigestSession}
  */
-function createDigestSession(wwwAuthHeader) {
+export function createDigestSession(wwwAuthHeader) {
   const challenge = parseDigestChallenge(wwwAuthHeader || '');
   return { challenge, qop: pickQop(challenge.qop), nc: 0 };
 }
 
 /**
  * Build an HTTP Digest Authorization header value.
+ * @param {string} method - upper-case HTTP method
+ * @param {string} uri - request path, as sent
+ * @param {DigestSession} session - updated in place (nonce count)
+ * @param {string} username
+ * @param {string} password
+ * @param {string} [cnonce] - client nonce; random unless given (tests pass a fixed one)
+ * @returns {string}
  */
-function buildDigestHeader(method, uri, session, username, password) {
+export function buildDigestHeader(method, uri, session, username, password, cnonce = randomHex(16)) {
   const { challenge, qop } = session;
   const ha1 = md5(`${username}:${challenge.realm}:${password}`);
   const ha2 = md5(`${method}:${uri}`);
@@ -218,7 +272,6 @@ function buildDigestHeader(method, uri, session, username, password) {
   if (qop) {
     session.nc += 1;
     const ncStr = session.nc.toString(16).padStart(8, '0');
-    const cnonce = randomHex(16);
     response = md5(`${ha1}:${challenge.nonce}:${ncStr}:${cnonce}:${qop}:${ha2}`);
     parts.push(`qop=${qop}`, `nc=${ncStr}`, `cnonce=${quote(cnonce)}`);
   } else {
@@ -233,25 +286,35 @@ function buildDigestHeader(method, uri, session, username, password) {
 
 /* ── Session + lockout state ────────────────────────────────────────────── */
 
-/** Cached challenges, keyed by device + credentials. */
-const digestSessions = new Map();
+/**
+ * Cached challenges, keyed by device + credentials.
+ * @type {Map<string, DigestSession>}
+ */
+export const digestSessions = new Map();
 
 /**
  * Credentials the device has already rejected. Requests with these fail
  * immediately instead of hitting the device, so background polling can't
  * burn through the device's failed-login limit.
+ * @type {Set<string>}
  */
-const rejectedCredentials = new Set();
+export const rejectedCredentials = new Set();
 
-function credentialKey(baseUrl, config) {
+/**
+ * @param {string} baseUrl
+ * @param {DeviceConfig} config
+ * @returns {string} key that doesn't contain the password itself
+ */
+export function credentialKey(baseUrl, config) {
   return `${baseUrl}|${config.username}|${md5(String(config.password))}`;
 }
 
 /**
  * Allow one more attempt with these credentials. Only call this for an
  * explicit user action (pressing Connect), never from automatic retries.
+ * @param {DeviceConfig} config
  */
-function forgetRejectedCredentials(config) {
+export function forgetRejectedCredentials(config) {
   rejectedCredentials.delete(credentialKey(buildBaseUrl(config), config));
 }
 
@@ -263,9 +326,13 @@ function forgetRejectedCredentials(config) {
  * actually issued a new nonce; a 401 for the nonce we just used means the
  * credentials are wrong, and retrying would just add a failed login.
  *
- * @returns {{ status: number, headers: Headers, data: string|ArrayBuffer }}
+ * @param {DeviceConfig} config
+ * @param {string} method
+ * @param {string} urlPath - path and query, e.g. "/ISAPI/System/deviceInfo"
+ * @param {string|null} [body] - XML for PUT/POST
+ * @returns {Promise<DigestResponse>} snapshots ("/picture") as ArrayBuffer, everything else as text
  */
-async function digestFetch(config, method, urlPath, body = null) {
+export async function digestFetch(config, method, urlPath, body = null) {
   const baseUrl = buildBaseUrl(config);
   const url = `${baseUrl}${urlPath}`;
   const isImage = urlPath.includes('/picture');
@@ -275,6 +342,7 @@ async function digestFetch(config, method, urlPath, body = null) {
     throw new AuthError('Device rejected the username or password');
   }
 
+  /** @param {string|null} authorization */
   const send = (authorization) => fetch(url, {
     method,
     headers: {
@@ -283,6 +351,7 @@ async function digestFetch(config, method, urlPath, body = null) {
     },
     body,
   });
+  /** @param {DigestSession} session */
   const authorize = (session) => buildDigestHeader(
     method.toUpperCase(), urlPath, session, config.username, config.password);
 

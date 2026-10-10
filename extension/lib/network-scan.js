@@ -9,18 +9,22 @@
  */
 
 /** Subnets most home/office routers hand out, tried after any known subnet. */
-const COMMON_SUBNETS = ['192.168.0', '192.168.1', '192.168.2', '10.0.0', '10.0.1'];
+export const COMMON_SUBNETS = ['192.168.0', '192.168.1', '192.168.2', '10.0.0', '10.0.1'];
 
-const PROBE_CONCURRENCY = 48;
-const PROBE_TIMEOUT_MS = 1200;
+export const PROBE_CONCURRENCY = 48;
+export const PROBE_TIMEOUT_MS = 1200;
 
 /**
  * Probe one address. Hikvision ISAPI answers unauthenticated requests with
  * 401 and a Digest challenge; anything else isn't a candidate.
+ * @param {string} ip
+ * @param {AbortSignal} [signal]
+ * @param {number} [timeoutMs]
+ * @returns {Promise<boolean>}
  */
-async function probeHikvision(ip, signal) {
+export async function probeHikvision(ip, signal, timeoutMs = PROBE_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   const abortProbe = () => controller.abort();
   signal?.addEventListener('abort', abortProbe);
   try {
@@ -46,10 +50,10 @@ async function probeHikvision(ip, signal) {
  * @param {string[]} knownHosts - e.g. the last host the user connected to
  * @returns {string[]} subnet prefixes like "192.168.0"
  */
-function candidateSubnets(knownHosts = []) {
+export function candidateSubnets(knownHosts = []) {
   const known = knownHosts
     .map(h => /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(h || '')?.[1])
-    .filter(Boolean);
+    .filter(/** @returns {s is string} */ s => Boolean(s));
   return [...new Set([...known, ...COMMON_SUBNETS])];
 }
 
@@ -61,12 +65,14 @@ function candidateSubnets(knownHosts = []) {
  * @param {object} options
  * @param {string[]} options.subnets - prefixes from candidateSubnets()
  * @param {AbortSignal} [options.signal] - cancels the scan
+ * @param {number} [options.probeTimeoutMs] - how long to wait for each address
  * @param {(ip: string) => void} [options.onFound]
  * @param {(progress: {subnet: string, probed: number}) => void} [options.onProgress]
  *   `probed` counts addresses checked in the current subnet (out of 254).
  * @returns {Promise<{ip: string, port: number}[]>}
  */
-async function scanForHikvision({ subnets, signal, onFound, onProgress }) {
+export async function scanForHikvision({ subnets, signal, onFound, onProgress, probeTimeoutMs = PROBE_TIMEOUT_MS }) {
+  /** @type {{ip: string, port: number}[]} */
   const found = [];
 
   for (const subnet of subnets) {
@@ -74,8 +80,8 @@ async function scanForHikvision({ subnets, signal, onFound, onProgress }) {
     const queue = Array.from({ length: 254 }, (_, i) => `${subnet}.${i + 1}`);
     const worker = async () => {
       while (queue.length > 0 && !signal?.aborted) {
-        const ip = queue.shift();
-        if (await probeHikvision(ip, signal)) {
+        const ip = /** @type {string} */ (queue.shift());
+        if (await probeHikvision(ip, signal, probeTimeoutMs)) {
           found.push({ ip, port: 80 });
           onFound?.(ip);
         }

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>App harness</title>
+<link rel="stylesheet" href="../../extension/app.css">
+</head>
+<body>
+<!--
+  Manual harness: the real config page (extension/app.html + src/main.js)
+  outside the extension, with stubbed chrome.* APIs and a mock NVR, for
+  clicking through UI changes without a device. Run `npm run harness`.
+
+  In the console, `mockDevice` exposes requests and saved XML; set
+  `mockDevice.rejectAuth = true` to simulate a password change on the device.
+  Use host 192.168.0.108 and any password to connect.
+-->
+<script type="module">
+  import appHtml from '../../extension/app.html?raw';
+  import { createChromeStub, createMockNvr } from '../support/mock-nvr.js';
+
+  const page = new DOMParser().parseFromString(appHtml, 'text/html');
+  page.querySelectorAll('script').forEach(s => s.remove());
+  document.body.insertAdjacentHTML('beforeend', page.body.innerHTML);
+
+  window.chrome = createChromeStub().chrome;
+  const device = createMockNvr({ snapshotDelayMs: 300, realFetch: window.fetch.bind(window) });
+  window.fetch = device.fetch;
+  window.mockDevice = device;
+
+  await import('../../extension/src/main.js');
+</script>
+</body>
+</html>
