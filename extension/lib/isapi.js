@@ -17,7 +17,9 @@
 import {
   applyChannelStatus, mergeChannelLists, readChannelList, readChannelStatus, readMainStreamSizes, readStreamingChannels,
 } from './channels.js';
-import { applyPrivacyMask, readAlarmOutputs, readLightAudioChannels, readMotionTriggerCap } from './config-xml.js';
+import {
+  applyPrivacyMask, readAlarmOutputs, readLightAudioChannels, readMotionCapabilities, readMotionTriggerCap, readSensitivityRange,
+} from './config-xml.js';
 import { parseDeviceTime, toDeviceTime } from './device-time.js';
 import {
   AuthError, digestFetch, forgetDigestSessions, forgetRejectedCredentials, rejectCredentials,
@@ -38,6 +40,7 @@ import {
 /** @typedef {import('./config-xml.js').AlarmOutput} AlarmOutput */
 /** @typedef {import('./config-xml.js').DeviceRect} DeviceRect */
 /** @typedef {import('./config-xml.js').EventActionSupport} EventActionSupport */
+/** @typedef {import('./config-xml.js').MotionCapabilities} MotionCapabilities */
 /** @typedef {import('./config-xml.js').Size} Size */
 /** @typedef {import('./config-xml.js').UnusedPrivacySlots} UnusedPrivacySlots */
 /** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
@@ -530,7 +533,13 @@ export const Isapi = {
    * limits, sensitivity steps, target types), or null if the device doesn't
    * have them.
    *
-   * Optional: the editor works with default limits without them, so any
+   * An IP camera's come from its InputProxy URL, next to its motion config,
+   * or else from /ISAPI/System/Video/inputs/channels/{id}/…, the URL
+   * Hikvision's web UI reads them from for every channel. The DS-7604NI
+   * serves the same document at both, and can answer either with 503 now
+   * and then.
+   *
+   * Optional: the editor works without them (see getMotionLimits), so any
    * error answer, or a body that isn't XML, gives null rather than failing
    * the Motion tab. Not only "not here" answers: the DS-7604NI answers 503
    * serviceUnavailable every time for capability resources it doesn't serve.
@@ -540,9 +549,57 @@ export const Isapi = {
    * @returns {Promise<XMLDocument|null>}
    */
   async getMotionCapabilities(config, channel) {
+    const paths = [`${this.motionDetectionPath(channel)}/capabilities`];
+    if (channel.kind === 'digital') paths.push(`/ISAPI/System/Video/inputs/channels/${channel.id}/motionDetection/capabilities`);
+    for (const path of paths) {
+      const doc = await this.optionalCapabilities(config, path);
+      if (doc) return doc;
+    }
+    return null;
+  },
+
+  /**
+   * Motion layout capabilities, where Hikvision's web UI reads the
+   * sensitivity levels (…/motionDetection/layout/capabilities, next to the
+   * channel's motion config), or null if the device doesn't have them.
+   * Optional, like getMotionCapabilities.
+   * @param {DeviceConfig} config
+   * @param {Pick<Channel, 'id'|'kind'>} channel
+   * @returns {Promise<XMLDocument|null>}
+   */
+  getMotionLayoutCapabilities(config, channel) {
+    return this.optionalCapabilities(config, `${this.motionDetectionPath(channel)}/layout/capabilities`);
+  },
+
+  /**
+   * What the motion editor may offer on a channel, as the device states it:
+   * the capabilities, and the sensitivity levels from the layout
+   * capabilities when the capabilities don't give them. Anything neither
+   * states stays unknown (see readMotionCapabilities), never guessed.
+   * @param {DeviceConfig} config
+   * @param {Pick<Channel, 'id'|'kind'>} channel
+   * @returns {Promise<MotionCapabilities>}
+   * @throws {AuthError|NetworkError} as getMotionCapabilities
+   */
+  async getMotionLimits(config, channel) {
+    const doc = await this.getMotionCapabilities(config, channel);
+    const layoutDoc = readSensitivityRange(doc) ? null : await this.getMotionLayoutCapabilities(config, channel);
+    return readMotionCapabilities(doc, layoutDoc);
+  },
+
+  /**
+   * A capabilities document the caller can do without: null for any error
+   * answer or a body that isn't XML (see getMotionCapabilities for why any
+   * error). No answer at all, or a rejected login, still throws.
+   * @param {DeviceConfig} config
+   * @param {string} path
+   * @returns {Promise<XMLDocument|null>}
+   * @private
+   */
+  async optionalCapabilities(config, path) {
     let resp;
     try {
-      resp = await this.request(config, 'GET', `${this.motionDetectionPath(channel)}/capabilities`);
+      resp = await this.request(config, 'GET', path);
     } catch (err) {
       if (!(err instanceof IsapiError)) throw err;
       return null;

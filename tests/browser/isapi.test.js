@@ -388,6 +388,56 @@ describe('Isapi', () => {
     }
   });
 
+  it('reads an IP camera’s motion capabilities from the System URL when its InputProxy one fails', async () => {
+    const proxy = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/capabilities';
+    const system = '/ISAPI/System/Video/inputs/channels/1/motionDetection/capabilities';
+    // The DS-7604NI serves the same document at both, and can answer 503 now and then
+    for (const failure of [statusRoute(503, 2, 'serviceUnavailable', 'Device Busy'), statusRoute(403, 4, 'notSupport'), { body: 'busy' }]) {
+      const calls = mockDevice({ [proxy]: failure, [system]: { body: fixtures.motionCapabilitiesNvr } });
+      expect((await Isapi.getMotionCapabilities(testConfig(), digital('1')))?.documentElement.localName).toBe('MotionDetection');
+      expect(calls).toEqual([proxy, system]);
+    }
+    let calls = mockDevice({ [proxy]: { body: fixtures.motionCapabilitiesNvr } });
+    expect(await Isapi.getMotionCapabilities(testConfig(), digital('1'))).not.toBeNull();
+    expect(calls).toEqual([proxy]);
+
+    // Neither: no capabilities. An analog input's own URL is the System one, asked once
+    calls = mockDevice({});
+    expect(await Isapi.getMotionCapabilities(testConfig(), digital('1'))).toBeNull();
+    expect(calls).toEqual([proxy, system]);
+    calls = mockDevice({});
+    expect(await Isapi.getMotionCapabilities(testConfig(), analog('1'))).toBeNull();
+    expect(calls).toEqual([system]);
+
+    // No answer at all isn't a reason to try the other URL
+    calls = mockDevice({ [proxy]: { unreachable: true }, [system]: { body: fixtures.motionCapabilitiesNvr } });
+    await expect(Isapi.getMotionCapabilities(testConfig(), digital('1'))).rejects.toBeInstanceOf(NetworkError);
+    expect(calls).toEqual([proxy]);
+  });
+
+  it('takes the sensitivity levels from the layout capabilities only when the capabilities lack them', async () => {
+    const caps = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/capabilities';
+    const layout = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/layout/capabilities';
+    let calls = mockDevice({ [caps]: { body: fixtures.motionCapabilitiesNvr }, [layout]: { body: fixtures.motionLayoutCapabilitiesNvr } });
+    expect(await Isapi.getMotionLimits(testConfig(), digital('1'))).toMatchObject({
+      regionTypes: ['grid', 'region'], sensitivity: { min: 0, max: 100, step: 20 },
+    });
+    expect(calls).toEqual([caps]);
+
+    // No capabilities at either URL: the layout capabilities still give the levels
+    calls = mockDevice({ [layout]: { body: fixtures.motionLayoutCapabilitiesNvr } });
+    expect(await Isapi.getMotionLimits(testConfig(), digital('1'))).toMatchObject({
+      regionTypes: [], sensitivity: { min: 0, max: 100, step: 20 },
+    });
+    expect(calls.at(-1)).toBe(layout);
+    mockDevice({ '/ISAPI/System/Video/inputs/channels/1/motionDetection/layout/capabilities': { body: fixtures.motionLayoutCapabilitiesNvr } });
+    expect((await Isapi.getMotionLimits(testConfig(), analog('1'))).sensitivity).toEqual({ min: 0, max: 100, step: 20 });
+
+    // Nothing says which levels the camera accepts
+    mockDevice({ [layout]: statusRoute(503, 2, 'serviceUnavailable') });
+    expect(await Isapi.getMotionLimits(testConfig(), digital('1'))).toMatchObject({ regionTypes: [], sensitivity: null, targetTypes: [] });
+  });
+
   it('treats any error answer as "no recorded frame", but not a missing answer', async () => {
     const time = new Date(Date.UTC(2024, 0, 1, 12));
     mockDevice({}); // 404 everywhere

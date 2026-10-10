@@ -15,6 +15,7 @@
  */
 import motionDetection from '../fixtures/motionDetection-nvr.xml?raw';
 import motionCapabilities from '../fixtures/motionCapabilities-nvr.xml?raw';
+import motionLayoutCapabilities from '../fixtures/motionLayoutCapabilities-nvr.xml?raw';
 import privacyMaskRegions from '../fixtures/privacyMask-nvr-regions.xml?raw';
 import eventTrigger from '../fixtures/eventTrigger.xml?raw';
 import eventTriggerNvr from '../fixtures/eventTrigger-nvr.xml?raw';
@@ -499,6 +500,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (p.endsWith('/motionDetection/capabilities')) {
       return xml(p.includes('/channels/2/') ? motionCapabilities.replace('opt="grid,region"', 'opt="grid"') : motionCapabilities);
     }
+    if (p.endsWith('/motionDetection/layout/capabilities')) return xml(motionLayoutCapabilities);
     if (p.endsWith('/motionDetection')) return xml(device.motionDocs[channelOf(p)] ?? motionDetection);
     if (p.endsWith('/privacyMask')) return xml(device.privacy.read(p));
     const trigger = p.match(/^\/ISAPI\/Event\/triggers\/VMD-(\d+)$/);

@@ -6,6 +6,7 @@
 import motionDetection from '../fixtures/motionDetection.xml?raw';
 import motionDetectionNvr from '../fixtures/motionDetection-nvr.xml?raw';
 import motionCapabilitiesNvr from '../fixtures/motionCapabilities-nvr.xml?raw';
+import motionLayoutCapabilitiesNvr from '../fixtures/motionLayoutCapabilities-nvr.xml?raw';
 import privacyMask from '../fixtures/privacyMask.xml?raw';
 import privacyMaskNvr from '../fixtures/privacyMask-nvr.xml?raw';
 import privacyMaskNvrRegions from '../fixtures/privacyMask-nvr-regions.xml?raw';
@@ -29,8 +30,9 @@ import streamingChannelsNvr from '../fixtures/streamingChannels-nvr.xml?raw';
 import systemTimeNvr from '../fixtures/systemTime-nvr.xml?raw';
 
 export const fixtures = {
-  // motionDetectionNvr is the DS-7604NI's channel 1 config as captured
-  motionDetection, motionDetectionNvr, motionCapabilitiesNvr,
+  // motionDetectionNvr is the DS-7604NI's channel 1 config as captured, with its capabilities
+  // (the same at the InputProxy and System URLs) and layout capabilities
+  motionDetection, motionDetectionNvr, motionCapabilitiesNvr, motionLayoutCapabilitiesNvr,
   privacyMask, privacyMaskNvr, privacyMaskNvrRegions, eventTrigger, eventTriggerNvr,
   // DS-7604NI captures (channel 3: its camera has a relay, white light and speaker); the -io301 and
   // -whitelight triggers are what the NVR stored after its own web UI's linkage was PUT

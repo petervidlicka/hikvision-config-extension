@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<MotionDetectionLayout version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<sensitivityLevel min="0" max="100" step="20">40</sensitivityLevel>
+<layout>
+<gridMap>0000000000000000000000000000000003c00003e00007f80007f80007f80003f80001f80001f00000f0000070000020000000000000</gridMap>
+</layout>
+<targetType opt="human,vehicle"/>
+<regionEdgesNum min="4" max="10"/>
+</MotionDetectionLayout>

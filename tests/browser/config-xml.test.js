@@ -6,9 +6,10 @@ import { childElements, childText, parseXml, serializeXml } from '../../extensio
 import {
   DEFAULT_PRIVACY_SCREEN, alarmOutputNotification, applyMotionConfig, applyNotifications, decodeGridMap,
   encodeGridMap, applyPrivacyMask, hasNotification, imageRectToPrivacy, imageToMotionRegion, lightAudioNotification,
-  mergeTargetTypes, methodNotification, motionRegionToImage, privacyRegionList, privacyRegionToImage, readAlarmOutputs, readLightAudioChannels,
-  readMotionCapabilities, readMotionConfig, readMotionTriggerCap, readNotificationMethods, readPrivacyMask, recordNotification,
-  resolveEventActions, triggerNotifications,
+  mergeTargetTypes, methodNotification, motionEditMode, motionRegionToImage, privacyRegionList, privacyRegionToImage,
+  readAlarmOutputs, readLightAudioChannels, readMotionCapabilities, readMotionConfig, readMotionTriggerCap,
+  readNotificationMethods, readPrivacyMask, readSensitivityRange, recordNotification, resolveEventActions, snapSensitivity,
+  triggerNotifications,
 } from '../../extension/lib/config-xml.js';
 import { fixtures, motionFixtures } from './fixtures.js';
 
@@ -171,7 +172,57 @@ describe('motion detection', () => {
       sensitivity: { min: 0, max: 100, step: 20 },
       targetTypes: ['human', 'vehicle'],
     });
-    expect(readMotionCapabilities(null).maxRegions).toBe(4);
+    // Without capabilities, only the region limits of Hikvision's web UI; nothing else is assumed
+    expect(readMotionCapabilities(null)).toEqual({
+      regionTypes: [], maxRegions: 4, minPoints: 3, maxPoints: 10, sensitivity: null, targetTypes: [],
+    });
+  });
+
+  it('takes the sensitivity levels from the layout capabilities when the capabilities lack them', () => {
+    const layout = parseXml(fixtures.motionLayoutCapabilitiesNvr);
+    expect(readSensitivityRange(layout)).toEqual({ min: 0, max: 100, step: 20 });
+    expect(readMotionCapabilities(null, layout).sensitivity).toEqual({ min: 0, max: 100, step: 20 });
+    const withoutLevels = parseXml(fixtures.motionCapabilitiesNvr.replace(/<sensitivityLevel[^>]*>/, '<sensitivityLevel>'));
+    expect(readMotionCapabilities(withoutLevels).sensitivity).toBeNull();
+    expect(readMotionCapabilities(withoutLevels, layout)).toMatchObject({
+      regionTypes: ['grid', 'region'], sensitivity: { min: 0, max: 100, step: 20 },
+    });
+    // The capabilities' own levels come first
+    const own = parseXml(fixtures.motionCapabilitiesNvr.replace('step="20"', 'step="10"'));
+    expect(readMotionCapabilities(own, layout).sensitivity).toEqual({ min: 0, max: 100, step: 10 });
+    // Levels without a step take any whole number; without min or max they're unknown
+    expect(readSensitivityRange(parseXml('<L><sensitivityLevel min="0" max="5">3</sensitivityLevel></L>')))
+      .toEqual({ min: 0, max: 5, step: 1 });
+    expect(readSensitivityRange(parseXml('<L><sensitivityLevel max="100">3</sensitivityLevel></L>'))).toBeNull();
+    expect(readSensitivityRange(null)).toBeNull();
+  });
+
+  it('snaps a sensitivity to the nearest level the camera accepts', () => {
+    const levels = { min: 0, max: 100, step: 20 };
+    expect([0, 9, 10, 37, 50, 99, 140, -5].map(v => snapSensitivity(v, levels))).toEqual([0, 0, 20, 40, 60, 100, 100, 0]);
+    expect(snapSensitivity(3, { min: 1, max: 5, step: 2 })).toBe(3);
+  });
+
+  it('sends the stored sensitivity back unchanged when none is given', () => {
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    applyMotionConfig(doc, { enabled: true, dynamicAnalysis: true, regions: [] });
+    expect(serializeXml(doc)).toContain('<sensitivityLevel>40</sensitivityLevel>');
+  });
+
+  it('edits polygons where the camera offers them, else its grid, whatever regionType it stores', () => {
+    const nvr = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    const caps = readMotionCapabilities(parseXml(fixtures.motionCapabilitiesNvr));
+    expect(nvr.regionType).toBe('grid'); // as the DS-7604NI reads back after a polygon save
+    expect(motionEditMode(caps, nvr)).toBe('region');
+    expect(motionEditMode({ ...caps, regionTypes: ['grid'] }, nvr)).toBe('grid');
+  });
+
+  it('edits the grid when the capabilities can’t be read and the camera has one, as the web UI does', () => {
+    const none = readMotionCapabilities(null);
+    expect(motionEditMode(none, readMotionConfig(parseXml(fixtures.motionDetectionNvr)))).toBe('grid');
+    // No grid in the document: polygons are all there is to edit
+    const noGrid = fixtures.motionDetectionNvr.replace(/<Grid>[\s\S]*?<\/Grid>/, '').replace(/<gridMap>[^<]*<\/gridMap>/, '');
+    expect(motionEditMode(none, readMotionConfig(parseXml(noGrid)))).toBe('region');
   });
 });
 

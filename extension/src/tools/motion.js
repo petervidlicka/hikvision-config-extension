@@ -5,7 +5,8 @@
  */
 
 import {
-  applyMotionConfig, imageToMotionRegion, mergeTargetTypes, motionRegionToImage, readMotionCapabilities, readMotionConfig,
+  applyMotionConfig, imageToMotionRegion, mergeTargetTypes, motionEditMode, motionRegionToImage, readMotionCapabilities,
+  readMotionConfig, snapSensitivity,
 } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
 import { isSimplePolygon, pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
@@ -42,6 +43,9 @@ export const motionTool = {
     <div class="slider-group">
       <label>Sensitivity <span id="sensitivityVal">40</span></label>
       <input type="range" id="sensitivitySlider" min="0" max="100" step="20" value="40" />
+      <div class="slider-note" id="sensitivityNote" style="display:none">
+        Kept as stored: this camera doesn't list the levels it accepts.
+      </div>
     </div>
     <div class="toggle-row" id="dynamicAnalysisRow">
       <span>Dynamic Analysis</span>
@@ -261,15 +265,14 @@ export const motionTool = {
     const channel = activeChannelInfo();
     setStatus('Loading motion detection config...');
     try {
-      const [doc, capsDoc] = await Promise.all([
+      const [doc, caps] = await Promise.all([
         Isapi.getXml(state.config, Isapi.motionDetectionPath(channel)),
-        Isapi.getMotionCapabilities(state.config, channel),
+        Isapi.getMotionLimits(state.config, channel),
       ]);
       state.motionDoc = doc;
-      state.motionCaps = readMotionCapabilities(capsDoc);
+      state.motionCaps = caps;
       const md = readMotionConfig(doc);
-      // Polygons whenever the device supports them, as Hikvision's own UI does
-      state.motionMode = state.motionCaps.regionTypes.includes('region') || !md.grid ? 'region' : 'grid';
+      state.motionMode = motionEditMode(caps, md);
       state.motionGrid = md.grid ? { ...md.grid, cells: md.grid.cells.map(row => [...row]) } : null;
       applyCapabilities();
       byId('dynamicAnalysisRow').style.display = md.supportsDynamicAnalysis ? '' : 'none';
@@ -279,7 +282,10 @@ export const motionTool = {
 
       if (md.sensitivity !== null) {
         state.sensitivity = md.sensitivity;
-        byId('sensitivitySlider', HTMLInputElement).value = String(md.sensitivity);
+        const slider = byId('sensitivitySlider', HTMLInputElement);
+        // Room for a stored level off the usual scale, when the camera gives none
+        if (!caps.sensitivity) slider.max = String(Math.max(100, md.sensitivity));
+        slider.value = String(md.sensitivity);
         byId('sensitivityVal').textContent = String(md.sensitivity);
       }
 
@@ -323,10 +329,12 @@ export const motionTool = {
       return;
     }
 
-    // Snap to the device's sensitivity steps (e.g. 0, 20, … 100)
-    const { min, max, step } = caps.sensitivity;
-    const rawSensitivity = Number(byId('sensitivitySlider', HTMLInputElement).value);
-    const sensitivity = Math.min(max, Math.max(min, min + Math.round((rawSensitivity - min) / step) * step));
+    // Snap to the device's sensitivity steps (e.g. 0, 20, … 100). Without
+    // them the slider is locked and the stored level goes back as loaded:
+    // snapping it to a guessed step could change it unasked.
+    const sensitivity = caps.sensitivity
+      ? snapSensitivity(Number(byId('sensitivitySlider', HTMLInputElement).value), caps.sensitivity)
+      : undefined;
 
     // Edit a copy so a failed save leaves the loaded config intact
     const doc = cloneXml(state.motionDoc);
@@ -439,13 +447,21 @@ function closePolygon() {
   return true;
 }
 
-/** Apply the device's limits to the panel controls. */
+/**
+ * Apply the device's limits to the panel controls. A camera that doesn't
+ * say which sensitivity levels it accepts gets the slider locked (see
+ * setToolPanelLoading) with a note, as Hikvision's web UI hides it.
+ */
 function applyCapabilities() {
   const caps = state.motionCaps;
   const slider = byId('sensitivitySlider', HTMLInputElement);
-  slider.min = String(caps.sensitivity.min);
-  slider.max = String(caps.sensitivity.max);
-  slider.step = String(caps.sensitivity.step);
+  const range = caps.sensitivity;
+  slider.min = String(range?.min ?? 0);
+  slider.max = String(range?.max ?? 100);
+  slider.step = range ? String(range.step) : 'any';
+  slider.dataset.locked = String(!range);
+  slider.disabled = !range;
+  byId('sensitivityNote').style.display = range ? 'none' : '';
   byId('motionMaxRegions').textContent = String(caps.maxRegions);
   byId('motionPointRange').textContent = `${caps.minPoints}–${caps.maxPoints}`;
   byId('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';

@@ -731,6 +731,52 @@ describe('config page', () => {
     }
   });
 
+  it('edits the grid when no capabilities answer, keeping the stored sensitivity unless the camera gives its levels', async () => {
+    const busy = { httpStatus: 503, ...STATUS.serviceUnavailable };
+    const caps = [
+      'GET /ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/capabilities',
+      'GET /ISAPI/System/Video/inputs/channels/1/motionDetection/capabilities',
+    ];
+    const layout = 'GET /ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/layout/capabilities';
+    const slider = $('sensitivitySlider');
+    try {
+      // The InputProxy URL busy: the System one answers, and polygons stay
+      device.failures[caps[0]] = busy;
+      await reloadMotion();
+      expect(state.motionMode).toBe('region');
+      expect(device.requests.slice(-3)).toContain(caps[1]);
+
+      // Neither: the camera's own grid, as Hikvision's web UI falls back to, with the
+      // levels from the layout capabilities
+      device.failures[caps[1]] = busy;
+      await reloadMotion();
+      expect(state.motionMode).toBe('grid');
+      expect([slider.disabled, slider.step]).toEqual([false, '20']);
+      expect($('sensitivityNote').style.display).toBe('none');
+
+      // Nothing gives the levels: the slider is locked and the stored level goes back unchanged
+      device.failures[layout] = busy;
+      await reloadMotion();
+      expect(slider.disabled).toBe(true);
+      expect($('sensitivityNote').style.display).toBe('');
+      expect([slider.value, $('sensitivityVal').textContent]).toEqual(['40', '40']);
+      slider.value = '50';
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      const { body } = device.puts.at(-1);
+      expect(body).toContain('<sensitivityLevel>40</sensitivityLevel>');
+      expect(body).toContain('<regionType>grid</regionType>');
+      expect(body).toContain(`<gridMap>${fixtures.motionDetectionNvr.match(/<gridMap>([^<]+)</)[1]}</gridMap>`);
+    } finally {
+      for (const key of [...caps, layout]) delete device.failures[key];
+    }
+    await reloadMotion();
+    expect(state.motionMode).toBe('region');
+    expect(slider.disabled).toBe(false);
+    expect($('sensitivityNote').style.display).toBe('none');
+  });
+
   it('stops all four feeds after one retry when the device rejects the password mid-session', async () => {
     $('liveViewSectionTab').click();
     $('gridViewTab').click();

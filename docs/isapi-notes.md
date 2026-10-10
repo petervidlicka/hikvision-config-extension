@@ -42,6 +42,22 @@ can't be read, every camera counts as online.
 both `region` and `grid`, the UI draws polygons ("multi-region"); otherwise it
 uses the 22×18 cell grid.
 
+- **Where the capabilities come from.** The web UI reads them from the System
+  URL for every channel (`discardFalseAlarmCap` in `websdk.js`). The extension
+  asks an IP camera's InputProxy URL first, next to its motion config, then
+  the System one. The DS-7604NI serves the same document at both, and either
+  can answer 503 now and then.
+- **Without capabilities** the web UI keeps its grid editor and hides the
+  sensitivity slider. The extension also edits the grid whenever the motion
+  document has `Grid` granularity and a `gridMap`, and polygons only for a
+  document without a grid: saving polygons sets `regionType` region and zeroes
+  `gridMap`, which on a grid-only camera would wipe the detection area.
+- **Sensitivity levels**: `sensitivityLevel@min/max/step` in the capabilities,
+  else in `…/motionDetection/layout/capabilities` (the web UI's `motionCapa`,
+  where it always reads them; 0–100 step 20 on the DS-7604NI). With neither,
+  the slider is locked and the stored level is sent back unchanged, never
+  snapped to a guessed step: the DS-7604NI stores a level between steps as the
+  step below (37 became 20).
 - Max polygons: `MotionDetectionLayout > RegionList@size` in capabilities (default 4).
 - Max points per polygon: `MotionDetectionLayout > regionEdgesNum@max` + 1 (default 5).
 - Saving polygons: removes every `<Region>`, appends the new ones to `RegionList`,

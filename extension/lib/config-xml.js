@@ -31,24 +31,37 @@ import { appendElement, childElement, childElements, childText, findDescendant, 
 export const MOTION_COORDINATE_SCALE = 1000;
 
 /**
+ * The sensitivity levels a camera accepts: min to max in steps of `step`
+ * (0–100 in steps of 20 on the DS-7604NI, the same six levels as the SDK's 0–5).
+ * @typedef {{min: number, max: number, step: number}} SensitivityRange
+ */
+
+/**
+ * What a camera's motion detection offers, from its capabilities. Parts the
+ * camera doesn't state are left unknown rather than guessed, so the editor
+ * doesn't write a value or switch a mode the camera never offered.
  * @typedef {object} MotionCapabilities
- * @property {string[]} regionTypes - e.g. ["grid", "region"]
+ * @property {string[]} regionTypes - e.g. ["grid", "region"]; empty when unknown
  * @property {number} maxRegions
  * @property {number} minPoints - corners per polygon
  * @property {number} maxPoints
- * @property {{min: number, max: number, step: number}} sensitivity
- * @property {string[]} targetTypes - e.g. ["human", "vehicle"]; empty if unsupported
+ * @property {SensitivityRange|null} sensitivity - null when unknown: the stored level is kept
+ * @property {string[]} targetTypes - e.g. ["human", "vehicle"]; empty if unsupported or unknown
  */
 
-/** Limits used when the device doesn't publish capabilities. */
-export const DEFAULT_MOTION_CAPABILITIES = {
-  regionTypes: ['region'],
+/**
+ * Used when the device doesn't publish capabilities: the region limits of
+ * Hikvision's web UI, and nothing else assumed.
+ * @type {Readonly<MotionCapabilities>}
+ */
+export const DEFAULT_MOTION_CAPABILITIES = Object.freeze({
+  regionTypes: [],
   maxRegions: 4,
   minPoints: 3,
   maxPoints: 10,
-  sensitivity: { min: 0, max: 100, step: 1 },
+  sensitivity: null,
   targetTypes: [],
-};
+});
 
 /**
  * Integer attribute of an element, or `fallback` when missing/invalid.
@@ -73,29 +86,59 @@ export function optList(el) {
 
 /**
  * Read a motionDetection/capabilities document.
- * @param {XMLDocument|null} doc
+ *
+ * The sensitivity levels come from it, or else from the
+ * motionDetection/layout/capabilities document, where Hikvision's web UI
+ * reads them; with neither, they stay unknown (null).
+ * @param {XMLDocument|null} doc - the capabilities, or null when the device didn't give them
+ * @param {XMLDocument|null} [layoutDoc] - the layout capabilities, when fetched
  * @returns {MotionCapabilities}
  */
-export function readMotionCapabilities(doc) {
+export function readMotionCapabilities(doc, layoutDoc = null) {
   const d = DEFAULT_MOTION_CAPABILITIES;
-  if (!doc) return { ...d, sensitivity: { ...d.sensitivity } };
+  const sensitivity = readSensitivityRange(doc) ?? readSensitivityRange(layoutDoc);
+  if (!doc) return { ...d, regionTypes: [], targetTypes: [], sensitivity };
   const root = doc.documentElement;
   const layout = childElement(root, 'MotionDetectionLayout');
-  const sens = childElement(layout, 'sensitivityLevel');
   const edges = childElement(layout, 'regionEdgesNum');
-  const regionTypes = optList(childElement(root, 'regionType'));
   return {
-    regionTypes: regionTypes.length ? regionTypes : d.regionTypes,
+    regionTypes: optList(childElement(root, 'regionType')),
     maxRegions: intAttr(xmlPath(layout, 'layout', 'RegionList'), 'size', d.maxRegions),
     minPoints: intAttr(edges, 'min', d.minPoints),
     maxPoints: intAttr(edges, 'max', d.maxPoints),
-    sensitivity: {
-      min: intAttr(sens, 'min', d.sensitivity.min),
-      max: intAttr(sens, 'max', d.sensitivity.max),
-      step: Math.max(1, intAttr(sens, 'step', d.sensitivity.step)),
-    },
+    sensitivity,
     targetTypes: optList(childElement(layout, 'targetType')),
   };
+}
+
+/**
+ * The sensitivity levels a capabilities document states: its
+ * <sensitivityLevel> with min and max (a step of 1 when it gives none).
+ * Works on both the motion capabilities and the layout capabilities.
+ * @param {XMLDocument|null} doc
+ * @returns {SensitivityRange|null} null when the document doesn't say
+ * @example
+ * // <MotionDetectionLayout><sensitivityLevel min="0" max="100" step="20">40</sensitivityLevel>…
+ * readSensitivityRange(layoutCaps) // → {min: 0, max: 100, step: 20}
+ */
+export function readSensitivityRange(doc) {
+  const el = doc ? findDescendant(doc.documentElement, 'sensitivityLevel') : null;
+  const min = intAttr(el, 'min', NaN);
+  const max = intAttr(el, 'max', NaN);
+  if (Number.isNaN(min) || Number.isNaN(max) || max < min) return null;
+  return { min, max, step: Math.max(1, intAttr(el, 'step', 1)) };
+}
+
+/**
+ * The sensitivity level nearest to a value that the camera accepts.
+ * @param {number} value - e.g. where the slider is
+ * @param {SensitivityRange} range
+ * @returns {number}
+ * @example
+ * snapSensitivity(50, {min: 0, max: 100, step: 20}) // → 60
+ */
+export function snapSensitivity(value, { min, max, step }) {
+  return clamp(min + Math.round((value - min) / step) * step, min, max);
 }
 
 /**
@@ -265,6 +308,28 @@ export function readMotionConfig(doc) {
 }
 
 /**
+ * How the motion editor works on a camera: polygons ('region') or the cell
+ * grid ('grid').
+ * @typedef {'region'|'grid'} MotionEditMode
+ */
+
+/**
+ * Which editor a camera's motion area gets. Polygons when its capabilities
+ * offer them. Without capabilities (or a regionType list in them), the grid
+ * whenever the document has one, as Hikvision's web UI falls back to: saving
+ * polygons switches the camera to region mode and zeroes its gridMap, which
+ * on a grid-only camera would wipe the real detection area. Polygons then
+ * only for a document without a grid.
+ * @param {MotionCapabilities} caps
+ * @param {MotionConfig} md - the loaded document
+ * @returns {MotionEditMode}
+ */
+export function motionEditMode(caps, md) {
+  if (!caps.regionTypes.length) return md.grid ? 'grid' : 'region';
+  return caps.regionTypes.includes('region') || !md.grid ? 'region' : 'grid';
+}
+
+/**
  * Write motion settings into the device's MotionDetection document.
  *
  * Matches what Hikvision's own client sends: regionType switched to
@@ -281,16 +346,18 @@ export function readMotionConfig(doc) {
  *
  * `dynamicAnalysis` goes in the root <enableHighlight> in both modes, and
  * only when the device sent that field (the web UI shows the toggle only then).
+ * Without `sensitivity` (the camera doesn't say which levels it accepts) the
+ * stored level is sent back as loaded.
  *
  * @param {XMLDocument} doc - edited in place
- * @param {{enabled: boolean, sensitivity: number, dynamicAnalysis: boolean, regions: DevicePoint[][], targetTypes?: string[], mode?: 'region'|'grid', grid?: MotionGrid}} config
+ * @param {{enabled: boolean, sensitivity?: number, dynamicAnalysis: boolean, regions: DevicePoint[][], targetTypes?: string[], mode?: MotionEditMode, grid?: MotionGrid}} config
  */
 export function applyMotionConfig(doc, config) {
   const root = doc.documentElement;
   const layout = childElement(root, 'MotionDetectionLayout');
 
   setChildText(root, 'enabled', config.enabled);
-  if (!setChildText(layout, 'sensitivityLevel', config.sensitivity)) {
+  if (config.sensitivity !== undefined && !setChildText(layout, 'sensitivityLevel', config.sensitivity)) {
     const sens = findDescendant(root, 'sensitivityLevel');
     if (sens) sens.textContent = String(config.sensitivity);
   }

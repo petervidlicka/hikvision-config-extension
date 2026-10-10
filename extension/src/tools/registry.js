@@ -150,6 +150,11 @@ export async function loadTool(toolId) {
  * When loading, all interactive elements (inputs, buttons, toggles) are
  * disabled and the panel is visually dimmed so users know the settings
  * haven't been loaded yet.
+ *
+ * Afterwards each element gets back the state it had before, unless the
+ * tool decided it while loading: an element with `data-locked="true"` stays
+ * disabled and one with `data-locked="false"` is enabled (e.g. a control the
+ * loaded camera doesn't support, set in the tool's load()).
  * @param {string} toolId
  * @param {boolean} isLoading
  */
@@ -164,7 +169,8 @@ export function setToolPanelLoading(toolId, isLoading) {
       el.setAttribute('disabled', '');
       if (el.classList.contains('toggle')) el.style.pointerEvents = 'none';
     } else {
-      if (el.dataset.wasDisabled !== 'true') el.removeAttribute('disabled');
+      const disabled = el.dataset.locked === undefined ? el.dataset.wasDisabled === 'true' : el.dataset.locked === 'true';
+      if (!disabled) el.removeAttribute('disabled');
       delete el.dataset.wasDisabled;
       if (el.classList.contains('toggle')) el.style.pointerEvents = '';
     }
