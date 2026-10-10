@@ -9,9 +9,13 @@
  * one policy (isFallbackError in lib/errors.js): move on only when the device
  * answered "not here", stop on anything that would fail the same way again.
  *
- * Depends on lib/config-xml.js, lib/digest-auth.js, lib/errors.js and lib/xml.js.
+ * Depends on lib/channels.js, lib/config-xml.js, lib/digest-auth.js,
+ * lib/errors.js and lib/xml.js.
  */
 
+import {
+  applyChannelStatus, mergeChannelLists, readChannelList, readChannelStatus, readStreamingChannels,
+} from './channels.js';
 import { applyPrivacyMask, readAlarmOutputs, readLightAudioChannels, readMotionTriggerCap } from './config-xml.js';
 import {
   AuthError, digestFetch, forgetDigestSessions, forgetRejectedCredentials, rejectCredentials,
@@ -24,9 +28,10 @@ import {
   buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey, toDeviceTime,
 } from './playback.js';
 import {
-  childElement, childElements, childText, cloneXml, findDescendant, parseXml, parseXmlOrNull, serializeXml,
+  childElements, childText, cloneXml, findDescendant, parseXml, parseXmlOrNull, serializeXml,
 } from './xml.js';
 
+/** @typedef {import('./channels.js').Channel} Channel */
 /** @typedef {import('./config-xml.js').AlarmOutput} AlarmOutput */
 /** @typedef {import('./config-xml.js').DeviceRect} DeviceRect */
 /** @typedef {import('./config-xml.js').EventActionSupport} EventActionSupport */
@@ -133,23 +138,17 @@ function cannotDelete(err) {
     (err instanceof IsapiError && (err.httpStatus === 405 || err.reason === 'methodNotAllowed'));
 }
 
-/**
- * A camera channel. `kind` says which URL family configures it: "analog"
- * for cameras wired to the device, "digital" for IP cameras behind an NVR.
- * `ipAddress` is an IP camera's own address, when the NVR lists it: it ties
- * the channel to that camera's alarm output (see resolveEventActions).
- * @typedef {{id: string, name: string, kind: 'analog'|'digital', ipAddress?: string}} Channel
- */
+/** The device's own channel lists, analog inputs first (see Isapi.getChannels). */
+const CHANNEL_LIST_PATHS = Object.freeze({
+  analog: '/ISAPI/System/Video/inputs/channels',
+  digital: '/ISAPI/ContentMgmt/InputProxy/channels',
+});
 
-/**
- * Ways to read the channel list, in the order firmware tends to support them.
- * @type {{path: string, tag: string, kind: Channel['kind']}[]}
- */
-const CHANNEL_ENDPOINTS = [
-  { path: '/ISAPI/System/Video/inputs/channels', tag: 'VideoInputChannel', kind: 'analog' },
-  { path: '/ISAPI/ContentMgmt/InputProxy/channels', tag: 'InputProxyChannel', kind: 'digital' },
-  { path: '/ISAPI/Streaming/channels', tag: 'StreamingChannel', kind: 'analog' },
-];
+/** The stream list, for firmware with neither channel list. */
+const STREAMING_CHANNELS_PATH = '/ISAPI/Streaming/channels';
+
+/** Which IP cameras an NVR is connected to (see Isapi.getChannelStatus). */
+const CHANNEL_STATUS_PATH = '/ISAPI/ContentMgmt/InputProxy/channels/status';
 
 export const Isapi = {
   /**
@@ -270,43 +269,38 @@ export const Isapi = {
   },
 
   /**
-   * List camera channels. Firmware versions differ in which endpoint is
-   * accessible, so try several, then fall back to probing snapshots.
+   * List camera channels: the analog inputs, then the IP cameras, as
+   * Hikvision's web UI and SDK list them, so a hybrid DVR shows both (see
+   * mergeChannelLists). Firmware has either list or both, so a list the
+   * device refuses or doesn't have counts as empty while the other has
+   * channels. Only when both are empty does it fall back to the stream list,
+   * then to probing snapshots, unless a list was refused for a reason other
+   * than "not here" (e.g. lowPrivilege): that reason is what the user needs.
    *
-   * `kind` says which URL family configures the channel: "analog" for
-   * cameras wired to the device, "digital" for IP cameras behind an NVR
-   * (see videoInputBase).
+   * IP cameras are marked online or offline from the NVR's status list (see
+   * getChannelStatus); analog inputs from their own list.
    * @param {DeviceConfig} config
    * @returns {Promise<Channel[]>}
+   * @throws {Error} AuthError, NetworkError or TimeoutError from any request; IsapiError when
+   *   neither list has channels and one was refused; Error when no channel was found at all
    */
   async getChannels(config) {
-    for (const ep of CHANNEL_ENDPOINTS) {
-      try {
-        const root = (await this.getXml(config, ep.path)).documentElement;
-        /** @type {Channel[]} */
-        let channels = childElements(root, ep.tag).map(el => {
-          const ipAddress = childText(childElement(el, 'sourceInputPortDescriptor'), 'ipAddress');
-          return {
-            id: childText(el, 'id') ?? '',
-            name: childText(el, 'name') || childText(el, 'channelName') || '',
-            kind: ep.kind,
-            ...(ipAddress ? { ipAddress } : {}),
-          };
-        });
+    // One after the other, so a rejected login stops before the second list
+    const analog = await this.getChannelList(config, 'analog');
+    const digital = await this.getChannelList(config, 'digital');
+    const channels = mergeChannelLists(analog.channels, digital.channels);
+    if (channels.some(ch => ch.kind === 'digital')) {
+      return applyChannelStatus(channels, await this.getChannelStatus(config));
+    }
+    if (channels.length > 0) return channels;
+    const refusal = analog.refusal ?? digital.refusal;
+    if (refusal) throw refusal;
 
-        if (ep.tag === 'StreamingChannel') {
-          // IDs 101/102 are camera 1 main/sub stream, 201/202 camera 2, ...
-          const seen = new Set();
-          channels = channels
-            .map(ch => ({ ...ch, id: String(Math.floor(parseInt(ch.id, 10) / 100)) }))
-            .filter(ch => !seen.has(ch.id) && seen.add(ch.id));
-        }
-
-        channels = channels.filter(ch => /^\d+$/.test(ch.id));
-        if (channels.length > 0) return channels;
-      } catch (err) {
-        if (!isFallbackError(err)) throw err;
-      }
+    try {
+      const streams = readStreamingChannels((await this.getXml(config, STREAMING_CHANNELS_PATH)).documentElement);
+      if (streams.length > 0) return streams;
+    } catch (err) {
+      if (!isFallbackError(err)) throw err;
     }
 
     // Last resort: probe snapshots on the first 4 channels. Any error answer
@@ -325,6 +319,49 @@ export const Isapi = {
     if (probed.length > 0) return probed;
 
     throw new Error('Could not discover channels. Check that cameras are connected to the NVR.');
+  },
+
+  /**
+   * One of the device's own channel lists (see getChannels). A list the
+   * device doesn't have is empty: an answer that isn't XML (some firmware
+   * answers unknown paths with an HTML page) or "not here" (isFallbackError).
+   * Any other error answer is returned as `refusal` rather than thrown, since
+   * the other list may still have the channels. A rejected login or a device
+   * that doesn't answer is thrown: every further request would fail the same way.
+   * @param {DeviceConfig} config
+   * @param {Channel['kind']} kind - "analog" for the analog inputs, "digital" for the IP cameras
+   * @returns {Promise<{channels: Channel[], refusal: IsapiError|null}>}
+   */
+  async getChannelList(config, kind) {
+    let resp;
+    try {
+      resp = await this.request(config, 'GET', CHANNEL_LIST_PATHS[kind]);
+    } catch (err) {
+      if (!(err instanceof IsapiError)) throw err;
+      return { channels: [], refusal: isFallbackError(err) ? null : err };
+    }
+    const doc = parseXmlOrNull(String(resp.data));
+    return { channels: doc ? readChannelList(doc.documentElement, kind) : [], refusal: null };
+  },
+
+  /**
+   * Which IP cameras the NVR is connected to, by channel id. Only a label for
+   * the channel list, so a device that answers with an error or something
+   * other than XML leaves every camera's state unknown rather than failing
+   * the list. A rejected login or a device that doesn't answer still fails it.
+   * @param {DeviceConfig} config
+   * @returns {Promise<Map<string, boolean>>} channel id → online; empty when unknown
+   */
+  async getChannelStatus(config) {
+    let resp;
+    try {
+      resp = await this.request(config, 'GET', CHANNEL_STATUS_PATH);
+    } catch (err) {
+      if (err instanceof IsapiError) return new Map();
+      throw err;
+    }
+    const doc = parseXmlOrNull(String(resp.data));
+    return doc ? readChannelStatus(doc.documentElement) : new Map();
   },
 
   /**

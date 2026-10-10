@@ -5,8 +5,8 @@
  * returns 403 notSupport), configs via InputProxy, polygon motion regions,
  * privacy masks and event triggers stored the way the NVR stores them, the
  * cameras on channels 3 and 4 with a relay, white light and speaker,
- * errors and write results as <ResponseStatus> bodies, and the userCheck
- * login check.
+ * errors and write results as <ResponseStatus> bodies, the userCheck
+ * login check, and which cameras are online.
  *
  * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
  */
@@ -21,6 +21,7 @@ import ioOutputsCapabilities from '../fixtures/ioOutputsCapabilities-nvr.xml?raw
 import whiteLightAlarmChannels from '../fixtures/whiteLightAlarmChannels-nvr.json?raw';
 import audioAlarmChannels from '../fixtures/audioAlarmChannels-nvr.json?raw';
 import userCheck from '../fixtures/userCheck-nvr.xml?raw';
+import channelStatus from '../fixtures/inputProxyChannelsStatus-nvr.xml?raw';
 
 export const NVR_HOST = '192.168.0.108';
 
@@ -201,8 +202,10 @@ function todaysPictures() {
  * makes a rejected userCheck say the device has locked this computer out or
  * how many attempts are left, `failures` answers "METHOD /path" with an error status
  * (only the first `times` requests, when set), `holds` keeps "METHOD /path"
- * unanswered until its promise settles, and `writeStatus` changes what a
- * successful PUT or DELETE reports (e.g. statusCode 7, reboot required). `privacy.read(path)` shows the privacy masks a channel stores,
+ * unanswered until its promise settles, `writeStatus` changes what a
+ * successful PUT or DELETE reports (e.g. statusCode 7, reboot required), and
+ * `offlineChannels` lists the cameras the NVR's status reports disconnected
+ * (e.g. ['4']). `privacy.read(path)` shows the privacy masks a channel stores,
  * `triggers.read(channel)` its motion trigger.
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
@@ -217,6 +220,8 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     /** @type {Record<string, Promise<void>>} */
     holds: {},
     writeStatus: STATUS.ok,
+    /** @type {string[]} */
+    offlineChannels: [],
     privacy: createPrivacyStore(),
     triggers: createTriggerStore(),
     /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
@@ -297,6 +302,11 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         channel(3, 'Garage', '192.168.254.4') +
         channel(4, 'Slide', '192.168.254.3') +
         '</InputProxyChannelList>');
+    }
+    if (p === '/ISAPI/ContentMgmt/InputProxy/channels/status') {
+      // The DS-7604NI's status, with <online> false for each camera set offline
+      return xml(channelStatus.replace(/(<id>(\d+)<\/id>[\s\S]*?<online>)true</g,
+        (all, head, id) => (device.offlineChannels.includes(id) ? `${head}false<` : all)));
     }
     if (/^\/ISAPI\/Streaming\/channels\/\d+0[12]\/picture$/.test(p)) {
       opts.signal?.throwIfAborted();

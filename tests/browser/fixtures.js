@@ -21,6 +21,9 @@ import ioProxyOutputsNvr from '../fixtures/ioProxyOutputs-nvr.xml?raw';
 import whiteLightAlarmChannelsNvr from '../fixtures/whiteLightAlarmChannels-nvr.json?raw';
 import audioAlarmChannelsNvr from '../fixtures/audioAlarmChannels-nvr.json?raw';
 import inputProxyChannelsNvr from '../fixtures/inputProxyChannels-nvr.xml?raw';
+import inputProxyChannelsStatusNvr from '../fixtures/inputProxyChannelsStatus-nvr.xml?raw';
+import videoInputChannelsHybrid from '../fixtures/videoInputChannels-hybrid.xml?raw';
+import inputProxyChannelsHybrid from '../fixtures/inputProxyChannels-hybrid.xml?raw';
 import userCheckNvr from '../fixtures/userCheck-nvr.xml?raw';
 
 export const fixtures = {
@@ -33,6 +36,10 @@ export const fixtures = {
   ioOutputsCapabilitiesNvr, ioProxyOutputsNvr, whiteLightAlarmChannelsNvr, audioAlarmChannelsNvr, inputProxyChannelsNvr,
   // The DS-7604NI's answer to a userCheck it accepts
   userCheckNvr,
+  // The DS-7604NI's IP camera status (all four online)
+  inputProxyChannelsStatusNvr,
+  // A hybrid DVR (synthetic): analog inputs 1–4, input 4 switched off, and IP cameras 5–6
+  videoInputChannelsHybrid, inputProxyChannelsHybrid,
 };
 
 const captured = import.meta.glob('../fixtures/local/*_motionDetection.xml', { query: '?raw', import: 'default', eager: true });

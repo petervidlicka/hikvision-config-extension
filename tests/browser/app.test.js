@@ -67,17 +67,21 @@ describe('config page', () => {
     await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
   });
 
-  it('connects and lists channels as text', async () => {
+  it('connects and lists channels as text, marking disconnected cameras', async () => {
     $('manualEntryBtn').click();
     $('hostInput').value = NVR_HOST;
     $('passInput').value = 'test-pass';
+    device.offlineChannels = ['4'];
     $('connectBtn').click();
     await vi.waitFor(() => expect(state.channels).toHaveLength(4));
+    device.offlineChannels = [];
 
     expect($('deviceInfo').textContent).toBe('Mock NVR • FW V4.0');
     const names = [...document.querySelectorAll('.channel-item span')].map(s => s.textContent);
     expect(names).toEqual(['Front & Gate', '<img src=x onerror=alert(1)>', 'Garage', 'Slide']);
     expect(document.querySelector('.channel-item img')).toBeNull();
+    const offline = [...document.querySelectorAll('.channel-item.offline')];
+    expect(offline.map(el => [el.querySelector('.ch-num')?.textContent, el.getAttribute('title')])).toEqual([['4', 'Offline']]);
     expect(chromeStub.store.session.password).toBe('test-pass');
     expect(chromeStub.store.local.password).toBeUndefined();
   });

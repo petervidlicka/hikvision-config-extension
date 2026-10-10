@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Synthetic: the IP cameras of the hybrid DVR in videoInputChannels-hybrid.xml, numbered after its 4 analog inputs as Hikvision's SDK numbers them. -->
+<InputProxyChannelList version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema" size="2">
+<InputProxyChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>5</id>
+<name>Driveway</name>
+<sourceInputPortDescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.5</ipAddress>
+<managePortNo>8000</managePortNo>
+<srcInputPort>1</srcInputPort>
+<userName>admin</userName>
+<streamType>auto</streamType>
+</sourceInputPortDescriptor>
+<enableTiming>true</enableTiming>
+</InputProxyChannel>
+<InputProxyChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>6</id>
+<name>Back door</name>
+<sourceInputPortDescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.6</ipAddress>
+<managePortNo>8000</managePortNo>
+<srcInputPort>1</srcInputPort>
+<userName>admin</userName>
+<streamType>auto</streamType>
+</sourceInputPortDescriptor>
+<enableTiming>true</enableTiming>
+</InputProxyChannel>
+</InputProxyChannelList>

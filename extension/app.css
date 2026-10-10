@@ -186,6 +186,7 @@ input::placeholder { color: #555568; }
   background: rgba(255,255,255,0.15);
   border-color: transparent;
 }
+.channel-item.offline { opacity: 0.5; }
 
 /* ── Tool Tabs ── */
 .tool-tabs {

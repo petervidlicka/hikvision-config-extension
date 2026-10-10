@@ -16,6 +16,7 @@ paths=(
   "/ISAPI/System/deviceInfo"
   "/ISAPI/System/Video/inputs/channels"
   "/ISAPI/ContentMgmt/InputProxy/channels"
+  "/ISAPI/ContentMgmt/InputProxy/channels/status"
   "/ISAPI/Streaming/channels"
   "/ISAPI/System/Video/inputs/channels/$ch/motionDetection"
   "/ISAPI/System/Video/inputs/channels/$ch/privacyMask"

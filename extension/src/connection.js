@@ -187,6 +187,11 @@ export async function loadChannels() {
     state.channels.forEach((ch, i) => {
       const div = document.createElement('div');
       div.className = 'channel-item' + (i === 0 ? ' active' : '');
+      // The device says the camera isn't connected; its feed may stay empty
+      if (ch.online === false) {
+        div.classList.add('offline');
+        div.title = 'Offline';
+      }
       // Names come from the device — never parse them as HTML
       const num = document.createElement('div');
       num.className = 'ch-num';

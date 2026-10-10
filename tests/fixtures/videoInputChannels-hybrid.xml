@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Synthetic: a hybrid DVR's analog inputs, shaped like Hikvision DVR firmware's answer (no hybrid DVR was captured). Input 4 is switched off. -->
+<VideoInputChannelList version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<VideoInputChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>1</id>
+<inputPort>1</inputPort>
+<videoInputEnabled>true</videoInputEnabled>
+<name>Gate</name>
+<videoFormat>PAL</videoFormat>
+<portType>BNC</portType>
+<resDesc>1920*1080P25TVI</resDesc>
+</VideoInputChannel>
+<VideoInputChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>2</id>
+<inputPort>2</inputPort>
+<videoInputEnabled>true</videoInputEnabled>
+<name>Yard</name>
+<videoFormat>PAL</videoFormat>
+<portType>BNC</portType>
+<resDesc>1920*1080P25TVI</resDesc>
+</VideoInputChannel>
+<VideoInputChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>3</id>
+<inputPort>3</inputPort>
+<videoInputEnabled>true</videoInputEnabled>
+<name></name>
+<videoFormat>PAL</videoFormat>
+<portType>BNC</portType>
+<resDesc>NO VIDEO</resDesc>
+</VideoInputChannel>
+<VideoInputChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>4</id>
+<inputPort>4</inputPort>
+<videoInputEnabled>false</videoInputEnabled>
+<name>Garage</name>
+<videoFormat>PAL</videoFormat>
+<portType>BNC</portType>
+<resDesc>NO VIDEO</resDesc>
+</VideoInputChannel>
+</VideoInputChannelList>

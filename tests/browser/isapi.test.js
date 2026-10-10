@@ -221,9 +221,10 @@ describe('Isapi', () => {
   });
 
   it('applies the policy to channel lists and event triggers', async () => {
+    // A refused list doesn't fall back to probing: its reason is what the user needs
     let calls = mockDevice({ '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'lowPrivilege') });
-    await expect(Isapi.getChannels(testConfig())).rejects.toBeInstanceOf(IsapiError);
-    expect(calls).toEqual(['/ISAPI/System/Video/inputs/channels']);
+    await expect(Isapi.getChannels(testConfig())).rejects.toMatchObject({ subStatusCode: 'lowPrivilege' });
+    expect(calls).toEqual(['/ISAPI/System/Video/inputs/channels', '/ISAPI/ContentMgmt/InputProxy/channels']);
 
     calls = mockDevice({ '/ISAPI/Event/triggers/VMD-1': statusRoute(503, 2, 'deviceBusy') });
     await expect(Isapi.getEventTrigger(testConfig(), '1')).rejects.toMatchObject({ httpStatus: 503 });
@@ -540,15 +541,120 @@ describe('event actions', () => {
     expect(other.triggerCap).toMatchObject({ isSupportIO: true });
   });
 
-  it('reads IP cameras’ addresses from the NVR’s channel list', async () => {
+  it('reads IP cameras’ addresses and online state from the NVR’s lists', async () => {
+    const calls = mockDevice({
+      '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'notSupport'),
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsNvr },
+      '/ISAPI/ContentMgmt/InputProxy/channels/status': { body: fixtures.inputProxyChannelsStatusNvr },
+    });
+    expect((await Isapi.getChannels(testConfig())).map(ch => [ch.id, ch.kind, ch.ipAddress, ch.online])).toEqual([
+      ['1', 'digital', '192.168.254.2', true], ['2', 'digital', '192.168.254.9', true],
+      ['3', 'digital', '192.168.254.4', true], ['4', 'digital', '192.168.254.3', true],
+    ]);
+    expect(calls).toEqual([
+      '/ISAPI/System/Video/inputs/channels', '/ISAPI/ContentMgmt/InputProxy/channels',
+      '/ISAPI/ContentMgmt/InputProxy/channels/status',
+    ]);
+
+    // Matched by id, not position: the status list leaves channel 2 out and has camera 3 disconnected
+    const status = fixtures.inputProxyChannelsStatusNvr
+      .replace(/<InputProxyChannelStatus [^>]*>\s*<id>2<\/id>[\s\S]*?<\/InputProxyChannelStatus>/, '')
+      .replace(/(<id>3<\/id>[\s\S]*?<online>)true/, '$1false');
     mockDevice({
       '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'notSupport'),
       '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsNvr },
+      '/ISAPI/ContentMgmt/InputProxy/channels/status': { body: status },
     });
-    expect((await Isapi.getChannels(testConfig())).map(ch => [ch.id, ch.kind, ch.ipAddress])).toEqual([
-      ['1', 'digital', '192.168.254.2'], ['2', 'digital', '192.168.254.9'],
-      ['3', 'digital', '192.168.254.4'], ['4', 'digital', '192.168.254.3'],
+    expect((await Isapi.getChannels(testConfig())).map(ch => [ch.id, ch.online])).toEqual([
+      ['1', true], ['2', undefined], ['3', false], ['4', true],
     ]);
+  });
+
+  it('lists a hybrid DVR’s analog inputs, then its IP cameras', async () => {
+    const status = '<InputProxyChannelStatusList>' +
+      '<InputProxyChannelStatus><id>5</id><online>true</online></InputProxyChannelStatus>' +
+      '<InputProxyChannelStatus><id>6</id><online>false</online></InputProxyChannelStatus>' +
+      '</InputProxyChannelStatusList>';
+    mockDevice({
+      '/ISAPI/System/Video/inputs/channels': { body: fixtures.videoInputChannelsHybrid },
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsHybrid },
+      '/ISAPI/ContentMgmt/InputProxy/channels/status': { body: status },
+    });
+    expect(await Isapi.getChannels(testConfig())).toStrictEqual([
+      { id: '1', name: 'Gate', kind: 'analog', online: true },
+      { id: '2', name: 'Yard', kind: 'analog', online: true },
+      { id: '3', name: '', kind: 'analog', online: true },
+      // Switched off on the DVR
+      { id: '4', name: 'Garage', kind: 'analog', online: false },
+      { id: '5', name: 'Driveway', kind: 'digital', ipAddress: '192.168.254.5', online: true },
+      { id: '6', name: 'Back door', kind: 'digital', ipAddress: '192.168.254.6', online: false },
+    ]);
+  });
+
+  it('keeps an analog input over an IP camera listed with the same id', async () => {
+    const ipList = '<InputProxyChannelList><InputProxyChannel><id>2</id><name>Twin</name></InputProxyChannel>' +
+      '<InputProxyChannel><id>5</id><name>Driveway</name></InputProxyChannel></InputProxyChannelList>';
+    mockDevice({
+      '/ISAPI/System/Video/inputs/channels': { body: fixtures.videoInputChannelsHybrid },
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: ipList },
+    });
+    expect((await Isapi.getChannels(testConfig())).map(ch => [ch.id, ch.name, ch.kind])).toEqual([
+      ['1', 'Gate', 'analog'], ['2', 'Yard', 'analog'], ['3', '', 'analog'], ['4', 'Garage', 'analog'], ['5', 'Driveway', 'digital'],
+    ]);
+
+    // Every IP camera repeats an analog input: the analog list alone, as before IP lists were read too
+    const calls = mockDevice({
+      '/ISAPI/System/Video/inputs/channels': { body: fixtures.videoInputChannelsHybrid },
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsNvr },
+    });
+    expect((await Isapi.getChannels(testConfig())).map(ch => [ch.id, ch.kind])).toEqual([
+      ['1', 'analog'], ['2', 'analog'], ['3', 'analog'], ['4', 'analog'],
+    ]);
+    // No IP camera listed, so no IP camera status to ask for
+    expect(calls).toEqual(['/ISAPI/System/Video/inputs/channels', '/ISAPI/ContentMgmt/InputProxy/channels']);
+  });
+
+  it('keeps the channels a list has when the other list is refused', async () => {
+    mockDevice({
+      '/ISAPI/System/Video/inputs/channels': statusRoute(503, 2, 'deviceBusy'),
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsHybrid },
+    });
+    expect((await Isapi.getChannels(testConfig())).map(ch => ch.id)).toEqual(['5', '6']);
+
+    mockDevice({
+      '/ISAPI/System/Video/inputs/channels': { body: fixtures.videoInputChannelsHybrid },
+      '/ISAPI/ContentMgmt/InputProxy/channels': statusRoute(403, 4, 'lowPrivilege'),
+    });
+    expect((await Isapi.getChannels(testConfig())).map(ch => ch.id)).toEqual(['1', '2', '3', '4']);
+
+    // An HTML page for a list the device doesn't have counts as no list
+    mockDevice({
+      '/ISAPI/System/Video/inputs/channels': { body: '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>Not found</body></html>' },
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsHybrid },
+    });
+    expect((await Isapi.getChannels(testConfig())).map(ch => ch.id)).toEqual(['5', '6']);
+  });
+
+  it('leaves IP cameras’ online state unknown when the status can’t be read, unless nothing answers', async () => {
+    const htmlPage = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>Not found</body></html>';
+    for (const answer of [{ status: 404 }, statusRoute(403, 4, 'notSupport'), statusRoute(403, 4, 'lowPrivilege'),
+      statusRoute(503, 2, 'serviceUnavailable'), { body: htmlPage }]) {
+      mockDevice({
+        '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'notSupport'),
+        '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsNvr },
+        '/ISAPI/ContentMgmt/InputProxy/channels/status': answer,
+      });
+      const channels = await Isapi.getChannels(testConfig());
+      expect(channels).toHaveLength(4);
+      expect(channels.some(ch => 'online' in ch)).toBe(false);
+    }
+
+    mockDevice({
+      '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'notSupport'),
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsNvr },
+      '/ISAPI/ContentMgmt/InputProxy/channels/status': { unreachable: true },
+    });
+    await expect(Isapi.getChannels(testConfig())).rejects.toBeInstanceOf(NetworkError);
   });
 
   it('finds an NVR trigger in the full list by its dyn channel, and saves it to its own id', async () => {

@@ -21,6 +21,20 @@ is digital.
 | Event actions ("linkage") | `/ISAPI/Event/triggers/VMD-{id}` (both) | |
 | Arming schedule | `/ISAPI/Event/schedules/motionDetections/VMD_video{id}` (both) | |
 | Channel list | `/ISAPI/System/Video/inputs/channels` | `/ISAPI/ContentMgmt/InputProxy/channels` |
+| Online state | `<videoInputEnabled>` in the channel list | `/ISAPI/ContentMgmt/InputProxy/channels/status` |
+
+The web UI always reads both channel lists and shows the analog inputs first,
+then the IP cameras; HCNetSDK's ISAPI login reads both too and numbers the IP
+channels after the analog ones. So a hybrid DVR (analog inputs plus IP
+cameras) lists all of them, and the extension does the same. As a guard it
+drops an IP entry whose id an analog input already has, which no device seen
+so far does. The DS-7604NI answers the analog list with 403 notSupport.
+
+The web UI marks an IP camera online from `<online>` in each
+`InputProxyChannelStatus` (it matches them to channels by position; the
+extension matches by `<id>`), and an analog input online when
+`<videoInputEnabled>` is empty or `true`. The status is only a label: when it
+can't be read, every camera counts as online.
 
 ## Region vs. grid mode
 
