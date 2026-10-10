@@ -6,7 +6,7 @@ import { childElements, childText, parseXml, serializeXml } from '../../extensio
 import {
   DEFAULT_PRIVACY_SCREEN, alarmOutputNotification, applyMotionConfig, applyNotifications, decodeGridMap,
   encodeGridMap, applyPrivacyMask, hasNotification, imageRectToPrivacy, imageToMotionRegion, lightAudioNotification,
-  methodNotification, motionRegionToImage, privacyRegionList, privacyRegionToImage, readAlarmOutputs, readLightAudioChannels,
+  mergeTargetTypes, methodNotification, motionRegionToImage, privacyRegionList, privacyRegionToImage, readAlarmOutputs, readLightAudioChannels,
   readMotionCapabilities, readMotionConfig, readMotionTriggerCap, readNotificationMethods, readPrivacyMask, recordNotification,
   resolveEventActions, triggerNotifications,
 } from '../../extension/lib/config-xml.js';
@@ -144,6 +144,22 @@ describe('motion detection', () => {
       '<sensitivityLevel>40</sensitivityLevel><layout><RegionList></RegionList></layout></MotionDetectionLayout></MotionDetection>');
     applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: false, regions: [], targetTypes: ['human'] });
     expect(serializeXml(doc)).toContain('</layout><targetType xmlns="">human</targetType></MotionDetectionLayout>');
+  });
+
+  it('saves the ticked targets and keeps the ones the panel has no checkbox for, in the capabilities’ order', () => {
+    const caps = ['human', 'vehicle', 'nonMotorVehicle'];
+    expect(mergeTargetTypes(caps, ['nonMotorVehicle', 'human'], { human: false, vehicle: true })).toEqual(['vehicle', 'nonMotorVehicle']);
+    expect(mergeTargetTypes(caps, ['human'], { human: true, vehicle: true })).toEqual(['human', 'vehicle']);
+    expect(mergeTargetTypes(caps, [], { human: false, vehicle: false })).toEqual([]);
+    // A target the camera had on that its capabilities don't list goes last
+    expect(mergeTargetTypes(['human', 'vehicle'], ['animal', 'human'], { human: true, vehicle: true }))
+      .toEqual(['human', 'vehicle', 'animal']);
+
+    // Written back in place: what the panel didn't touch reads back the same
+    const doc = parseXml(fixtures.motionDetectionNvr.replace('<targetType>human</targetType>', '<targetType>nonMotorVehicle,human</targetType>'));
+    const targetTypes = mergeTargetTypes(caps, readMotionConfig(doc).targetTypes, { human: true, vehicle: false });
+    applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: true, regions: [], targetTypes });
+    expect(serializeXml(doc)).toContain('<targetType>human,nonMotorVehicle</targetType>');
   });
 
   it('reads NVR capabilities, with defaults when there are none', () => {

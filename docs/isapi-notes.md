@@ -82,6 +82,12 @@ enabled types, e.g. `human`, `human,vehicle`, or empty. The allowed values are
 in `targetType@opt` in the capabilities. If the element is missing, the UI
 creates one with no namespace, which serializes as `<targetType xmlns="">`.
 
+The web UI shows a checkbox for every `targetType@opt` value and writes the
+ticked ones in that order. The extension's panel has only Person (`human`)
+and Vehicle (`vehicle`), so on save it keeps every other target the camera
+had on (`mergeTargetTypes`): in the capabilities' order, then any the
+capabilities don't list. The DS-7604NI offers exactly `human,vehicle`.
+
 No device was seen sending `TargetDetection`/`detectionTarget` blocks in a
 motion document (the web UI uses `detectionTarget` only as a label), so the
 extension reads and writes only the layout's `targetType`.

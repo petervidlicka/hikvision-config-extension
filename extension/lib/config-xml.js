@@ -338,6 +338,28 @@ export function applyMotionConfig(doc, config) {
 }
 
 /**
+ * The detection targets to save. The panel has a checkbox for only some
+ * targets (person and vehicle); a camera can offer more (targetType@opt),
+ * and Hikvision's web UI lets each be switched. So every target the panel
+ * controls is saved as ticked, and every other one stays as the camera had
+ * it, rather than being switched off without the user seeing it. Targets go
+ * in the capabilities' order, as the web UI writes them; one the camera had
+ * on that its capabilities don't list goes last, in the order it was stored.
+ * @param {string[]} capTypes - the targets the camera offers (targetType@opt), in order
+ * @param {string[]} loaded - the targets on in the document as loaded (MotionConfig.targetTypes)
+ * @param {Partial<Record<string, boolean>>} chosen - each target the panel controls: ticked or not
+ * @returns {string[]} what to pass as applyMotionConfig's `targetTypes`
+ * @example
+ * mergeTargetTypes(['human', 'vehicle', 'nonMotorVehicle'], ['nonMotorVehicle'], {human: true, vehicle: false})
+ * // → ['human', 'nonMotorVehicle']
+ */
+export function mergeTargetTypes(capTypes, loaded, chosen) {
+  /** @param {string} type */
+  const isOn = type => chosen[type] ?? loaded.includes(type);
+  return [...capTypes.filter(isOn), ...loaded.filter(type => !capTypes.includes(type))];
+}
+
+/**
  * Write the detection targets as the Hikvision client does: a comma-separated
  * list in the layout's <targetType>, created in an empty namespace if missing.
  * Leaves the document alone when `targetTypes` is undefined (unsupported).

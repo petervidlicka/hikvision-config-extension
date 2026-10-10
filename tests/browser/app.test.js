@@ -41,6 +41,16 @@ function motionDocWith(regions) {
     regions.map((corners, i) => `<Region><id>${i + 1}</id>${coordinates(corners)}</Region>`).join('') + '</RegionList>');
 }
 
+/** Click "Load from Device" in Motion and wait until the panel can be used again. */
+async function reloadMotion() {
+  $('toast').textContent = '';
+  $('loadMotionBtn').click();
+  await vi.waitFor(() => {
+    expect(toast()).toBe('Motion detection config loaded');
+    expect($('saveMotionBtn').disabled).toBe(false);
+  });
+}
+
 /**
  * Dispatch canvas mouse events at a fraction of the canvas size. Events land
  * on whole pixels, so each point is rounded to one inside the canvas, which
@@ -666,6 +676,22 @@ describe('config page', () => {
     });
   });
 
+  it('keeps detection targets the panel has no checkbox for', async () => {
+    // A camera with a target this panel doesn't show, on as well as the person
+    device.motionDocs['1'] = fixtures.motionDetectionNvr.replace('<targetType>human</targetType>', '<targetType>nonMotorVehicle,human</targetType>');
+    try {
+      await reloadMotion();
+      expect([$('detectHuman').checked, $('detectVehicle').checked]).toEqual([true, false]);
+      $('detectVehicle').click();
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      expect(device.puts.at(-1).body).toContain('<targetType>human,vehicle,nonMotorVehicle</targetType>');
+    } finally {
+      delete device.motionDocs['1'];
+    }
+  });
+
   it('keeps a region whose edges cross open, and won’t save one the camera stores', async () => {
     const { click, dblclick } = canvasPointer();
     $('clearMotionRegionsBtn').click();
@@ -694,8 +720,7 @@ describe('config page', () => {
     // A crossing region loaded from the camera isn't sent back as it is
     device.motionDocs['1'] = motionDocWith([[[100, 900], [400, 600], [400, 900], [100, 600]]]);
     try {
-      $('loadMotionBtn').click();
-      await vi.waitFor(() => expect(toast()).toBe('Motion detection config loaded'));
+      await reloadMotion();
       expect(state.motionRegions.map(r => r.points.length)).toEqual([4]);
       const puts = device.puts.length;
       $('saveMotionBtn').click();

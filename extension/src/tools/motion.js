@@ -5,7 +5,7 @@
  */
 
 import {
-  applyMotionConfig, imageToMotionRegion, motionRegionToImage, readMotionCapabilities, readMotionConfig,
+  applyMotionConfig, imageToMotionRegion, mergeTargetTypes, motionRegionToImage, readMotionCapabilities, readMotionConfig,
 } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
 import { isSimplePolygon, pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
@@ -341,7 +341,9 @@ export const motionTool = {
         dynamicAnalysis: state.dynamicAnalysis,
         regions,
         targetTypes: caps.targetTypes.length
-          ? caps.targetTypes.filter(t => (t === 'human' && state.detectHuman) || (t === 'vehicle' && state.detectVehicle))
+          ? mergeTargetTypes(caps.targetTypes, readMotionConfig(state.motionDoc).targetTypes, {
+            human: state.detectHuman, vehicle: state.detectVehicle,
+          })
           : undefined,
       });
 
