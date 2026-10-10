@@ -77,6 +77,21 @@ export function reportSaved(subject, result, channelId = state.activeChannel) {
 }
 
 /**
+ * Report a save the device refused or never answered, with its reason. Like
+ * reportSaved, a save that ends after the user moved on to another channel
+ * names the channel it was for, so the failure isn't taken for the one on
+ * screen.
+ * @param {string} subject - what was saved, mid-sentence, e.g. "event actions"
+ * @param {unknown} err - what the save threw
+ * @param {string} channelId - the channel the save was for
+ */
+export function reportSaveFailed(subject, err, channelId) {
+  const which = channelId === state.activeChannel ? '' : ` for channel ${channelId}`;
+  showToast(`Failed to save ${subject}${which}: ${errorMessage(err)}`, 'error');
+  setStatus('Save failed', `Channel ${channelId}`);
+}
+
+/**
  * Update the status bar.
  * @param {string} text - left side
  * @param {string} [right] - right side, e.g. the channel

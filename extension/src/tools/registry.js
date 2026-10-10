@@ -1,14 +1,41 @@
 /**
  * Registry of configuration tools (motion, privacy, events): builds their
- * tabs and panels, switches between them and drives their loading state.
+ * tabs and panels, switches between them, and drives their loading state
+ * and where their loads and saves may land (see ToolLoad and saveTarget).
  */
 
 import { redraw } from '../canvas.js';
 import { dom, queryAll, state } from '../state.js';
+import { activeChannelInfo, showToast } from '../ui.js';
 
 // ─── Tool Registry ──────────────────────────────────────────────────────────
 /** @typedef {import('../state.js').AppState} AppState */
 /** @typedef {import('../../lib/shapes.js').ImagePoint} ImagePoint */
+/** @typedef {import('../../lib/digest-auth.js').DeviceConfig} DeviceConfig */
+/** @typedef {import('../../lib/isapi.js').Channel} Channel */
+
+/**
+ * Where a tool's settings were read from. A tool keeps it next to the
+ * document it loaded, so its save goes back to that device and channel and
+ * only while they are still the ones on screen (see saveTarget).
+ * @typedef {object} LoadOrigin
+ * @property {DeviceConfig} config - the connection, compared by identity:
+ *   reconnecting, even to the same device, starts a new one
+ * @property {Channel} channel
+ */
+
+/**
+ * One run of a tool's load(), handed to it by loadTool. The user can move
+ * to another channel, reconnect, or start the load again before the device
+ * answers, so a tool checks `stale()` once its requests are done and leaves
+ * the panel and its state alone if it's true: a late answer from the
+ * previous channel must not replace what the newer load shows, nor give a
+ * later save another camera's settings.
+ * @typedef {object} ToolLoad
+ * @property {LoadOrigin} from - the device and channel to read
+ * @property {() => boolean} stale - true once a newer load of the same tool
+ *   has started, or another channel or connection is on screen
+ */
 
 /**
  * A configuration tool. Each tool owns a sidebar panel, draws on the canvas
@@ -27,8 +54,8 @@ import { dom, queryAll, state } from '../state.js';
  * @property {(pos: ImagePoint, e: MouseEvent) => void} onMouseMove
  * @property {(pos: ImagePoint, e: MouseEvent) => void} onMouseUp
  * @property {(pos: ImagePoint, e: MouseEvent) => void} [onDblClick]
- * @property {() => Promise<void>} load - read config from the device
- * @property {() => Promise<void>} save - write config to the device
+ * @property {(load: ToolLoad) => Promise<void>} load - read config from the device (run through loadTool)
+ * @property {() => Promise<void>} save - write config back where it was loaded from (see saveTarget)
  * @property {() => void} bindPanel - attach listeners once the panel is in the DOM
  * @property {() => void} [onActivate] - called when the tool becomes active
  */
@@ -128,21 +155,75 @@ export function switchTool(toolId) {
   }
 }
 
+/** The number of the latest load started per tool; any earlier one still running is stale. @type {Map<string, number>} */
+const latestLoads = new Map();
+
 /**
- * Load a tool's settings from the device, dimming its panel meanwhile so
- * nobody edits settings that are about to be replaced. Tools report their
- * own load errors, so this never rejects for an expected failure.
+ * Load a tool's settings for the channel on screen, dimming its panel
+ * meanwhile so nobody edits settings that are about to be replaced. Only
+ * the latest load of a tool for the channel and connection still on screen
+ * fills the panel (see ToolLoad), and only the latest one ends the dimming:
+ * an earlier load finishing first must not hand over a panel the newer one
+ * is still filling. Tools report their own load errors, so this never
+ * rejects for an expected failure.
  * @param {string|null} toolId
  */
 export async function loadTool(toolId) {
   const tool = ToolRegistry.get(toolId);
-  if (!tool || toolId === null) return;
+  if (!tool || toolId === null || !state.config || !state.activeChannel) return;
+  const run = (latestLoads.get(toolId) ?? 0) + 1;
+  latestLoads.set(toolId, run);
+  const latest = () => latestLoads.get(toolId) === run;
+  /** @type {LoadOrigin} */
+  const from = { config: state.config, channel: activeChannelInfo() };
   setToolPanelLoading(toolId, true);
   try {
-    await tool.load();
+    await tool.load({ from, stale: () => !latest() || !isOnScreen(from) });
   } finally {
-    setToolPanelLoading(toolId, false);
+    if (latest()) setToolPanelLoading(toolId, false);
   }
+}
+
+/**
+ * Whether settings read from `from` belong to what's on screen: the same
+ * connection and the selected channel.
+ * @param {LoadOrigin} from
+ * @returns {boolean}
+ */
+function isOnScreen(from) {
+  return from.config === state.config && from.channel.id === state.activeChannel;
+}
+
+/**
+ * Where a tool may save what its panel shows: the device and channel its
+ * settings were loaded from, provided they are still the ones on screen.
+ * Settings of another channel or connection must go nowhere: to the
+ * channel on screen they would copy another camera's settings, and to
+ * their own, edits made while looking at this one. Says what to do instead
+ * when there is nowhere to save.
+ * @param {LoadOrigin|null} from - kept by the tool with its loaded document; null when nothing is loaded
+ * @returns {LoadOrigin|null} null when the save must not go ahead
+ * @example
+ * const loaded = state.motionDoc;
+ * const from = saveTarget(loaded ? state.motionFrom : null);
+ * if (!loaded || !from) return;
+ * await Isapi.putXml(from.config, Isapi.motionDetectionPath(from.channel), edited(loaded));
+ */
+export function saveTarget(from) {
+  if (!from) {
+    showToast('Load the settings from the device before saving', 'error');
+    return null;
+  }
+  if (from.config !== state.config) {
+    showToast('These settings were loaded before reconnecting. Load them from the device again before saving', 'error');
+    return null;
+  }
+  if (from.channel.id !== state.activeChannel) {
+    showToast(`These settings were loaded from channel ${from.channel.id}. ` +
+      `Load channel ${state.activeChannel}’s from the device before saving`, 'error');
+    return null;
+  }
+  return from;
 }
 
 /**
@@ -165,7 +246,9 @@ export function setToolPanelLoading(toolId, isLoading) {
   // Disable/enable all interactive children
   queryAll(panel, 'input, button, select, .toggle').forEach(el => {
     if (isLoading) {
-      el.dataset.wasDisabled = el.hasAttribute('disabled') ? 'true' : 'false';
+      // A load started while another runs keeps the state from before the
+      // first: by now every element reads as disabled
+      if (el.dataset.wasDisabled === undefined) el.dataset.wasDisabled = el.hasAttribute('disabled') ? 'true' : 'false';
       el.setAttribute('disabled', '');
       if (el.classList.contains('toggle')) el.style.pointerEvents = 'none';
     } else {

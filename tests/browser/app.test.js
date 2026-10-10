@@ -41,6 +41,47 @@ function motionDocWith(regions) {
     regions.map((corners, i) => `<Region><id>${i + 1}</id>${coordinates(corners)}</Region>`).join('') + '</RegionList>');
 }
 
+/**
+ * Keep the device from answering a request until the returned function is called.
+ * @param {string} key - "METHOD /path"
+ * @returns {() => void} lets it (and any later one) through
+ */
+function holdRequest(key) {
+  let release = () => {};
+  device.holds[key] = new Promise(resolve => { release = resolve; });
+  return () => {
+    delete device.holds[key];
+    release();
+  };
+}
+
+/** Click a channel in the list. @param {number} index - 0 for channel 1 */
+function pickChannel(index) {
+  document.querySelectorAll('.channel-item')[index].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+}
+
+/**
+ * Reload the active tool with its answer held, switch to another channel and
+ * wait until that channel's own settings are shown, then let the held answer
+ * through and give the page time to take it in: the previous channel's load
+ * finishes last.
+ * @param {string} held - the request the reload waits for, "METHOD /path"
+ * @param {string} loadButton - id of the tool's "Load from Device" button
+ * @param {number} index - the channel to switch to, 0 for channel 1
+ * @param {() => void} shown - throws until the new channel's settings are shown
+ */
+async function switchWhileLoading(held, loadButton, index, shown) {
+  const release = holdRequest(held);
+  try {
+    $(loadButton).click();
+    pickChannel(index);
+    await vi.waitFor(shown);
+  } finally {
+    release();
+  }
+  await new Promise(r => setTimeout(r, 200));
+}
+
 /** Click "Load from Device" in Motion and wait until the panel can be used again. */
 async function reloadMotion() {
   $('toast').textContent = '';
@@ -819,6 +860,120 @@ describe('config page', () => {
     expect($('motionReadOnlyNote').style.display).toBe('none');
     expect($('clearMotionRegionsBtn').parentElement.style.display).toBe('');
     expect($('motionRegionList').querySelector('[data-delete-motion]')).not.toBeNull();
+  });
+
+  it('shows and saves the channel moved on to when the previous channel’s motion settings answer last', async () => {
+    const path = (ch) => `/ISAPI/ContentMgmt/InputProxy/channels/${ch}/video/motionDetection`;
+    // Channel 3's camera stores one square and samples every 2 frames; channel 1's a five-corner region, every 5
+    const square = [[100, 900], [400, 900], [400, 600], [100, 600]];
+    device.motionDocs['3'] = motionDocWith([square]).replace('<samplingInterval>5<', '<samplingInterval>2<');
+    const corners = () => state.motionRegions.map(r => r.points.length);
+    const channel3Shown = () => {
+      expect(corners()).toEqual([4]);
+      expect($('saveMotionBtn').disabled).toBe(false);
+    };
+    /** Click Save; where the PUT went, the regions' corners and the sampling interval it sent */
+    const save = async () => {
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      const { path: sentTo, body } = device.puts.at(-1);
+      const sent = [...body.matchAll(/<positionX>(\d+)<\/positionX><positionY>(\d+)</g)].map(m => [+m[1], +m[2]]);
+      return { path: sentTo, corners: sent, interval: /<samplingInterval>(\d+)</.exec(body)?.[1] };
+    };
+    const channel3Saved = { path: path(3), corners: square, interval: '2' };
+    const releases = [];
+    try {
+      // Channel 1's reload answers after channel 3's settings are shown
+      await switchWhileLoading(`GET ${path(1)}`, 'loadMotionBtn', 2, channel3Shown);
+      channel3Shown();
+      expect(await save()).toEqual(channel3Saved);
+
+      // The other way round: channel 3's reload answering first leaves the panel waiting for channel 1's
+      releases.push(holdRequest(`GET ${path(3)}`));
+      $('loadMotionBtn').click();
+      releases.push(holdRequest(`GET ${path(1)}`));
+      pickChannel(0);
+      releases[0]();
+      await new Promise(r => setTimeout(r, 200));
+      expect(state.motionDoc).toBeNull();
+      expect(corners()).toEqual([]);
+      expect($('saveMotionBtn').disabled).toBe(true);
+      releases[1]();
+      await vi.waitFor(() => expect($('saveMotionBtn').disabled).toBe(false));
+      expect(corners()).toEqual([5]);
+
+      // Channel 1's save finishing after the switch to channel 3 leaves channel 3's settings to save
+      const channel1 = { doc: state.motionDoc, from: state.motionFrom };
+      const put = `PUT ${path(1)}`;
+      const sent = () => device.requests.filter(r => r === put).length;
+      const before = sent();
+      releases.push(holdRequest(put));
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(sent()).toBe(before + 1));
+      pickChannel(2);
+      await vi.waitFor(channel3Shown);
+      releases[2]();
+      await vi.waitFor(() => expect(toast()).toBe('Motion detection for channel 1 saved successfully!'));
+      expect(await save()).toEqual(channel3Saved);
+
+      // Settings of channel 1, or from before a reconnect, back in the panel go nowhere
+      const channel3 = { doc: state.motionDoc, from: state.motionFrom };
+      const puts = device.puts.length;
+      state.motionDoc = channel1.doc;
+      state.motionFrom = channel1.from;
+      $('saveMotionBtn').click();
+      expect(toast()).toBe('These settings were loaded from channel 1. Load channel 3’s from the device before saving');
+      state.motionDoc = channel3.doc;
+      state.motionFrom = { ...channel3.from, config: { ...channel3.from.config } };
+      $('saveMotionBtn').click();
+      expect(toast()).toBe('These settings were loaded before reconnecting. Load them from the device again before saving');
+      expect(device.puts).toHaveLength(puts);
+    } finally {
+      releases.forEach(release => release());
+      delete device.motionDocs['3'];
+    }
+  });
+
+  it('keeps a late answer for the previous channel out of the privacy and event panels', async () => {
+    const privacyPath = (ch) => `/ISAPI/ContentMgmt/InputProxy/channels/${ch}/video/privacyMask`;
+    const masks = (xml) => xml.match(/<PrivacyMaskRegion[\s>]/g)?.length ?? 0;
+    // Channel 3's camera stores no masks, channel 1's two
+    device.privacy.clear(privacyPath(3));
+    $('configTabs').querySelector('[data-tool="privacy"]').click();
+    pickChannel(0);
+    await vi.waitFor(() => {
+      expect(state.privacyRegions).toHaveLength(2);
+      expect($('savePrivacyBtn').disabled).toBe(false);
+    });
+
+    await switchWhileLoading(`GET ${privacyPath(1)}`, 'loadPrivacyBtn', 2, () => {
+      expect(state.privacyDoc).not.toBeNull();
+      expect($('savePrivacyBtn').disabled).toBe(false);
+    });
+    expect(state.privacyRegions).toEqual([]);
+    const puts = device.puts.length;
+    $('savePrivacyBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+    expect(device.deletes.at(-1)).toBe(`${privacyPath(3)}/regions`);
+    expect(device.puts.at(-1).path).toBe(privacyPath(3));
+    expect(masks(device.privacy.read(privacyPath(1)))).toBe(2);
+
+    // Event actions: channel 3's reload answers after channel 1's trigger is shown
+    const triggerId = () => state.eventTriggerDoc?.getElementsByTagName('id')[0]?.textContent;
+    $('configTabs').querySelector('[data-tool="events"]').click();
+    await vi.waitFor(() => {
+      expect(triggerId()).toBe('VMD-3');
+      expect($('saveEventsBtn').disabled).toBe(false);
+    });
+    await switchWhileLoading('GET /ISAPI/Event/triggers/VMD-3', 'loadEventsBtn', 0, () => {
+      expect(triggerId()).toBe('VMD-1');
+      expect($('saveEventsBtn').disabled).toBe(false);
+    });
+    expect(triggerId()).toBe('VMD-1');
+    $('saveEventsBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 2));
+    expect(device.puts.at(-1).path).toBe('/ISAPI/Event/triggers/VMD-1');
   });
 
   it('stops all four feeds after one retry when the device rejects the password mid-session', async () => {

@@ -8,6 +8,7 @@
 
 /** @typedef {import('../lib/shapes.js').ImagePoint} ImagePoint */
 /** @typedef {import('../lib/shapes.js').ImageRect} ImageRect */
+/** @typedef {import('./tools/registry.js').LoadOrigin} LoadOrigin */
 
 /**
  * Everything the page keeps between events. Tool fields are filled in by
@@ -49,6 +50,7 @@
  * @property {boolean} detectHuman
  * @property {boolean} detectVehicle
  * @property {XMLDocument|null} motionDoc - device XML from the last load
+ * @property {LoadOrigin|null} motionFrom - where motionDoc came from; saves go only there
  *
  * Privacy mask tool
  * @property {boolean} privacyEnabled
@@ -57,10 +59,12 @@
  * @property {number} privacyNormH
  * @property {XMLDocument|null} privacyDoc
  * @property {string|null} privacyPath - URL the privacy config came from
+ * @property {LoadOrigin|null} privacyFrom - device and channel privacyDoc came from; saves go only there
  *
  * Event actions tool
  * @property {Record<string, boolean>} eventActions - enabled actions by key
  * @property {XMLDocument|null} eventTriggerDoc
+ * @property {LoadOrigin|null} eventTriggerFrom - where eventTriggerDoc came from; saves go only there
  * @property {Record<import('../lib/config-xml.js').EventActionKey, import('../lib/config-xml.js').EventActionTarget>|null} eventActionTargets
  *   - per action, the entry its toggle stands for on the loaded channel, or why it's unavailable
  */

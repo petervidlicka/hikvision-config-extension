@@ -15,8 +15,8 @@ import { Isapi } from '../../lib/isapi.js';
 import { isSimplePolygon, pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
-import { loadTool } from './registry.js';
-import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
+import { loadTool, saveTarget } from './registry.js';
+import { errorMessage, reportSaveFailed, reportSaved, setStatus, showToast } from '../ui.js';
 import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -108,6 +108,7 @@ export const motionTool = {
       detectHuman: false,
       detectVehicle: false,
       motionDoc: null, // device XML from the last load; saves edit a copy
+      motionFrom: null,
     };
   },
 
@@ -116,6 +117,7 @@ export const motionTool = {
     state.drawingPoints = [];
     state.motionGrid = null;
     state.motionDoc = null;
+    state.motionFrom = null;
   },
 
   draw(ctx, canvas) {
@@ -268,16 +270,18 @@ export const motionTool = {
     if (state.drawingPoints.length > 0) closePolygon();
   },
 
-  async load() {
-    if (!state.config || !state.activeChannel) return;
-    const channel = activeChannelInfo();
+  async load({ from, stale }) {
+    const { config, channel } = from;
     setStatus('Loading motion detection config...');
     try {
       const [doc, caps] = await Promise.all([
-        Isapi.getXml(state.config, Isapi.motionDetectionPath(channel)),
-        Isapi.getMotionLimits(state.config, channel),
+        Isapi.getXml(config, Isapi.motionDetectionPath(channel)),
+        Isapi.getMotionLimits(config, channel),
       ]);
+      // The newer load, or the channel moved on to, fills the panel
+      if (stale()) return;
       state.motionDoc = doc;
+      state.motionFrom = from;
       state.motionCaps = caps;
       const md = readMotionConfig(doc);
       state.motionMode = motionEditMode(caps, md);
@@ -310,19 +314,18 @@ export const motionTool = {
       updateRegionList();
       redraw();
       showToast('Motion detection config loaded', 'success');
-      setStatus('Config loaded', `Channel ${state.activeChannel}`);
+      setStatus('Config loaded', `Channel ${channel.id}`);
     } catch (err) {
+      if (stale()) return;
       showToast('Failed to load motion config: ' + errorMessage(err), 'error');
       setStatus('Failed to load config');
     }
   },
 
   async save() {
-    if (!state.config || !state.activeChannel) return;
-    if (!state.motionDoc) {
-      showToast('Load the settings from the device before saving', 'error');
-      return;
-    }
+    const loaded = state.motionDoc;
+    const from = saveTarget(loaded ? state.motionFrom : null);
+    if (!loaded || !from) return;
     const caps = state.motionCaps;
     if (state.drawingPoints.length > 0) {
       showToast('Finish or cancel (Esc) the region you are drawing first', 'error');
@@ -345,7 +348,7 @@ export const motionTool = {
       : undefined;
 
     // Edit a copy so a failed save leaves the loaded config intact
-    const doc = cloneXml(state.motionDoc);
+    const doc = cloneXml(loaded);
 
     setStatus('Saving motion detection config...');
     try {
@@ -357,18 +360,20 @@ export const motionTool = {
         dynamicAnalysis: state.dynamicAnalysis,
         regions,
         targetTypes: caps.targetTypes.length
-          ? mergeTargetTypes(caps.targetTypes, readMotionConfig(state.motionDoc).targetTypes, {
+          ? mergeTargetTypes(caps.targetTypes, readMotionConfig(loaded).targetTypes, {
             human: state.detectHuman, vehicle: state.detectVehicle,
           })
           : undefined,
       });
 
-      const result = await Isapi.putXml(state.config, Isapi.motionDetectionPath(activeChannelInfo()), doc);
-      state.motionDoc = doc;
-      reportSaved('Motion detection', result);
+      const result = await Isapi.putXml(from.config, Isapi.motionDetectionPath(from.channel), doc);
+      // Only while the panel still holds what this save started from: after
+      // a switch it holds another channel's settings, which its next save
+      // must not mix with this channel's document
+      if (state.motionDoc === loaded) state.motionDoc = doc;
+      reportSaved('Motion detection', result, from.channel.id);
     } catch (err) {
-      showToast('Failed to save: ' + errorMessage(err), 'error');
-      setStatus('Save failed');
+      reportSaveFailed('motion detection', err, from.channel.id);
     }
   },
 

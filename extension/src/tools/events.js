@@ -11,8 +11,8 @@
 import { applyNotifications, hasNotification, resolveEventActions } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
 import { byId, query, state } from '../state.js';
-import { loadTool } from './registry.js';
-import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
+import { loadTool, saveTarget } from './registry.js';
+import { errorMessage, reportSaveFailed, reportSaved, setStatus, showToast } from '../ui.js';
 import { cloneXml } from '../../lib/xml.js';
 
 /** @typedef {import('../../lib/config-xml.js').EventActionKey} EventActionKey */
@@ -101,6 +101,7 @@ export const eventsTool = {
     return {
       eventActions,
       eventTriggerDoc: null,
+      eventTriggerFrom: null,
       eventActionTargets: null,
     };
   },
@@ -108,6 +109,7 @@ export const eventsTool = {
   resetState() {
     EVENT_ACTIONS.forEach(a => { state.eventActions[a.key] = false; });
     state.eventTriggerDoc = null;
+    state.eventTriggerFrom = null;
     state.eventActionTargets = null;
     showToggles();
   },
@@ -120,22 +122,19 @@ export const eventsTool = {
   onMouseMove(pos, e) {},
   onMouseUp(pos, e) {},
 
-  async load() {
-    if (!state.config || !state.activeChannel) return;
-    const config = state.config;
-    const channel = activeChannelInfo();
-    /** Whether the user moved on to another channel (or device) while this load ran */
-    const stale = () => state.config !== config || state.activeChannel !== channel.id;
+  async load({ from, stale }) {
+    const { config, channel } = from;
     setStatus('Loading event actions...');
     try {
       const [doc, support] = await Promise.all([
         Isapi.getEventTrigger(config, channel.id),
         Isapi.getEventActionSupport(config),
       ]);
-      // The newer channel's own load fills the panel
+      // The newer load, or the channel moved on to, fills the panel
       if (stale()) return;
       const targets = resolveEventActions(doc, support, channel);
       state.eventTriggerDoc = doc;
+      state.eventTriggerFrom = from;
       state.eventActionTargets = targets;
       EVENT_ACTIONS.forEach(a => {
         const { spec } = targets[a.key];
@@ -153,15 +152,11 @@ export const eventsTool = {
   },
 
   async save() {
-    if (!state.config || !state.activeChannel) return;
-    const config = state.config;
-    const channelId = state.activeChannel;
     const loaded = state.eventTriggerDoc;
     const targets = state.eventActionTargets;
-    if (!loaded || !targets) {
-      showToast('Load the settings from the device before saving', 'error');
-      return;
-    }
+    const from = saveTarget(loaded && targets ? state.eventTriggerFrom : null);
+    if (!loaded || !targets || !from) return;
+    const channelId = from.channel.id;
 
     // Only the actions this channel can use; any other entries stay as loaded
     const doc = cloneXml(loaded);
@@ -172,16 +167,14 @@ export const eventsTool = {
 
     setStatus('Saving event actions...');
     try {
-      const result = await Isapi.putXml(config, Isapi.eventTriggerSavePath(loaded, channelId), doc);
+      const result = await Isapi.putXml(from.config, Isapi.eventTriggerSavePath(loaded, channelId), doc);
       // Only while the panel still holds the trigger this save started from:
       // after a switch it holds another channel's, and a later save of that
       // channel's toggles must not go to this trigger.
       if (state.eventTriggerDoc === loaded) state.eventTriggerDoc = doc;
       reportSaved('Event actions', result, channelId);
     } catch (err) {
-      const which = state.activeChannel === channelId ? '' : ` for channel ${channelId}`;
-      showToast(`Failed to save event actions${which}: ${errorMessage(err)}`, 'error');
-      setStatus('Save failed');
+      reportSaveFailed('event actions', err, channelId);
     }
   },
 

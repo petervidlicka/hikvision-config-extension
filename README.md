@@ -19,7 +19,7 @@ To solve this, I opted to build this lightweight Chrome extension as a straightf
 - **Privacy Masks**: Draw up to 4 rectangular privacy mask regions on the video feed to block sensitive areas.
 - **Event Actions**: Control what happens when motion is detected — toggle recording, push notifications (Hik-Connect), email alerts, audible warnings, alarm output, white light, and audio alarms per channel. Alarm output, white light and audio alarm use that channel's own camera; actions the device or camera can't do are greyed out.
 - **Auto-Discovery**: Automatically scan your local network to find your Hikvision NVR — no need to search for the IP manually.
-- **Auto-Load Settings**: Configuration settings are automatically fetched from the device when switching tools or channels, with a visual loading state so you always know what's current.
+- **Auto-Load Settings**: Configuration settings are automatically fetched from the device when switching tools or channels, with a visual loading state so you always know what's current. Settings that arrive after you've moved on to another channel are dropped, and a save always goes to the channel and device its settings were loaded from.
 - **Remember Credentials**: Your password is kept in memory until Chrome closes. Optionally, you can remember it on this computer (stored unencrypted in Chrome's extension storage).
 
 The extension only asks for access to a device when you connect to it, and for broad network access only while a network scan is running. Chrome will prompt you each time.

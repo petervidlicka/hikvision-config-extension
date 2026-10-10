@@ -12,8 +12,8 @@ import { Isapi } from '../../lib/isapi.js';
 import { rectContains, rectFromCorners, rectToPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
-import { loadTool } from './registry.js';
-import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
+import { loadTool, saveTarget } from './registry.js';
+import { errorMessage, reportSaveFailed, reportSaved, setStatus, showToast } from '../ui.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL: Privacy Mask
@@ -66,6 +66,7 @@ export const privacyTool = {
       privacyNormH: 576,
       privacyDoc: null,
       privacyPath: null,
+      privacyFrom: null,
     };
   },
 
@@ -73,6 +74,7 @@ export const privacyTool = {
     state.privacyRegions = [];
     state.privacyDoc = null;
     state.privacyPath = null;
+    state.privacyFrom = null;
     state.privacyNormW = 704;
     state.privacyNormH = 576;
   },
@@ -142,13 +144,15 @@ export const privacyTool = {
     }
   },
 
-  async load() {
-    if (!state.config || !state.activeChannel) return;
+  async load({ from, stale }) {
     setStatus('Loading privacy mask config...');
     try {
-      const { doc, path } = await Isapi.getPrivacyMask(state.config, activeChannelInfo());
+      const { doc, path } = await Isapi.getPrivacyMask(from.config, from.channel);
+      // The newer load, or the channel moved on to, fills the panel
+      if (stale()) return;
       state.privacyDoc = doc;
       state.privacyPath = path;
+      state.privacyFrom = from;
       const pm = readPrivacyMask(doc);
 
       state.privacyEnabled = pm.enabled;
@@ -163,19 +167,19 @@ export const privacyTool = {
       updateRegionList();
       redraw();
       showToast('Privacy mask config loaded', 'success');
-      setStatus('Config loaded', `Channel ${state.activeChannel}`);
+      setStatus('Config loaded', `Channel ${from.channel.id}`);
     } catch (err) {
+      if (stale()) return;
       showToast('Failed to load privacy mask: ' + errorMessage(err), 'error');
       setStatus('Failed to load config');
     }
   },
 
   async save() {
-    if (!state.config || !state.activeChannel) return;
-    if (!state.privacyDoc) {
-      showToast('Load the settings from the device before saving', 'error');
-      return;
-    }
+    const loaded = state.privacyDoc;
+    const path = state.privacyPath;
+    const from = saveTarget(loaded && path ? state.privacyFrom : null);
+    if (!loaded || !path || !from) return;
 
     // The same coordinate space as on load
     const screen = { width: state.privacyNormW, height: state.privacyNormH };
@@ -186,13 +190,12 @@ export const privacyTool = {
 
     setStatus('Saving privacy mask config...');
     try {
-      const { doc, result } = await Isapi.savePrivacyMask(
-        state.config, /** @type {string} */ (state.privacyPath), state.privacyDoc, mask);
-      state.privacyDoc = doc;
-      reportSaved('Privacy mask', result);
+      const { doc, result } = await Isapi.savePrivacyMask(from.config, path, loaded, mask);
+      // Only while the panel still holds what this save started from (see motion's save)
+      if (state.privacyDoc === loaded) state.privacyDoc = doc;
+      reportSaved('Privacy mask', result, from.channel.id);
     } catch (err) {
-      showToast('Failed to save: ' + errorMessage(err), 'error');
-      setStatus('Save failed');
+      reportSaveFailed('privacy mask', err, from.channel.id);
     }
   },
 
