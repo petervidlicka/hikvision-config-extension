@@ -21,9 +21,9 @@ import { cloneXml } from '../../lib/xml.js';
 
 /** @typedef {import('./registry.js').Tool} Tool */
 
-/** Clicking this close to the first corner, in canvas pixels, closes the polygon. */
+/** Clicking this close to the first corner, in canvas pixels (screen pixels, see resizeCanvas), closes the polygon. */
 const CLOSE_DISTANCE_PX = 12;
-/** A click this close to the last corner, in canvas pixels, is the same corner again. */
+/** A click this close to the last corner, in canvas (screen) pixels, is the same corner again. */
 const SAME_CORNER_PX = 4;
 
 /** @satisfies {Tool} */

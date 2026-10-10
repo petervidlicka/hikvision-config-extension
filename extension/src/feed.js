@@ -245,8 +245,8 @@ export function clearFrame(img) {
  * still), or a channel whose stream size isn't known, is shown as it is.
  *
  * Only how the frame is displayed changes: the drawing canvas over the
- * single view follows the <img>'s displayed size (resizeCanvas), and
- * keeps the frame's pixels as its coordinates.
+ * single view takes the <img>'s displayed size (resizeCanvas), so what the
+ * tools draw isn't stretched with it.
  * @param {HTMLImageElement} img - once its frame has loaded
  * @param {string|null} channelId - whose frame it is
  */

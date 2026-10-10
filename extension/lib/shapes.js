@@ -3,11 +3,12 @@
  * rectangles), kept as fractions of the picture's width and height: 0–1,
  * Y=0 at the top.
  *
- * The drawing canvas takes each frame's pixels as its size, and frames
- * differ: a 704×576 live still, a 1920×1088 HD still, a 1280×720 stored
- * picture from Playback, or none yet (300×150). A shape kept in canvas pixels
- * would move, or be saved scaled wrong, when the frame under it changes size
- * between loading, drawing and saving. As fractions it stays on the same
+ * The drawing canvas takes the picture's displayed size as its pixels,
+ * which changes with the frame (a 704×576 live still shown at 16:9, a
+ * 1920×1088 HD still, a 1280×720 stored picture from Playback, or none yet:
+ * 300×150) and with the window. A shape kept in canvas pixels would move, or
+ * be saved scaled wrong, when the canvas under it changes size between
+ * loading, drawing and saving. As fractions it stays on the same
  * part of the picture. Pixels come in only to draw a shape and to measure
  * what the user aims at in pixels (closing a polygon, a double-click's
  * repeated corner, a rectangle too small to keep); device units are

@@ -123,10 +123,13 @@ describe('config page', () => {
     expect([dom.videoFeed.naturalWidth, dom.videoFeed.naturalHeight]).toEqual([704, 576]);
     const img = dom.videoFeed.getBoundingClientRect();
     expect(img.width / img.height).toBeCloseTo(2688 / 1520, 1);
-    // The canvas covers the picture as shown, and keeps the frame's pixels as its coordinates
+    // The canvas covers the picture as shown, with that size as its pixels, so what the tools
+    // draw isn't stretched with the picture (round corner handles stay round)
     const canvas = dom.canvas.getBoundingClientRect();
     for (const side of ['left', 'top', 'width', 'height']) expect(canvas[side]).toBeCloseTo(img[side], 0);
-    expect([dom.canvas.width, dom.canvas.height]).toEqual([704, 576]);
+    expect([dom.canvas.width, dom.canvas.height]).toEqual([dom.videoFeed.clientWidth, dom.videoFeed.clientHeight]);
+    expect(dom.canvas.width).toBeGreaterThan(704);
+    expect((dom.canvas.width / dom.canvas.height) / (canvas.width / canvas.height)).toBeCloseTo(1, 2);
   });
 
   it('shows an NVR’s cached still once per change and reads its real rate, without slowing a camera down', async () => {
@@ -175,16 +178,17 @@ describe('config page', () => {
     $('streamBtnHd').click();
     expect(chromeStub.store.local.streamType).toBe('main');
     // The NVR's plain HD still is the same 704×576 as SD, so it is asked for the main stream's size.
-    // The frame's size is known once it decodes, its layout (aspect, canvas) once its onload has run.
-    await vi.waitFor(() => expect([dom.videoFeed.naturalWidth, dom.canvas.width]).toEqual([1920, 1920]), { timeout: 5000 });
+    // The frame's size is known once it decodes, its layout (aspect, canvas) once its onload has run:
+    // until then the SD frame's stretch stays.
+    await vi.waitFor(() => expect([dom.videoFeed.naturalWidth, dom.videoFeed.classList.contains('stream-aspect')]).toEqual([1920, false]), { timeout: 5000 });
     expect(device.urls.slice(since).filter(u => u.includes('/picture')).slice(0, 2)).toEqual([
       'GET /ISAPI/Streaming/channels/101/picture',
       'GET /ISAPI/Streaming/channels/101/picture?videoResolutionWidth=2688&videoResolutionHeight=1520',
     ]);
     expect($('statusRight').textContent).toMatch(/^Channel 1 · HD/);
-    // A 1920×1088 still has the camera's aspect already, and the canvas takes its pixels
-    expect(dom.videoFeed.classList.contains('stream-aspect')).toBe(false);
-    expect([dom.canvas.width, dom.canvas.height]).toEqual([1920, 1088]);
+    // A 1920×1088 still has the camera's aspect already; the canvas takes the size it is shown at
+    expect([dom.canvas.width, dom.canvas.height]).toEqual([dom.videoFeed.clientWidth, dom.videoFeed.clientHeight]);
+    expect(dom.canvas.width).toBeLessThan(1920);
     // The SD frame in flight was cancelled, not left running next to the HD one
     expect(device.maxInFlightSnapshots).toBe(1);
   });
@@ -569,7 +573,9 @@ describe('config page', () => {
 
   it('keeps privacy masks where the device has them when the picture under them changes size', async () => {
     // The 1280×720 stored picture was shown last; channel 1's live stills are 1920×1088 (HD, chosen above)
-    expect([dom.canvas.width, dom.canvas.height]).toEqual([1280, 720]);
+    expect(dom.videoFeed.naturalWidth).toBe(1280);
+    const storedPicture = [dom.videoFeed.clientWidth, dom.videoFeed.clientHeight];
+    expect([dom.canvas.width, dom.canvas.height]).toEqual(storedPicture);
     const path = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/privacyMask';
     /** Each mask's corners in a document, as sorted "x,y" */
     const maskCorners = (xml) => xml.split(/<PrivacyMaskRegion[\s>]/).slice(1)
@@ -586,7 +592,7 @@ describe('config page', () => {
       $('configSectionTab').click();
       expect(dom.videoFeed.hasAttribute('src')).toBe(false); // the stored picture doesn't pass for live
       await vi.waitFor(() => expect(state.privacyDoc).not.toBeNull());
-      expect([dom.canvas.width, dom.canvas.height]).toEqual([1280, 720]);
+      expect([dom.canvas.width, dom.canvas.height]).toEqual(storedPicture);
       expect(state.privacyRegions).toEqual([{ x: 0, y: 0, w: 0.25, h: 0.25 }, { x: 0.75, y: 0.75, w: 0.25, h: 0.25 }]);
     } finally {
       release();
@@ -594,7 +600,11 @@ describe('config page', () => {
     }
 
     // The first frame gives the canvas other pixels; saving sends back the device's own coordinates
-    await vi.waitFor(() => expect([dom.canvas.width, dom.canvas.height]).toEqual([1920, 1088]), { timeout: 5000 });
+    await vi.waitFor(() => {
+      expect(dom.videoFeed.naturalWidth).toBe(1920);
+      expect([dom.canvas.width, dom.canvas.height]).toEqual([dom.videoFeed.clientWidth, dom.videoFeed.clientHeight]);
+    }, { timeout: 5000 });
+    expect([dom.canvas.width, dom.canvas.height]).not.toEqual(storedPicture);
     const puts = device.puts.length;
     $('savePrivacyBtn').click();
     await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
@@ -612,7 +622,7 @@ describe('config page', () => {
       await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
       return [...device.puts.at(-1).body.matchAll(/<positionX>(\d+)<\/positionX><positionY>(\d+)</g)].map(m => [+m[1], +m[2]]);
     };
-    /** Give the canvas a frame's pixels, as a frame of that size does */
+    /** Give the canvas other pixels, as a frame of another size or a resized window does */
     const frameSize = (width, height) => Object.assign(dom.canvas, { width, height });
 
     // Loaded over one frame, saved over a smaller one
@@ -635,8 +645,8 @@ describe('config page', () => {
     };
     const steady = await drawSquare([[704, 576], [704, 576], [704, 576]]);
     expect(await drawSquare([[704, 576], [1920, 1088], [1280, 720]])).toEqual(steady);
-    // 10–40 % across and down, Y from the bottom (give or take a pixel of the small canvas
-    // here, since pointer events land on whole screen pixels)
+    // 10–40 % across and down, Y from the bottom (give or take a screen pixel, since pointer
+    // events land on whole ones)
     [[100, 900], [400, 900], [400, 600], [100, 600]].forEach(([x, y], i) => {
       expect(Math.abs(steady[i][0] - x)).toBeLessThanOrEqual(10);
       expect(Math.abs(steady[i][1] - y)).toBeLessThanOrEqual(10);

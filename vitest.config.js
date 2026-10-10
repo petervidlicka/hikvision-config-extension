@@ -38,7 +38,9 @@ export default defineConfig({
         test: {
           name: 'browser',
           include: ['tests/browser/**/*.test.js'],
-          browser: chrome(),
+          // A desktop-sized page, as the config page is used: the drawing canvas has the picture's
+          // size on screen, and the tools aim in screen pixels
+          browser: { ...chrome(), viewport: { width: 1280, height: 800 } },
         },
       },
       ...NODE_ZONES.map(zone => ({

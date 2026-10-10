@@ -386,10 +386,15 @@ Hikvision's web UI knows (it swaps the listed width and height when
 `/ISAPI/Image/channels/{ch}` has `Corridor/enabled`). So a still in the other
 orientation than its stream is compared with the stream turned the same way:
 a 1080×1920 still of a stream listed 1920×1080 is shown as it is, not
-flattened into a 16:9 box. The drawing canvas follows the displayed size; its pixels stay
-the frame's. So the canvas changes size with the frame: 704×576 SD, 1920×1088
-HD, a 1280×720 stored picture in Playback (cleared when Playback is left), or
-the default 300×150 before the first frame. The motion and privacy tools
+flattened into a 16:9 box.
+
+The drawing canvas takes the picture's displayed size, as its pixels too
+(`resizeCanvas` in `src/canvas.js`), so strokes, corner handles and labels
+have their own size on screen: not stretched 1.45× wide over a 704×576 still
+shown at 16:9, nor shrunk over a 1920×1088 still shown at 800 px. So the
+canvas changes size with the frame (SD, HD, a 1280×720 stored picture in
+Playback, which is cleared when Playback is left, or the default 300×150
+before the first frame) and with the window. The motion and privacy tools
 therefore keep their shapes as fractions of the picture (`lib/shapes.js`) and
 use canvas pixels only to draw and hit-test. Device units come in only on
 load and save (`motionRegionToImage`/`imageToMotionRegion`,

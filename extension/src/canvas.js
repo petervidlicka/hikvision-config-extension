@@ -24,14 +24,19 @@ export function getImagePos(e) {
 // ─── Canvas Drawing ─────────────────────────────────────────────────────────
 
 /**
- * Give the canvas the shown frame's pixels and displayed size. Tools keep
- * their shapes as fractions of the picture, so a frame of another size
- * (an HD still, a stored picture) only changes how finely they are drawn.
+ * Give the canvas the picture's displayed size, as its pixels too. Tools
+ * keep their shapes as fractions of the picture and draw strokes, corner
+ * handles and labels in canvas pixels, so these come out at their own size
+ * on screen whatever the frame's pixels are: not stretched with a 704×576
+ * still shown at 16:9 (round handles stay round), nor shrunk with a
+ * 1920×1088 still shown smaller. Until the picture is laid out (it is
+ * hidden, or has no frame yet), the frame's own pixels stand in.
  */
 export function resizeCanvas() {
   const img = dom.videoFeed;
-  dom.canvas.width = img.naturalWidth || img.width;
-  dom.canvas.height = img.naturalHeight || img.height;
+  const shown = img.clientWidth > 0 && img.clientHeight > 0;
+  dom.canvas.width = shown ? img.clientWidth : img.naturalWidth || img.width;
+  dom.canvas.height = shown ? img.clientHeight : img.naturalHeight || img.height;
   dom.canvas.style.width = img.clientWidth + 'px';
   dom.canvas.style.height = img.clientHeight + 'px';
 }

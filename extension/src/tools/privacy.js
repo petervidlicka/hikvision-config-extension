@@ -21,7 +21,7 @@ import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } fr
 
 /** @typedef {import('./registry.js').Tool} Tool */
 
-/** A drag smaller than this on either side, in canvas pixels, draws no mask. */
+/** A drag smaller than this on either side, in canvas pixels (screen pixels, see resizeCanvas), draws no mask. */
 const MIN_MASK_SIDE_PX = 10;
 
 /** @satisfies {Tool} */
