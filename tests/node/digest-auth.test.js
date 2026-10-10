@@ -1,13 +1,16 @@
 /**
  * Digest auth against a local mock device: RFC 2617 vector, nonce reuse and
- * expiry, and the guard that keeps rejected credentials off the device.
+ * expiry, the guard that keeps rejected credentials off the device, error
+ * answers, and time limits.
  */
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
-  buildDigestHeader, digestFetch, forgetRejectedCredentials, md5, parseDigestChallenge, pickQop,
+  AuthError, buildBaseUrl, buildDigestHeader, credentialKey, digestFetch, digestSessions, forgetRejectedCredentials,
+  md5, parseDigestChallenge, pickQop, rejectedCredentials,
 } from '../../extension/lib/digest-auth.js';
+import { IsapiError, NetworkError, TimeoutError } from '../../extension/lib/errors.js';
 
 const nodeMd5 = (s) => crypto.createHash('md5').update(s).digest('hex');
 
@@ -40,10 +43,18 @@ describe('Digest header', () => {
   });
 });
 
+/** An error answer as the DS-7604NI sends it. */
+const responseStatus = (path, statusCode, statusString, subStatusCode) =>
+  '<?xml version="1.0" encoding="UTF-8" ?>\n<ResponseStatus version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n' +
+  `<requestURL>${path}</requestURL>\n<statusCode>${statusCode}</statusCode>\n<statusString>${statusString}</statusString>\n` +
+  `<subStatusCode>${subStatusCode}</subStatusCode>\n</ResponseStatus>\n`;
+
 describe('digestFetch against a mock device', () => {
   const REALM = 'IP Camera';
   let server, cfg;
   const device = { password: 'secret', nonce: 'nonce-1', requests: 0, failedLogins: 0 };
+  /** Authenticated requests the device never answers, like a stalled NVR. */
+  const stalled = [];
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -62,16 +73,31 @@ describe('digestFetch against a mock device', () => {
         device.failedLogins++;
         return challenge();
       }
+      if (req.url === '/hang') return void stalled.push(res);
+      if (req.url === '/forbidden') {
+        res.writeHead(403, { 'Content-Type': 'application/xml' });
+        return void res.end(responseStatus(req.url, 4, 'Invalid Operation', 'notSupport'));
+      }
+      if (req.url === '/ISAPI/Streaming/channels/501/picture') {
+        res.writeHead(503, { 'Content-Type': 'application/xml' });
+        return void res.end(responseStatus(req.url, 2, 'Device Busy', 'serviceUnavailable'));
+      }
       res.writeHead(200);
       res.end('<ok/>');
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     cfg = { host: '127.0.0.1', port: server.address().port, username: 'admin', password: 'secret' };
   });
-  afterAll(() => server.close());
+  afterAll(() => {
+    stalled.forEach(res => res.destroy());
+    server.closeAllConnections();
+    server.close();
+  });
   beforeEach(() => {
     device.requests = 0;
     device.failedLogins = 0;
+    // A password-change test leaves these credentials marked as rejected
+    forgetRejectedCredentials(cfg);
   });
 
   it('reuses the nonce: one request per call after the first', async () => {
@@ -117,5 +143,63 @@ describe('digestFetch against a mock device', () => {
   it('rejects hosts and ports that could redirect the request', async () => {
     await expect(digestFetch({ ...cfg, host: 'evil.com/x?' }, 'GET', '/a')).rejects.toThrow(/Invalid host/);
     await expect(digestFetch({ ...cfg, port: 99999 }, 'GET', '/a')).rejects.toThrow(/Invalid port/);
+  });
+
+  it('reads the device’s reason from an error answer, also for snapshots', async () => {
+    const err = await digestFetch(cfg, 'GET', '/forbidden').catch(e => e);
+    expect(err).toBeInstanceOf(IsapiError);
+    expect(err).toMatchObject({ method: 'GET', path: '/forbidden', httpStatus: 403, statusCode: 4, subStatusCode: 'notSupport' });
+    expect(err.message).toMatch(/doesn’t support this/);
+
+    await expect(digestFetch(cfg, 'GET', '/ISAPI/Streaming/channels/501/picture')).rejects.toMatchObject({
+      httpStatus: 503, statusString: 'Device Busy', subStatusCode: 'serviceUnavailable',
+    });
+  });
+
+  it('times out without touching the cached challenge or the rejected credentials', async () => {
+    await digestFetch(cfg, 'GET', '/warm');
+    const key = credentialKey(buildBaseUrl(cfg), cfg);
+    const session = digestSessions.get(key);
+    const before = device.requests;
+
+    const err = await digestFetch(cfg, 'GET', '/hang', null, { timeoutMs: 100 }).catch(e => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err).not.toBeInstanceOf(AuthError);
+    expect(err).toMatchObject({ path: '/hang', timeoutMs: 100, address: `127.0.0.1:${cfg.port}` });
+    expect(device.requests).toBe(before + 1);
+    expect(digestSessions.get(key)).toBe(session);
+    expect(rejectedCredentials.has(key)).toBe(false);
+
+    await digestFetch(cfg, 'GET', '/ok');
+    expect(device.requests).toBe(before + 2);
+  });
+
+  it('counts the Digest challenge round trip towards the time limit', async () => {
+    const fresh = { ...cfg, username: 'viewer' };
+    await expect(digestFetch(fresh, 'GET', '/hang', null, { timeoutMs: 100 })).rejects.toBeInstanceOf(TimeoutError);
+    expect(rejectedCredentials.has(credentialKey(buildBaseUrl(fresh), fresh))).toBe(false);
+  });
+
+  it('passes the caller’s abort through unchanged', async () => {
+    const controller = new AbortController();
+    const pending = digestFetch(cfg, 'GET', '/hang', null, { signal: controller.signal, timeoutMs: 5000 });
+    setTimeout(() => controller.abort(), 20);
+    const err = await pending.catch(e => e);
+    expect(err.name).toBe('AbortError');
+    expect(err).not.toBeInstanceOf(NetworkError);
+  });
+
+  it('reports an address where nothing listens as a network failure, not a rejected login', async () => {
+    const closed = http.createServer();
+    await new Promise(resolve => closed.listen(0, '127.0.0.1', resolve));
+    const port = closed.address().port;
+    await new Promise(resolve => closed.close(resolve));
+
+    const unreachable = { ...cfg, port };
+    const err = await digestFetch(unreachable, 'GET', '/a', null, { timeoutMs: 2000 }).catch(e => e);
+    expect(err).toBeInstanceOf(NetworkError);
+    expect(err).not.toBeInstanceOf(TimeoutError);
+    expect(err.message).toMatch(new RegExp(`127\\.0\\.0\\.1:${port}`));
+    expect(rejectedCredentials.has(credentialKey(buildBaseUrl(unreachable), unreachable))).toBe(false);
   });
 });

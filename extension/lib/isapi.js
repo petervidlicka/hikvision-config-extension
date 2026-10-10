@@ -5,30 +5,92 @@
  * need to proxy through the service worker: responses stay binary (snapshots
  * become Blobs, not base64) and the password never travels over messaging.
  *
- * Depends on lib/digest-auth.js and lib/xml.js.
+ * Every request has a time limit (TIMEOUT_MS), and endpoint fallbacks follow
+ * one policy (isFallbackError in lib/errors.js): move on only when the device
+ * answered "not here", stop on anything that would fail the same way again.
+ *
+ * Depends on lib/digest-auth.js, lib/errors.js and lib/xml.js.
  */
 
 import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
+import {
+  IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, isFallbackError, parseResponseStatus,
+} from './errors.js';
 import {
   SEARCH_PAGE_SIZE, buildCalendarXml, buildSearchXml, parseCalendar, parsePictureResult, parseSearchResult, toDeviceTime,
 } from './playback.js';
 import { childElements, childText, parseXml, serializeXml } from './xml.js';
 
-/**
- * Rethrow auth failures so endpoint fallbacks don't retry with credentials
- * the device already rejected (each attempt counts towards its lockout).
- * @param {unknown} err
- */
-export function rethrowAuthError(err) {
-  if (err instanceof AuthError) throw err;
-}
-
 /** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
+/** @typedef {import('./digest-auth.js').DigestResponse} DigestResponse */
+/** @typedef {import('./digest-auth.js').RequestOptions} RequestOptions */
 /** @typedef {import('./playback.js').Recording} Recording */
 /** @typedef {import('./playback.js').StoredPicture} StoredPicture */
 
 /** Stop paging a recording search after this many results. */
 const MAX_SEARCH_RESULTS = 2000;
+
+/**
+ * How long each kind of request may take before it fails with TimeoutError.
+ * Generous next to what a healthy device needs (a snapshot takes 0.1–0.6 s
+ * on the DS-7604NI), but short enough that a wrong IP address or a stalled
+ * request shows up as an error instead of a hang. Hikvision's own clients
+ * bound their requests too (web UI 30 s, iVMS 3–30 s to connect).
+ */
+export const TIMEOUT_MS = Object.freeze({
+  /** Connect: the whole deviceInfo request, including the Digest challenge round trip */
+  connect: 8000,
+  /** One JPEG: a frame that times out just lets a live feed move on to the next */
+  picture: 5000,
+  /** Other reads */
+  read: 10000,
+  /** POST: recording and picture searches, where the device searches its disks */
+  search: 20000,
+  /** PUT and DELETE: the device may take a while to apply a change */
+  write: 20000,
+});
+
+/**
+ * Time limit for a request whose caller doesn't set one.
+ * @param {string} method
+ * @param {string} path
+ * @returns {number} milliseconds
+ */
+export function defaultTimeoutMs(method, path) {
+  switch (method.toUpperCase()) {
+    case 'GET': return path.includes('/picture') ? TIMEOUT_MS.picture : TIMEOUT_MS.read;
+    case 'POST': return TIMEOUT_MS.search;
+    default: return TIMEOUT_MS.write;
+  }
+}
+
+/**
+ * What a successful write reports. `rebootRequired` means the device stored
+ * the change but applies it only after a reboot (ResponseStatus statusCode
+ * 7), which the user must be told, or the save looks like it did nothing.
+ * @typedef {{rebootRequired: boolean}} WriteResult
+ */
+
+/**
+ * Check the ResponseStatus a device returns for a write. HTTP 200 alone isn't
+ * success: like Hikvision's web UI, only statusCode 1 (OK) and 7 (OK, reboot
+ * required) count, and anything else fails. A body without a ResponseStatus
+ * (some firmware sends none) counts as OK.
+ * @param {string} method
+ * @param {string} path
+ * @param {DigestResponse} resp
+ * @returns {WriteResult}
+ * @throws {IsapiError} when the status reports a failure
+ */
+export function checkWriteResponse(method, path, resp) {
+  const status = parseResponseStatus(typeof resp.data === 'string' ? resp.data : '');
+  if (!status) return { rebootRequired: false };
+  if (status.statusCode === STATUS_REBOOT_REQUIRED) return { rebootRequired: true };
+  if (status.statusCode === STATUS_OK || (status.statusCode === null && status.subStatusCode === 'ok')) {
+    return { rebootRequired: false };
+  }
+  throw new IsapiError({ method, path, httpStatus: resp.status, status });
+}
 
 /**
  * A camera channel. `kind` says which URL family configures it: "analog"
@@ -55,15 +117,19 @@ export const Isapi = {
   onAuthFailure: null,
 
   /**
-   * digestFetch, plus the auth-failure hook.
+   * digestFetch, plus the auth-failure hook and a time limit by request kind
+   * (defaultTimeoutMs) unless the caller sets one.
    * @param {DeviceConfig} config
    * @param {string} method
    * @param {string} path
    * @param {string|null} [body]
+   * @param {RequestOptions} [options]
+   * @returns {Promise<DigestResponse>}
    */
-  async request(config, method, path, body = null) {
+  async request(config, method, path, body = null, options = {}) {
+    const timeoutMs = options.timeoutMs ?? defaultTimeoutMs(method, path);
     try {
-      return await digestFetch(config, method, path, body);
+      return await digestFetch(config, method, path, body, { ...options, timeoutMs });
     } catch (err) {
       if (err instanceof AuthError) this.onAuthFailure?.(err);
       throw err;
@@ -74,10 +140,11 @@ export const Isapi = {
    * GET an ISAPI resource as an XML document.
    * @param {DeviceConfig} config
    * @param {string} path
+   * @param {RequestOptions} [options]
    * @returns {Promise<XMLDocument>}
    */
-  async getXml(config, path) {
-    const resp = await this.request(config, 'GET', path);
+  async getXml(config, path, options = {}) {
+    const resp = await this.request(config, 'GET', path, null, options);
     return parseXml(String(resp.data));
   },
 
@@ -86,9 +153,27 @@ export const Isapi = {
    * @param {DeviceConfig} config
    * @param {string} path
    * @param {XMLDocument} doc
+   * @param {RequestOptions} [options]
+   * @returns {Promise<WriteResult>} whether the change needs a reboot to take effect
+   * @throws {IsapiError} also when the device answers 200 with a failure status
    */
-  async putXml(config, path, doc) {
-    await this.request(config, 'PUT', path, serializeXml(doc));
+  async putXml(config, path, doc, options = {}) {
+    const resp = await this.request(config, 'PUT', path, serializeXml(doc), options);
+    return checkWriteResponse('PUT', path, resp);
+  },
+
+  /**
+   * DELETE a resource, e.g. every stored privacy mask region before writing
+   * the new list (the device merges a PUT into what it has, by region id).
+   * @param {DeviceConfig} config
+   * @param {string} path
+   * @param {RequestOptions} [options]
+   * @returns {Promise<WriteResult>}
+   * @throws {IsapiError} also when the device answers 200 with a failure status
+   */
+  async deleteResource(config, path, options = {}) {
+    const resp = await this.request(config, 'DELETE', path, null, options);
+    return checkWriteResponse('DELETE', path, resp);
   },
 
   /**
@@ -99,7 +184,7 @@ export const Isapi = {
    */
   async getDeviceInfo(config) {
     forgetRejectedCredentials(config);
-    const root = (await this.getXml(config, '/ISAPI/System/deviceInfo')).documentElement;
+    const root = (await this.getXml(config, '/ISAPI/System/deviceInfo', { timeoutMs: TIMEOUT_MS.connect })).documentElement;
     return {
       deviceName: childText(root, 'deviceName'),
       model: childText(root, 'model'),
@@ -138,12 +223,13 @@ export const Isapi = {
         channels = channels.filter(ch => /^\d+$/.test(ch.id));
         if (channels.length > 0) return channels;
       } catch (err) {
-        rethrowAuthError(err);
-        // Try the next endpoint
+        if (!isFallbackError(err)) throw err;
       }
     }
 
-    // Last resort: probe snapshots on the first 4 channels
+    // Last resort: probe snapshots on the first 4 channels. Any error answer
+    // means no camera there (an empty channel answers 503 on the DS-7604NI);
+    // no answer at all, or a rejected login, ends the probing.
     /** @type {Channel[]} */
     const probed = [];
     for (let id = 1; id <= 4; id++) {
@@ -151,8 +237,7 @@ export const Isapi = {
         await this.request(config, 'GET', `/ISAPI/Streaming/channels/${id}01/picture`);
         probed.push({ id: String(id), name: '', kind: 'analog' });
       } catch (err) {
-        rethrowAuthError(err);
-        // No camera on this channel
+        if (!(err instanceof IsapiError)) throw err;
       }
     }
     if (probed.length > 0) return probed;
@@ -164,22 +249,25 @@ export const Isapi = {
    * Fetch one JPEG frame. Stream IDs are channel × 100 + 1 for the main
    * (HD) stream and + 2 for the sub (SD) stream, which is smaller and faster.
    * Falls back to the main stream when a camera has no sub-stream, and to
-   * the bare channel ID for firmware that uses that.
+   * the bare channel ID for firmware that uses that. A busy device, an
+   * unavailable camera (503) or a timeout ends the attempt for this frame
+   * rather than trying every URL each time.
    * @param {DeviceConfig} config
    * @param {string} channelId
    * @param {'main'|'sub'} [stream]
+   * @param {RequestOptions} [options] - e.g. the live feed's abort signal
    * @returns {Promise<Blob>}
    */
-  async getSnapshot(config, channelId, stream = 'main') {
+  async getSnapshot(config, channelId, stream = 'main', options = {}) {
     const ids = stream === 'sub' ? [`${channelId}02`, `${channelId}01`] : [`${channelId}01`];
     ids.push(channelId);
     let lastError;
     for (const id of ids) {
       try {
-        const resp = await this.request(config, 'GET', `/ISAPI/Streaming/channels/${id}/picture`);
+        const resp = await this.request(config, 'GET', `/ISAPI/Streaming/channels/${id}/picture`, null, options);
         return new Blob([resp.data], { type: 'image/jpeg' });
       } catch (err) {
-        rethrowAuthError(err);
+        if (!isFallbackError(err)) throw err;
         lastError = err;
       }
     }
@@ -206,7 +294,8 @@ export const Isapi = {
 
   /**
    * Motion detection capabilities (allowed region types, region and corner
-   * limits, sensitivity steps, target types), or null if not available.
+   * limits, sensitivity steps, target types), or null if the device doesn't
+   * have them.
    * @param {DeviceConfig} config
    * @param {Pick<Channel, 'id'|'kind'>} channel
    * @returns {Promise<XMLDocument|null>}
@@ -215,7 +304,7 @@ export const Isapi = {
     try {
       return await this.getXml(config, `${this.motionDetectionPath(channel)}/capabilities`);
     } catch (err) {
-      rethrowAuthError(err);
+      if (!isFallbackError(err)) throw err;
       return null;
     }
   },
@@ -232,7 +321,9 @@ export const Isapi = {
     try {
       return { doc: await this.getXml(config, base), path: base };
     } catch (err) {
-      rethrowAuthError(err);
+      // Only when the device has no such resource: a busy device or a
+      // timeout must surface, not silently load the regions-only document
+      if (!isFallbackError(err)) throw err;
       const path = `${base}/regions`;
       return { doc: await this.getXml(config, path), path };
     }
@@ -323,13 +414,21 @@ export const Isapi = {
    * @returns {Promise<boolean>}
    */
   async ignoresRecordedFrameTime(config, channelId) {
-    return (await this.getRecordedFrame(config, channelId, new Date(2000, 0, 1))) !== null;
+    try {
+      return (await this.getRecordedFrame(config, channelId, new Date(2000, 0, 1))) !== null;
+    } catch (err) {
+      // A device that ignores the time answers as fast as a live snapshot
+      if (err instanceof TimeoutError) return false;
+      throw err;
+    }
   },
 
   /**
    * A still image from recorded video at a moment. Not part of documented
    * ISAPI, so only some firmware supports it; returns null when the device
-   * doesn't answer with a JPEG. Check ignoresRecordedFrameTime() first.
+   * doesn't answer with a JPEG (any error answer counts as "no frame").
+   * No answer at all, or a rejected login, still throws. Check
+   * ignoresRecordedFrameTime() first.
    * @param {DeviceConfig} config
    * @param {string} channelId
    * @param {Date} time
@@ -347,7 +446,7 @@ export const Isapi = {
         const bytes = new Uint8Array(/** @type {ArrayBuffer} */ (resp.data));
         if (bytes[0] === 0xff && bytes[1] === 0xd8) return new Blob([bytes], { type: 'image/jpeg' });
       } catch (err) {
-        rethrowAuthError(err);
+        if (!(err instanceof IsapiError)) throw err;
       }
     }
     return null;
@@ -370,7 +469,7 @@ export const Isapi = {
     try {
       return await this.getXml(config, this.eventTriggerPath(channelId));
     } catch (err) {
-      rethrowAuthError(err);
+      if (!isFallbackError(err)) throw err;
     }
 
     try {
@@ -385,7 +484,7 @@ export const Isapi = {
         return doc;
       }
     } catch (err) {
-      rethrowAuthError(err);
+      if (!isFallbackError(err)) throw err;
     }
 
     throw new Error('Event triggers not supported on this device or firmware');

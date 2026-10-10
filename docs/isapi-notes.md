@@ -56,3 +56,26 @@ creates one with no namespace, which serializes as `<targetType xmlns="">`.
 Alarm outputs use `<id>IO-{port}</id>`. IP channels use `<dynOutputIOPortID>`
 unless the device reports `bSupportIOOutputUnify`, in which case they use
 `<outputIOPortID>`.
+
+## Errors and write results
+
+Error answers carry a `<ResponseStatus>` body (`statusCode`, `statusString`,
+`subStatusCode`, sometimes `subStatusString`). Config documents use the
+`isapi.org/ver20` namespace but error bodies from the DS-7604NI use
+`hikvision.com/ver20`, and `/SDK/` endpoints answer in `urn:psialliance-org`
+without a `subStatusCode`, so `lib/errors.js` matches by local name and also
+accepts the JSON form. A path the NVR doesn't have answers
+403 `notSupport`, not 404.
+
+A successful PUT or DELETE also returns a ResponseStatus. Like the web UI's
+`response.js`, only `statusCode` 1 (OK) counts as success, and 7 means
+"stored, but takes effect after a reboot"; any other code is a failure even
+with HTTP 200.
+
+Endpoint fallbacks share one policy (`isFallbackError`): try the next URL on
+404, 403 `notSupport`/`invalidOperation` and 400 `badXmlContent`/`badParameters`;
+stop on 401, `lowPrivilege`, timeouts and network errors, and on 503
+`serviceUnavailable`/`deviceBusy` (an empty channel's snapshot answers 503).
+
+Every request has a time limit (`TIMEOUT_MS` in `lib/isapi.js`), as in
+Hikvision's own clients (web UI 30 s per request, iVMS 3–30 s to connect).

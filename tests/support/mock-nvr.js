@@ -2,7 +2,8 @@
  * A fake Hikvision NVR behind fetch(), plus stubbed chrome.* APIs, for
  * running the real config page outside the extension. Mirrors the NVR this
  * extension was developed against: IP cameras only (analog channel list
- * returns 403), configs via InputProxy, polygon motion regions.
+ * returns 403 notSupport), configs via InputProxy, polygon motion regions,
+ * and errors and write results as <ResponseStatus> bodies.
  *
  * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
  */
@@ -34,6 +35,27 @@ export function createChromeStub() {
     },
   };
 }
+
+/**
+ * A <ResponseStatus> body as the DS-7604NI sends it: hikvision.com ver20
+ * namespace, for errors and for write results alike.
+ * @param {string} path - echoed as requestURL
+ * @param {{statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string}} status
+ */
+export function responseStatusXml(path, { statusCode, statusString, subStatusCode, subStatusString }) {
+  return '<?xml version="1.0" encoding="UTF-8" ?>\n' +
+    '<ResponseStatus version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n' +
+    `<requestURL>${path}</requestURL>\n<statusCode>${statusCode}</statusCode>\n` +
+    `<statusString>${statusString}</statusString>\n<subStatusCode>${subStatusCode}</subStatusCode>\n` +
+    (subStatusString ? `<subStatusString>${subStatusString}</subStatusString>\n` : '') +
+    '</ResponseStatus>\n';
+}
+
+/** What the DS-7604NI answers for a resource it doesn't have, or a write that succeeded. */
+export const STATUS = {
+  notSupport: { statusCode: 4, statusString: 'Invalid Operation', subStatusCode: 'notSupport' },
+  ok: { statusCode: 1, statusString: 'OK', subStatusCode: 'ok' },
+};
 
 /** A small JPEG frame that changes every call. */
 async function frame() {
@@ -71,15 +93,24 @@ function todaysPictures() {
 /**
  * Create the fake device. Returns its observable state and a fetch
  * replacement; requests to other hosts go to `realFetch`.
+ *
+ * Tests can make it misbehave: `unreachable` fails every request like a
+ * wrong IP address, `failures` answers "METHOD /path" with an error status,
+ * and `writeStatus` changes what a successful PUT or DELETE reports (e.g.
+ * statusCode 7, reboot required).
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
   const device = {
-    requests: [], puts: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
+    requests: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
+    unreachable: false,
+    /** @type {Record<string, {httpStatus: number, statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string}>} */
+    failures: {},
+    writeStatus: STATUS.ok,
     /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
     recordedFrames: /** @type {'real'|'ignoresTime'|'none'} */ ('real'),
   };
-  const xml = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/xml' } });
+  const xml = (body, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/xml; charset="UTF-8"' } });
 
   device.fetch = async (url, opts = {}) => {
     const u = new URL(url, location.href);
@@ -87,12 +118,19 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     const method = opts.method || 'GET';
     const p = u.pathname;
     device.requests.push(`${method} ${p}`);
+    if (device.unreachable) throw new TypeError('Failed to fetch');
     if (device.rejectAuth) {
       return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Digest realm="r", nonce="n", qop="auth"' } });
     }
+    const failure = device.failures[`${method} ${p}`];
+    if (failure) return xml(responseStatusXml(p, failure), failure.httpStatus);
     if (method === 'PUT') {
       device.puts.push({ path: p, body: opts.body });
-      return xml('<ResponseStatus><statusCode>1</statusCode></ResponseStatus>');
+      return xml(responseStatusXml(p, device.writeStatus));
+    }
+    if (method === 'DELETE') {
+      device.deletes.push(p);
+      return xml(responseStatusXml(p, device.writeStatus));
     }
     if (method === 'POST' && p === '/ISAPI/ContentMgmt/search') {
       return xml(/<trackID>\d+03<\/trackID>/.test(String(opts.body)) ? todaysPictures() : todaysRecordings());
@@ -107,7 +145,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       return image ? new Response(await frame(), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
     }
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
-    if (p === '/ISAPI/System/Video/inputs/channels') return new Response('', { status: 403 });
+    if (p === '/ISAPI/System/Video/inputs/channels') return xml(responseStatusXml(p, STATUS.notSupport), 403);
     if (p === '/ISAPI/ContentMgmt/InputProxy/channels') {
       return xml('<InputProxyChannelList>' +
         '<InputProxyChannel><id>1</id><name>Front &amp; Gate</name></InputProxyChannel>' +
@@ -117,8 +155,18 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (/^\/ISAPI\/Streaming\/channels\/\d+0[12]\/picture$/.test(p)) {
       device.inFlightSnapshots++;
       device.maxInFlightSnapshots = Math.max(device.maxInFlightSnapshots, device.inFlightSnapshots);
-      await new Promise(r => setTimeout(r, snapshotDelayMs));
-      device.inFlightSnapshots--;
+      // Like a real connection, an aborted request stops occupying the device at once
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          device.inFlightSnapshots--;
+          resolve();
+        }, snapshotDelayMs);
+        opts.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          device.inFlightSnapshots--;
+          reject(opts.signal.reason);
+        });
+      });
       return new Response(await frame(), { status: 200 });
     }
     // Channel 2 is a camera that only supports the cell grid
@@ -128,7 +176,8 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (p.endsWith('/motionDetection')) return xml(motionDetection);
     if (p.endsWith('/privacyMask')) return xml(privacyMask);
     if (/\/Event\/triggers\/VMD-\d+$/.test(p)) return xml(eventTrigger);
-    return new Response('', { status: 404 });
+    // The DS-7604NI answers any path it doesn't have like this, not with 404
+    return xml(responseStatusXml(p, STATUS.notSupport), 403);
   };
   return device;
 }

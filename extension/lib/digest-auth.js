@@ -2,8 +2,11 @@
  * Pure browser-side HTTP Digest Authentication for Hikvision ISAPI.
  *
  * Uses a compact MD5 implementation (no external dependencies) to compute
- * the challenge-response that Hikvision devices require.
+ * the challenge-response that Hikvision devices require. Failed requests
+ * throw the error types in lib/errors.js, or AuthError for a rejected login.
  */
+
+import { IsapiError, NetworkError, TimeoutError, parseResponseStatus } from './errors.js';
 
 /* ── Minimal MD5 (RFC 1321) ─────────────────────────────────────────────── */
 
@@ -127,6 +130,16 @@ export const md5 = (() => {
  */
 
 /** @typedef {{status: number, headers: Headers, data: string|ArrayBuffer}} DigestResponse */
+
+/**
+ * Per-request options. Every request the UI makes should be bounded: without
+ * a limit, a wrong IP address leaves Connect hanging until the OS gives up,
+ * and one stalled snapshot freezes its live feed.
+ * @typedef {object} RequestOptions
+ * @property {AbortSignal} [signal] - cancels the request, e.g. when a live feed stops
+ * @property {number} [timeoutMs] - limit for the whole call: the challenge round trip, the retry and reading
+ *   the body. digestFetch has no limit without one (or with 0); Isapi.request sets one by request kind.
+ */
 
 /* ── Errors ─────────────────────────────────────────────────────────────── */
 
@@ -326,13 +339,22 @@ export function forgetRejectedCredentials(config) {
  * actually issued a new nonce; a 401 for the nonce we just used means the
  * credentials are wrong, and retrying would just add a failed login.
  *
+ * A timeout or network failure leaves the cached challenge and the rejected
+ * credentials alone: the device never judged the credentials.
+ *
  * @param {DeviceConfig} config
  * @param {string} method
  * @param {string} urlPath - path and query, e.g. "/ISAPI/System/deviceInfo"
  * @param {string|null} [body] - XML for PUT/POST
+ * @param {RequestOptions} [options] - no time limit unless `timeoutMs` is given
  * @returns {Promise<DigestResponse>} snapshots ("/picture") as ArrayBuffer, everything else as text
+ * @throws {AuthError} the device rejected the credentials (now or earlier)
+ * @throws {IsapiError} the device answered with an error status
+ * @throws {TimeoutError} no complete answer within `timeoutMs`
+ * @throws {NetworkError} the device couldn't be reached
+ * @throws {unknown} the caller's `signal` abort reason, passed through as is
  */
-export async function digestFetch(config, method, urlPath, body = null) {
+export async function digestFetch(config, method, urlPath, body = null, { signal, timeoutMs } = {}) {
   const baseUrl = buildBaseUrl(config);
   const url = `${baseUrl}${urlPath}`;
   const isImage = urlPath.includes('/picture');
@@ -342,15 +364,38 @@ export async function digestFetch(config, method, urlPath, body = null) {
     throw new AuthError('Device rejected the username or password');
   }
 
+  const timeout = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
+  const requestSignal = signal && timeout ? AbortSignal.any([signal, timeout]) : signal ?? timeout;
+
+  /**
+   * Run one network step (sending, or reading a body), turning a failure
+   * into TimeoutError or NetworkError. A caller's abort passes through
+   * unchanged, so the caller can recognise its own cancellation.
+   * @template T
+   * @param {() => Promise<T>} step
+   * @returns {Promise<T>}
+   */
+  const network = async (step) => {
+    try {
+      return await step();
+    } catch (err) {
+      if (signal?.aborted) throw signal.reason;
+      const details = { method, path: urlPath, address: baseUrl.replace(/^http:\/\//, ''), cause: err };
+      if (timeout?.aborted) throw new TimeoutError({ ...details, timeoutMs: Number(timeoutMs) });
+      throw new NetworkError(details);
+    }
+  };
+
   /** @param {string|null} authorization */
-  const send = (authorization) => fetch(url, {
+  const send = (authorization) => network(() => fetch(url, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/xml' } : {}),
       ...(authorization ? { Authorization: authorization } : {}),
     },
     body,
-  });
+    signal: requestSignal,
+  }));
   /** @param {DigestSession} session */
   const authorize = (session) => buildDigestHeader(
     method.toUpperCase(), urlPath, session, config.username, config.password);
@@ -377,9 +422,13 @@ export async function digestFetch(config, method, urlPath, body = null) {
   }
 
   if (!resp.ok) {
-    throw new Error(`ISAPI ${method} ${urlPath} failed: HTTP ${resp.status}`);
+    // The body explains the error, also for snapshots, so read it as text
+    const text = await network(() => resp.text());
+    throw new IsapiError({ method, path: urlPath, httpStatus: resp.status, status: parseResponseStatus(text) });
   }
 
-  const data = isImage ? await resp.arrayBuffer() : await resp.text();
+  /** @type {() => Promise<string|ArrayBuffer>} */
+  const readBody = () => (isImage ? resp.arrayBuffer() : resp.text());
+  const data = await network(readBody);
   return { status: resp.status, headers: resp.headers, data };
 }
