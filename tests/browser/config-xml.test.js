@@ -113,6 +113,22 @@ describe('motion detection', () => {
     expect(serializeXml(doc)).toContain('<RegionList size="0"></RegionList>');
   });
 
+  it('saves fewer regions in the form that makes the NVR replace its list, not merge by id', () => {
+    const twoRegions = [
+      [{ x: 0, y: 1000 }, { x: 500, y: 1000 }, { x: 500, y: 0 }],
+      [{ x: 500, y: 1000 }, { x: 1000, y: 1000 }, { x: 1000, y: 0 }],
+    ];
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: true, regions: twoRegions });
+    applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: true, regions: twoRegions.slice(0, 1) });
+    const body = serializeXml(doc);
+    // regionType=region, a zeroed gridMap and RegionList@size are what the NVR needs to drop region 2
+    expect(body).toContain('<regionType>region</regionType>');
+    expect(body).toMatch(/<gridMap>0+<\/gridMap>/);
+    expect(regionListMarkup(body)).toMatch(/^<RegionList size="1"><Region xmlns=""><id>1<\/id>/);
+    expect(childElements(doc.getElementsByTagNameNS('*', 'RegionList')[0], 'Region')).toHaveLength(1);
+  });
+
   it('writes the detection target list', () => {
     const base = { enabled: true, sensitivity: 40, dynamicAnalysis: false, regions: [] };
     const doc = parseXml(fixtures.motionDetection);

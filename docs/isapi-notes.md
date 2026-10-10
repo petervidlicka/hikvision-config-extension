@@ -47,6 +47,14 @@ uses the 22×18 cell grid.
 - Saving polygons: removes every `<Region>`, appends the new ones to `RegionList`,
   sets `RegionList@size` and sets `regionType` to `region`. The device rasterizes
   the polygons into `gridMap` itself.
+- **A motion PUT can merge regions by id**, like privacy masks. Verified on the
+  DS-7604NI-K1/4P (V4.75.206): PUTting the device's own document back
+  (`regionType` grid, `<RegionList>` without `size`, holding region 1 only) kept
+  a stored region 2. Our save (`regionType` region, `gridMap` zeroed,
+  `<RegionList size="N">` with exactly N `<Region xmlns="">`) replaces the list,
+  so a deleted region is really gone. Keep those three parts when changing the
+  save, and don't restore a motion backup by PUTting it as-is if regions were
+  added since.
 - Saving grid mode: only `gridMap` changes. It's 18 rows × 6 hex digits; each row
   is 24 bits, MSB first, and only the first 22 bits (columns) are used.
 
