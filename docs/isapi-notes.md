@@ -555,8 +555,12 @@ root `<enabled>`, the only switch that turns masking on and off, and a save
 can't add one. So with that document the panel's switch is disabled, saying
 "This device doesn’t let the extension switch masks on or off", and every
 mask it shows is saved with its own `<enabled>` on, where firmware honours
-that flag at all. The list goes back to its own path in a single PUT, without
-a DELETE.
+that flag at all (`applyPrivacyMask`). The disabled switch shows what the
+masks' own flags say, on when any mask is stored switched on: firmware that
+honours them may have every mask off, and the switch mustn't then say they
+mask. (The DS-7604NI reads its masks back off yet masks them, so there the
+switch would show off.) The list goes back to its own path in a single PUT,
+without a DELETE.
 
 ## Event actions
 

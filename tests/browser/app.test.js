@@ -1066,10 +1066,10 @@ describe('config page', () => {
       expect(row.classList.contains('unavailable')).toBe(true);
       expect(row.title).toBe('This device doesn’t let the extension switch masks on or off');
       expect(toggle.getAttribute('aria-disabled')).toBe('true');
-      // Its regions read back enabled=false, yet every mask shown is saved on
-      expect(toggle.classList.contains('on')).toBe(true);
+      // Its regions read back enabled=false: shown off, and the switch can't change that
+      expect(toggle.classList.contains('on')).toBe(false);
       toggle.click();
-      expect([state.privacyEnabled, toggle.classList.contains('on')]).toEqual([true, true]);
+      expect([state.privacyEnabled, toggle.classList.contains('on')]).toEqual([false, false]);
 
       const [puts, deletes] = [device.puts.length, device.deletes.length];
       $('savePrivacyBtn').click();
@@ -1078,8 +1078,10 @@ describe('config page', () => {
       expect(putPath).toBe(`${path}/regions`);
       expect(device.deletes).toHaveLength(deletes);
       expect(new DOMParser().parseFromString(body, 'application/xml').documentElement.localName).toBe('PrivacyMaskRegionList');
+      // Yet every mask shown is saved on, and the switch then shows that
       expect([...body.matchAll(/<enabled>(\w+)<\/enabled>/g)].map(m => m[1])).toEqual(Array(masks).fill('true'));
       await vi.waitFor(() => expect(toast()).toBe('Privacy mask saved successfully!'));
+      expect([state.privacyEnabled, toggle.classList.contains('on')]).toEqual([true, true]);
     } finally {
       delete device.failures[`GET ${path}`];
     }

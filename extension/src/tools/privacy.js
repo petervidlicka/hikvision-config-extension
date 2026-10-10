@@ -200,7 +200,14 @@ export const privacyTool = {
     try {
       const { doc, result } = await Isapi.savePrivacyMask(from.config, path, loaded, mask);
       // Only while the panel still holds what this save started from (see motion's save)
-      if (state.privacyDoc === loaded) state.privacyDoc = doc;
+      if (state.privacyDoc === loaded) {
+        state.privacyDoc = doc;
+        // Without a switch, the masks were saved on (see applyPrivacyMask): show what the device now has
+        if (!state.privacySwitchable) {
+          state.privacyEnabled = readPrivacyMask(doc).enabled;
+          showSwitch();
+        }
+      }
       reportSaved('Privacy mask', result, from.channel.id);
     } catch (err) {
       reportSaveFailed('privacy mask', err, from.channel.id);

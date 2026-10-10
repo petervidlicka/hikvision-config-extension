@@ -2,7 +2,7 @@
  * Reading and editing the device config documents behind each tool.
  */
 import { describe, expect, it } from 'vitest';
-import { childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
+import { childElement, childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import {
   DEFAULT_PRIVACY_SCREEN, alarmOutputNotification, applyMotionConfig, applyNotifications, decodeGridMap,
   encodeGridMap, applyPrivacyMask, hasNotification, imageRectToPrivacy, imageToMotionRegion, lightAudioNotification,
@@ -399,20 +399,39 @@ describe('privacy mask', () => {
     expect(camera.regions[0][2]).toEqual({ x: 110, y: 120 });
   });
 
-  it('skips zero-area regions; a bare region list has no switch, and its masks are on', () => {
+  describe('a bare region list', () => {
     const ns = 'xmlns="http://www.isapi.org/ver20/XMLSchema"';
     const region = (id, enabled, points) => `<PrivacyMaskRegion><id>${id}</id><enabled>${enabled}</enabled><RegionCoordinatesList>${
       points.map(([x, y]) => `<RegionCoordinates><positionX>${x}</positionX><positionY>${y}</positionY></RegionCoordinates>`).join('')
     }</RegionCoordinatesList></PrivacyMaskRegion>`;
     const list = (...regions) => parseXml(`<PrivacyMaskRegionList ${ns}>${regions.join('')}</PrivacyMaskRegionList>`);
+    const box = [[0, 0], [50, 50]];
 
-    const flat = readPrivacyMask(list(region(1, 'true', [[0, 0], [0, 0], [0, 0]]), region(2, 'false', [[10, 10], [90, 10], [90, 10]])));
-    expect([flat.enabled, flat.switchable, flat.regions]).toEqual([true, false, []]);
-    // Whatever its regions' own flags say: a save writes them all on, as the panel shows them
-    const off = readPrivacyMask(list(region(1, 'false', [[0, 0], [50, 50]])));
-    expect([off.enabled, off.switchable, off.regions.length]).toEqual([true, false, 1]);
-    expect(readPrivacyMask(parseXml(`<PrivacyMaskRegionList ${ns}/>`))).toEqual({ enabled: true, switchable: false, screen: null, regions: [] });
+    it('has no switch: its masks’ own flags say whether masking is on, and zero-area regions are skipped', () => {
+      // A zero-area region switched on masks nothing
+      const flat = readPrivacyMask(list(region(1, 'true', [[0, 0], [0, 0], [0, 0]]), region(2, 'false', [[10, 10], [90, 10], [90, 10]])));
+      expect([flat.enabled, flat.switchable, flat.regions]).toEqual([false, false, []]);
+      // Firmware that honours the per-region flag, with every mask stored off: shown off, not as masking
+      const off = readPrivacyMask(list(region(1, 'false', box), region(2, 'false', box)));
+      expect([off.enabled, off.switchable, off.regions.length]).toEqual([false, false, 2]);
+      expect(readPrivacyMask(list(region(1, 'false', box), region(2, 'true', box))).enabled).toBe(true);
+      expect(readPrivacyMask(parseXml(`<PrivacyMaskRegionList ${ns}/>`))).toEqual({ enabled: false, switchable: false, screen: null, regions: [] });
+    });
 
+    it('saves every mask switched on, whatever the switch it can’t write says', () => {
+      const rect = { x1: 1, y1: 2, x2: 3, y2: 4 };
+      for (const unused of /** @type {const} */ (['disable', 'remove'])) {
+        const doc = list(region(1, 'false', box), region(2, 'false', box), region(3, 'false', box));
+        applyPrivacyMask(doc, { enabled: false, rects: [rect, rect], unused });
+        expect(slotsOf(doc).map(([id, enabled]) => [id, enabled]), unused)
+          .toEqual(unused === 'disable' ? [['1', 'true'], ['2', 'true'], ['3', 'false']] : [['1', 'true'], ['2', 'true']]);
+        expect(childElement(doc.documentElement, 'enabled'), unused).toBeNull();
+        expect(readPrivacyMask(doc), unused).toMatchObject({ enabled: true, switchable: false });
+      }
+    });
+  });
+
+  it('reads a full document’s switch, on or off', () => {
     // A full document has the switch, on or off
     expect(readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions))).toMatchObject({ enabled: true, switchable: true });
     const switchedOff = fixtures.privacyMaskNvrRegions.replace('<enabled>true</enabled>', '<enabled>false</enabled>');

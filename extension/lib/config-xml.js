@@ -523,7 +523,7 @@ export const DEFAULT_PRIVACY_SCREEN = Object.freeze({ width: 704, height: 576 })
 /**
  * A privacy mask document as a panel shows it (see readPrivacyMask).
  * @typedef {object} PrivacyMaskConfig
- * @property {boolean} enabled - masking on; true when the document has no switch
+ * @property {boolean} enabled - masking on: the global switch, or without one whether any mask is stored switched on
  * @property {boolean} switchable - the document has the global switch a save can turn on or off
  * @property {Size|null} screen - the coordinate space the document declares
  * @property {DevicePoint[][]} regions - each mask's corners in device units
@@ -551,28 +551,32 @@ export function privacyRegionList(doc) {
  * which is all that switches masking on and off. The bare region list some
  * firmware serves instead (getPrivacyMask's fallback) has none, and a save
  * can't add one, so a panel must not offer the switch there. `enabled` is
- * the switch; without one it is true, the flag a save then writes to each
- * region: every mask the panel shows is saved switched on, where a device
- * honours the per-region flag at all. `screen` is the coordinate space the
- * device declares, when it does (see DEFAULT_PRIVACY_SCREEN otherwise).
+ * the switch; without one it is what the masks' own flags say, whether any
+ * of them is stored switched on, for a panel to show the device's state.
+ * It isn't what a save writes there: applyPrivacyMask saves every mask of
+ * such a document switched on. `screen` is the coordinate space the device
+ * declares, when it does (see DEFAULT_PRIVACY_SCREEN otherwise).
  * @param {XMLDocument} doc
  * @returns {PrivacyMaskConfig}
  * @example
  * readPrivacyMask(parseXml('<PrivacyMaskRegionList/>'))
- * // → {enabled: true, switchable: false, screen: null, regions: []}
+ * // → {enabled: false, switchable: false, screen: null, regions: []}
  */
 export function readPrivacyMask(doc) {
   const root = doc.documentElement;
   const size = childElement(root, 'normalizedScreenSize');
   const width = intText(size, 'normalizedScreenWidth');
   const height = intText(size, 'normalizedScreenHeight');
-  const slots = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
+  const masks = childElements(privacyRegionList(doc), 'PrivacyMaskRegion')
+    .filter(slot => hasArea(readCoordinates(slot)));
   const globalFlag = childText(root, 'enabled');
   return {
-    enabled: globalFlag === null || globalFlag === 'true',
+    enabled: globalFlag !== null
+      ? globalFlag === 'true'
+      : masks.some(slot => childText(slot, 'enabled') === 'true'),
     switchable: globalFlag !== null,
     screen: width > 0 && height > 0 ? { width, height } : null,
-    regions: slots.map(readCoordinates).filter(hasArea),
+    regions: masks.map(readCoordinates),
   };
 }
 
@@ -672,7 +676,11 @@ const PRIVACY_REGION_FIELDS = new Set(['id', 'enabled', 'RegionCoordinatesList']
 
 /**
  * Write privacy mask rectangles into the device's document. Like Hikvision's
- * web UI, each region's <enabled> is set to the global switch.
+ * web UI, each region's <enabled> is set to the global switch. A document
+ * without that switch (the bare PrivacyMaskRegionList, see readPrivacyMask)
+ * has nothing else to switch masks with, so its rectangles are written
+ * switched on, whatever `enabled` says: a mask saved there masks, where the
+ * device honours the per-region flag at all.
  *
  * `unused` decides what happens to region slots no rectangle needs:
  * - "remove" (default): the list is rebuilt to hold exactly the rectangles,
@@ -692,13 +700,14 @@ const PRIVACY_REGION_FIELDS = new Set(['id', 'enabled', 'RegionCoordinatesList']
  */
 export function applyPrivacyMask(doc, { enabled, rects, unused = 'remove' }) {
   const root = doc.documentElement;
-  setChildText(root, 'enabled', enabled);
+  const switchable = setChildText(root, 'enabled', enabled);
+  const regionsEnabled = switchable ? enabled : true;
 
   const list = privacyRegionList(doc) ?? appendElement(root, 'PrivacyMaskRegionList');
   const slots = childElements(list, 'PrivacyMaskRegion');
 
   if (unused === 'remove') {
-    list.replaceChildren(...rects.map((rect, i) => buildPrivacyRegion(list, i + 1, enabled, rect, slots[i])));
+    list.replaceChildren(...rects.map((rect, i) => buildPrivacyRegion(list, i + 1, regionsEnabled, rect, slots[i])));
     return;
   }
 
@@ -707,9 +716,9 @@ export function applyPrivacyMask(doc, { enabled, rects, unused = 'remove' }) {
     if (!region) {
       region = appendElement(list, 'PrivacyMaskRegion');
       appendElement(region, 'id', i + 1);
-      appendElement(region, 'enabled', enabled);
+      appendElement(region, 'enabled', regionsEnabled);
     }
-    setChildText(region, 'enabled', enabled);
+    setChildText(region, 'enabled', regionsEnabled);
     writeRectangle(region, rect);
   });
   for (const slot of slots.slice(rects.length)) {
