@@ -1,0 +1,19 @@
+{
+  "name": "hikvision-config-extension",
+  "version": "1.6.0",
+  "private": true,
+  "description": "Chrome extension for configuring Hikvision NVRs and cameras over ISAPI",
+  "type": "module",
+  "scripts": {},
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/chrome": "^0.3.0",
+    "@vitest/browser": "^4.1.11",
+    "@vitest/browser-playwright": "^4.1.11",
+    "eslint": "^10.11.0",
+    "globals": "^17.12.0",
+    "playwright": "^1.63.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}

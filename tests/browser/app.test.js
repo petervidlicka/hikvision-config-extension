@@ -1,0 +1,145 @@
+/**
+ * End-to-end: the real config page (app.html + src/main.js) against a mock
+ * NVR. Steps share one page, so they run in order.
+ */
+import { beforeAll, describe, expect, it, vi } from 'vitest';
+import appHtml from '../../extension/app.html?raw';
+import '../../extension/app.css';
+import { NVR_HOST, createChromeStub, createMockNvr } from '../support/mock-nvr.js';
+
+let device, chromeStub, state, dom;
+const $ = (id) => document.getElementById(id);
+const toast = () => $('toast').textContent;
+
+/** Dispatch canvas mouse events at a fraction of the canvas size. */
+function canvasPointer() {
+  const canvas = $('drawCanvas');
+  const at = (fx, fy) => {
+    const r = canvas.getBoundingClientRect();
+    return { clientX: r.left + fx * r.width, clientY: r.top + fy * r.height, bubbles: true, button: 0 };
+  };
+  const click = (fx, fy) => {
+    canvas.dispatchEvent(new MouseEvent('mousedown', at(fx, fy)));
+    canvas.dispatchEvent(new MouseEvent('mouseup', at(fx, fy)));
+  };
+  const dblclick = (fx, fy) => {
+    click(fx, fy);
+    click(fx, fy);
+    canvas.dispatchEvent(new MouseEvent('dblclick', at(fx, fy)));
+  };
+  return { click, dblclick };
+}
+
+beforeAll(async () => {
+  const page = new DOMParser().parseFromString(appHtml, 'text/html');
+  page.querySelectorAll('script').forEach(s => s.remove());
+  document.body.innerHTML = page.body.innerHTML;
+
+  chromeStub = createChromeStub();
+  vi.stubGlobal('chrome', chromeStub.chrome);
+  device = createMockNvr({ snapshotDelayMs: 1200, realFetch: fetch.bind(window) });
+  vi.stubGlobal('fetch', device.fetch);
+
+  await import('../../extension/src/main.js');
+  ({ state, dom } = await import('../../extension/src/state.js'));
+});
+
+describe('config page', () => {
+  it('connects and lists channels as text', async () => {
+    $('manualEntryBtn').click();
+    $('hostInput').value = NVR_HOST;
+    $('passInput').value = 'test-pass';
+    $('connectBtn').click();
+    await vi.waitFor(() => expect(state.channels).toHaveLength(2));
+
+    expect($('deviceInfo').textContent).toBe('Mock NVR • FW V4.0');
+    const names = [...document.querySelectorAll('.channel-item span')].map(s => s.textContent);
+    expect(names).toEqual(['Front & Gate', '<img src=x onerror=alert(1)>']);
+    expect(document.querySelector('.channel-item img')).toBeNull();
+    expect(chromeStub.store.session.password).toBe('test-pass');
+    expect(chromeStub.store.local.password).toBeUndefined();
+  });
+
+  it('streams frames as blobs without overlapping requests', async () => {
+    await vi.waitFor(() => expect(dom.videoFeed.src).toMatch(/^blob:/), { timeout: 3000 });
+    await new Promise(r => setTimeout(r, 2500));
+    expect(device.maxInFlightSnapshots).toBe(1);
+  });
+
+  it('loads motion detection with the device limits', async () => {
+    $('configSectionTab').click();
+    await vi.waitFor(() => expect(state.motionDoc).not.toBeNull());
+    expect($('sensitivitySlider').step).toBe('20');
+    expect($('motionMaxRegions').textContent).toBe('4');
+    expect($('motionPointRange').textContent).toBe('4–10');
+    expect($('detectHuman').checked).toBe(true);
+  });
+
+  it('enforces corner and region limits while drawing', () => {
+    const { click, dblclick } = canvasPointer();
+    $('clearMotionRegionsBtn').click();
+
+    click(0.05, 0.05); click(0.30, 0.05); dblclick(0.30, 0.35);
+    expect(state.motionRegions).toHaveLength(0);
+    expect(state.drawingPoints).toHaveLength(3);
+    expect(toast()).toMatch(/at least 4 corners/);
+
+    dblclick(0.05, 0.35);
+    expect(state.motionRegions.map(r => r.points.length)).toEqual([4]);
+
+    for (const [x, y] of [[0.55, 0.05], [0.05, 0.55], [0.55, 0.55]]) {
+      click(x, y); click(x + 0.3, y); click(x + 0.3, y + 0.3); dblclick(x, y + 0.3);
+    }
+    click(0.45, 0.45);
+    expect(state.motionRegions).toHaveLength(4);
+    expect(state.drawingPoints).toHaveLength(0);
+    expect(toast()).toMatch(/at most 4 detection regions/);
+  });
+
+  it('saves motion detection to the InputProxy URL in device units', async () => {
+    const slider = $('sensitivitySlider');
+    slider.value = 50;
+    slider.dispatchEvent(new Event('input'));
+    $('detectVehicle').click();
+    $('saveMotionBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(1));
+
+    const { path, body } = device.puts[0];
+    expect(path).toBe('/ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection');
+    expect(body).toMatch(/<sensitivityLevel>60<\/sensitivityLevel>/);
+    expect(body).toMatch(/<targetType[^>]*>human,vehicle<\/targetType>/);
+    expect(body.match(/<Region xmlns="">/g)).toHaveLength(4);
+    const coords = [...body.matchAll(/<position[XY]>(\d+)</g)].map(m => +m[1]);
+    expect(Math.min(...coords)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...coords)).toBeLessThanOrEqual(1000);
+    // Top-left corner of the first region: Y counts from the bottom
+    expect(body).toMatch(/<Region xmlns=""><id>1<\/id><RegionCoordinatesList><RegionCoordinates><positionX>(4\d|5\d)<\/positionX><positionY>9[45]\d<\/positionY>/);
+  });
+
+  it('keeps unmanaged event actions when saving', async () => {
+    $('configTabs').querySelector('[data-tool="events"]').click();
+    await vi.waitFor(() => expect(state.eventTriggerDoc).not.toBeNull());
+    $('eventToggle_center').click();
+    $('eventToggle_record').click();
+    $('saveEventsBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(2));
+
+    const { path, body } = device.puts[1];
+    expect(path).toBe('/ISAPI/Event/triggers/VMD-1');
+    expect([...body.matchAll(/<notificationMethod>(\w+)/g)].map(m => m[1])).toEqual(['IO', 'FTP', 'center']);
+    expect(body).toContain('<outputIOPortID>2</outputIOPortID>');
+  });
+
+  it('stops everything after one failed login when the device rejects the password', async () => {
+    $('liveViewSectionTab').click();
+    device.rejectAuth = true;
+    await vi.waitFor(() => expect(state.connected).toBe(false), { timeout: 5000 });
+    const afterRejection = device.requests.length;
+    await new Promise(r => setTimeout(r, 2500));
+
+    expect(device.requests.length).toBe(afterRejection);
+    expect($('connectionForm').style.display).toBe('block');
+    expect($('passInput').value).toBe('');
+    expect(toast()).toMatch(/rejected the login/);
+  });
+});
