@@ -83,6 +83,19 @@ describe('displaySize', () => {
     expect(displaySize({ width: Math.round(1000 * justOff), height: 1000 }, mainStream)).not.toBeNull();
   });
 
+  it('compares a turned picture (corridor mode) with its stream turned the same way, not with the listed landscape', () => {
+    // The stream list keeps the size the sensor encodes; the still is turned by 90°
+    expect(displaySize({ width: 1080, height: 1920 }, { width: 1920, height: 1080 })).toBeNull();
+    expect(displaySize({ width: 1520, height: 2688 }, mainStream)).toBeNull();
+    expect(displaySize({ width: 1080, height: 1920 }, mainStream)).toBeNull(); // 0.5 % off 1520:2688
+    // A turned picture that is squeezed too is stretched back to the turned aspect, keeping every column
+    const turned = displaySize({ width: 576, height: 704 }, mainStream);
+    expect(turned?.width).toBe(576);
+    expect(turned?.height).toBeCloseTo(576 * 2688 / 1520, 6);
+    // And a landscape picture of a stream listed portrait the same way round
+    expect(displaySize({ width: 1920, height: 1080 }, { width: 1080, height: 1920 })).toBeNull();
+  });
+
   it('leaves the picture as it is when either size is unknown', () => {
     expect(displaySize({ width: 704, height: 576 }, undefined)).toBeNull();
     expect(displaySize({ width: 704, height: 576 }, null)).toBeNull();

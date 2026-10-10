@@ -376,7 +376,13 @@ channel's main-stream aspect when its own differs from it by more than 3 %
 (704×576 → 1018.6×576 at 16:9), with CSS `aspect-ratio` and
 `object-fit: fill`. The 1920×1088 still (0.2 % off 16:9) and the 1280×720
 stored pictures are shown as they are, as is any frame when the stream list
-can't be read. The drawing canvas follows the displayed size; its pixels stay
+can't be read. A squeeze never turns a picture, but a camera in corridor mode
+does (by 90°) while the stream list keeps the landscape size it encodes, as
+Hikvision's web UI knows (it swaps the listed width and height when
+`/ISAPI/Image/channels/{ch}` has `Corridor/enabled`). So a still in the other
+orientation than its stream is compared with the stream turned the same way:
+a 1080×1920 still of a stream listed 1920×1080 is shown as it is, not
+flattened into a 16:9 box. The drawing canvas follows the displayed size; its pixels stay
 the frame's. So the canvas changes size with the frame: 704×576 SD, 1920×1088
 HD, a 1280×720 stored picture in Playback (cleared when Playback is left), or
 the default 300×150 before the first frame. The motion and privacy tools

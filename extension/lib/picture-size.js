@@ -87,17 +87,26 @@ export function sameSize(a, b) {
  * ASPECT_TOLERANCE. The squeezed side is stretched, rather than the other
  * shrunk, so no row or column of the picture is lost: a 704×576 still of a
  * 16:9 camera is shown 1018.6×576, not 704×396.
+ *
+ * A squeeze never turns a picture from landscape to portrait or back, but a
+ * camera may turn its picture (Hikvision's corridor mode, which rotates it
+ * by 90°) while the stream list keeps the size the sensor encodes: a
+ * 1080×1920 still of a stream listed 1920×1080. A picture in the other
+ * orientation than its stream is compared with the stream turned the same
+ * way, so it isn't flattened into the listed landscape box.
  * @param {Size} picture - the picture's own size in pixels
  * @param {Size|null|undefined} stream - the size of the channel's main stream; unknown when missing
  * @returns {Size|null} null when the picture already has the stream's aspect, or either size is unknown
  * @example
  * displaySize({width: 704, height: 576}, {width: 2688, height: 1520}) // → {width: 1018.6…, height: 576}
  * displaySize({width: 1920, height: 1088}, {width: 2688, height: 1520}) // → null
+ * displaySize({width: 1080, height: 1920}, {width: 1920, height: 1080}) // → null (turned, not squeezed)
  */
 export function displaySize(picture, stream) {
   if (!stream || !isSize(picture) || !isSize(stream)) return null;
-  const aspect = stream.width / stream.height;
   const own = picture.width / picture.height;
+  const listed = stream.width / stream.height;
+  const aspect = (own < 1) === (listed < 1) ? listed : 1 / listed;
   if (Math.abs(own / aspect - 1) <= ASPECT_TOLERANCE) return null;
   return own < aspect
     ? { width: picture.height * aspect, height: picture.height }
