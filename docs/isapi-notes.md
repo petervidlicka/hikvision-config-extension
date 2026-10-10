@@ -299,6 +299,44 @@ view's timing: 1.1 new pictures a second from ~3 requests a second, against
 time never repeats, so it keeps the fixed interval. Feeds stop asking while
 the page is hidden and resume when it is shown.
 
+### Picture size, HD and aspect
+
+The DS-7604NI's plain `/picture` is 704×576 (~66 KB) on the main and the sub
+stream alike, so asking `{id}01` for "HD" got the same picture as SD. The
+cameras' streams are 2688×1520 (main) and 640×360 (sub), both 16:9
+(`/ISAPI/Streaming/channels` lists every IP camera's streams; StreamingProxy
+lists the same). The 704×576 still is the whole 16:9 picture squeezed (no crop,
+no letterbox; the OSD text is narrow and tall), so shown at its own pixel
+aspect everything looks 44 % too tall. With
+`?videoResolutionWidth=W&videoResolutionHeight=H` (any size other than
+704×576, 2688×1520 included) the NVR sends a 1920×1088 still instead
+(~280–345 KB, ~250 ms), also refreshed about once a second; 704×576 asked
+gives the plain still. Hikvision's web UI passes no size. These parameters
+are documented ISAPI options, but other firmware may refuse or ignore them.
+
+So, in the single view only (the grid stays on the plain sub-stream still,
+4 × 66 KB), "HD" uses the sized URL where the plain main-stream still can't be
+full size (`fullSizeUpgrade` in `lib/snapshots.js`): on an NVR's IP camera
+(`digital` channel), or where the plain `{id}01` and `{id}02` stills have the
+same size. A camera connected directly already serves its native main-stream
+size on `{id}01`, so it keeps the plain URL. The size asked for is the
+channel's own main stream (`{id}01` in the stream list, read once per device at
+Connect; 1920×1080 when unknown), so a device that honours it isn't asked to
+scale down. The outcome is remembered per channel until disconnect: a bigger
+still keeps the sized URL; an error answer, something other than an image or
+a still no bigger than the plain one keeps the plain URL. A timeout decides
+nothing. The sized URL is still a `/picture` URL, so it is read as bytes with
+the 10 s full-size time limit.
+
+Every frame (single view, grid cells, playback stills) is shown at its
+channel's main-stream aspect when its own differs from it by more than 3 %
+(`displaySize` in `lib/picture-size.js`): the squeezed side is stretched
+(704×576 → 1018.6×576 at 16:9), with CSS `aspect-ratio` and
+`object-fit: fill`. The 1920×1088 still (0.2 % off 16:9) and the 1280×720
+stored pictures are shown as they are, as is any frame when the stream list
+can't be read. The drawing canvas follows the displayed size; its pixels stay
+the frame's.
+
 ## Logins and lockout
 
 The device locks a computer (by IP address) out after a few failed logins,

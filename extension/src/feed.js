@@ -5,10 +5,12 @@
  * often it is asked meanwhile). A repeat of the last frame isn't shown again
  * or counted, so the fps readout is the rate of new pictures (see
  * lib/snapshot-pacer.js). No feed asks the device for anything while the
- * page is hidden.
+ * page is hidden. Every frame is shown at its camera's real aspect, which an
+ * NVR's squeezed still doesn't have (fitStreamAspect).
  */
 
 import { Isapi } from '../lib/isapi.js';
+import { displaySize } from '../lib/picture-size.js';
 import { SnapshotPacer } from '../lib/snapshot-pacer.js';
 import { pollSnapshots } from '../lib/snapshots.js';
 import { redraw, resizeCanvas } from './canvas.js';
@@ -223,13 +225,53 @@ export function showFrame(img, blob) {
 }
 
 /**
- * Clear an <img> that was showing frames from showFrame().
+ * Clear an <img> that was showing frames from showFrame(), and the size
+ * fitStreamAspect gave it for them.
  * @param {HTMLImageElement} img
  */
 export function clearFrame(img) {
   if (img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
   delete img.dataset.objectUrl;
   img.removeAttribute('src');
+  setStreamAspect(img, null);
+}
+
+/**
+ * Show the frame an <img> has loaded at its camera's real aspect: the
+ * aspect of the channel's main stream, when the frame's own differs from it
+ * (displaySize in lib/picture-size.js). An NVR's 704×576 still of a 16:9
+ * camera is the whole picture squeezed, so it is stretched back to 16:9; a
+ * frame that already has the aspect (a camera's own, an NVR's full-size
+ * still), or a channel whose stream size isn't known, is shown as it is.
+ *
+ * Only how the frame is displayed changes: the drawing canvas over the
+ * single view follows the <img>'s displayed size (resizeCanvas), and
+ * keeps the frame's pixels as its coordinates.
+ * @param {HTMLImageElement} img - once its frame has loaded
+ * @param {string|null} channelId - whose frame it is
+ */
+export function fitStreamAspect(img, channelId) {
+  const stream = channelId === null ? undefined : channelInfo(channelId).mainStreamSize;
+  setStreamAspect(img, displaySize({ width: img.naturalWidth, height: img.naturalHeight }, stream));
+}
+
+/**
+ * Give an <img> the size its frame is to be shown at, for the stylesheet
+ * (.stream-aspect in app.css): --stream-aspect for a grid cell, which fits
+ * the frame into the cell at that aspect, and --stream-width for the single
+ * view, which shows it that wide unless the page is narrower.
+ * @param {HTMLImageElement} img
+ * @param {import('../lib/config-xml.js').Size|null} size - null to show the frame at its own aspect
+ */
+function setStreamAspect(img, size) {
+  img.classList.toggle('stream-aspect', size !== null);
+  if (size) {
+    img.style.setProperty('--stream-aspect', String(size.width / size.height));
+    img.style.setProperty('--stream-width', `${size.width}px`);
+  } else {
+    img.style.removeProperty('--stream-aspect');
+    img.style.removeProperty('--stream-width');
+  }
 }
 
 /**
@@ -245,6 +287,7 @@ export function startSnapshotFeed(channelId) {
   let frameCount = 0;
   let noSignal = false;
   dom.videoFeed.onload = () => {
+    fitStreamAspect(dom.videoFeed, channelId);
     resizeCanvas();
     redraw();
     frameCount++;
@@ -304,6 +347,7 @@ export function startGridCellFeed(cellIdx, channelId) {
   noFeed.style.display = 'none';
 
   img.onload = () => {
+    fitStreamAspect(img, channelId);
     cell.classList.remove('is-loading');
     img.classList.add('loaded');
   };

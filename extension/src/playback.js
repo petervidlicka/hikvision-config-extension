@@ -10,7 +10,7 @@
 import { AuthError } from '../lib/digest-auth.js';
 import { Isapi } from '../lib/isapi.js';
 import { nextRecordingStart, recordingAt } from '../lib/playback.js';
-import { clearFrame, showFrame } from './feed.js';
+import { clearFrame, fitStreamAspect, showFrame } from './feed.js';
 import { resizeCanvas } from './canvas.js';
 import { byId, dom, queryAll, state } from './state.js';
 import { errorMessage, setStatus } from './ui.js';
@@ -299,6 +299,16 @@ export function seekFromClick(e) {
 }
 
 /**
+ * Lay out a stored picture or recorded frame once it has loaded: at the
+ * camera's aspect, like a live frame (a recorded frame is the NVR's squeezed
+ * 704×576 still too), with the drawing canvas over it.
+ */
+function fitPlaybackFrame() {
+  fitStreamAspect(dom.videoFeed, state.activeChannel);
+  resizeCanvas();
+}
+
+/**
  * Show a stored picture and put the playhead at its time.
  * @param {StoredPicture} picture
  */
@@ -311,7 +321,7 @@ async function showStoredPicture(picture) {
   try {
     const blob = await Isapi.getStoredPicture(state.config, picture.uri);
     if (state.activeSection !== 'playback') return;
-    dom.videoFeed.onload = () => resizeCanvas();
+    dom.videoFeed.onload = fitPlaybackFrame;
     showFrame(dom.videoFeed, blob);
     setStatus(`Stored picture from ${picture.time.toTimeString().slice(0, 8)}`);
   } catch (err) {
@@ -346,7 +356,7 @@ async function showFrameAt(time) {
       return;
     }
     pb.framesSupported = true;
-    dom.videoFeed.onload = () => resizeCanvas();
+    dom.videoFeed.onload = fitPlaybackFrame;
     showFrame(dom.videoFeed, blob);
   } catch (err) {
     if (!(err instanceof AuthError)) setStatus(`Couldn’t load frame: ${errorMessage(err)}`);

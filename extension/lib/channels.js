@@ -10,13 +10,17 @@
  * (StreamingChannel, /ISAPI/Streaming/channels).
  *
  * Whether an IP camera is connected comes from a third document
- * (InputProxyChannelStatus, /ISAPI/ContentMgmt/InputProxy/channels/status).
- * Fetching all of these is up to lib/isapi.js; everything here is pure.
+ * (InputProxyChannelStatus, /ISAPI/ContentMgmt/InputProxy/channels/status),
+ * and the size of each camera's picture from the stream list (its main
+ * stream's resolution, see readMainStreamSizes). Fetching all of these is up
+ * to lib/isapi.js; everything here is pure.
  *
  * Depends on lib/xml.js.
  */
 
 import { childElement, childElements, childText } from './xml.js';
+
+/** @typedef {import('./config-xml.js').Size} Size */
 
 /**
  * A camera channel.
@@ -31,6 +35,10 @@ import { childElement, childElements, childText } from './xml.js';
  * @property {boolean} [online] - false when the device reports the camera
  *   disconnected (an IP camera) or its input switched off (an analog one);
  *   missing when the device doesn't say, which counts as online
+ * @property {Size} [mainStreamSize] - the resolution of the camera's main stream as the
+ *   device lists it (e.g. 2688×1520): the camera's real picture aspect, which an NVR's
+ *   squeezed 704×576 still is shown at, and the size to ask an NVR for a full-size
+ *   still (see lib/picture-size.js, fullSizeUpgrade in lib/snapshots.js); missing when unknown
  */
 
 /** The element each of the device's own channel lists holds its channels in. */
@@ -129,6 +137,47 @@ export function applyChannelStatus(channels, status) {
   return channels.map(ch => {
     const online = ch.kind === 'digital' ? status.get(ch.id) : undefined;
     return online === undefined ? ch : { ...ch, online };
+  });
+}
+
+/**
+ * Read the resolution of each channel's main stream from the stream list
+ * (StreamingChannel, /ISAPI/Streaming/channels): stream {id}01's
+ * Video/videoResolutionWidth and videoResolutionHeight. The main stream
+ * rather than the sub stream, because a sub stream is often a 4:3 size such
+ * as 704×576 on a 16:9 camera, itself squeezed. An NVR lists every IP
+ * camera's streams here (the DS-7604NI: 2688×1520 main, 640×360 sub).
+ * @param {Element} root - the StreamingChannelList element
+ * @returns {Map<string, Size>} channel id → its main stream's size; channels without one are left out
+ * @example
+ * readMainStreamSizes(list) // → Map {'1' => {width: 2688, height: 1520}, '2' => …}
+ */
+export function readMainStreamSizes(root) {
+  /** @type {Map<string, Size>} */
+  const sizes = new Map();
+  for (const el of childElements(root, 'StreamingChannel')) {
+    const streamId = childText(el, 'id') ?? '';
+    if (!/^\d+01$/.test(streamId)) continue;
+    const video = childElement(el, 'Video');
+    const width = Number(childText(video, 'videoResolutionWidth'));
+    const height = Number(childText(video, 'videoResolutionHeight'));
+    if (Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0) {
+      sizes.set(String(Number(streamId.slice(0, -2))), { width, height });
+    }
+  }
+  return sizes;
+}
+
+/**
+ * Give each channel its main stream's size, by channel id.
+ * @param {Channel[]} channels
+ * @param {Map<string, Size>} sizes - from readMainStreamSizes
+ * @returns {Channel[]} channels missing from `sizes` are returned as they were
+ */
+export function applyStreamSizes(channels, sizes) {
+  return channels.map(ch => {
+    const mainStreamSize = sizes.get(ch.id);
+    return mainStreamSize ? { ...ch, mainStreamSize } : ch;
   });
 }
 

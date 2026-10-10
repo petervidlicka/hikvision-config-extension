@@ -6,7 +6,8 @@
  * privacy masks and event triggers stored the way the NVR stores them, the
  * cameras on channels 3 and 4 with a relay, white light and speaker,
  * errors and write results as <ResponseStatus> bodies, the userCheck
- * login check, and which cameras are online.
+ * login check, which cameras are online, their 2688×1520 main streams, and
+ * the NVR's squeezed 704×576 snapshots.
  *
  * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
  */
@@ -22,6 +23,7 @@ import whiteLightAlarmChannels from '../fixtures/whiteLightAlarmChannels-nvr.jso
 import audioAlarmChannels from '../fixtures/audioAlarmChannels-nvr.json?raw';
 import userCheck from '../fixtures/userCheck-nvr.xml?raw';
 import channelStatus from '../fixtures/inputProxyChannelsStatus-nvr.xml?raw';
+import streamingChannels from '../fixtures/streamingChannels-nvr.xml?raw';
 
 export const NVR_HOST = '192.168.0.108';
 
@@ -164,12 +166,29 @@ function createTriggerStore() {
 
 let framesDrawn = 0;
 
-/** A small JPEG frame, a different one every call: its colour drifts and it shows the time and a counter. */
-async function frame() {
-  const canvas = new OffscreenCanvas(320, 180);
+/** The DS-7604NI's plain snapshot: 4CIF, whatever the camera's aspect. */
+export const STILL_SIZE = Object.freeze({ width: 704, height: 576 });
+/** The DS-7604NI's snapshot when asked for any other size. */
+export const FULL_SIZE_STILL = Object.freeze({ width: 1920, height: 1088 });
+
+/**
+ * A JPEG frame of a 16:9 scene, a different one every call: its colour
+ * drifts, it shows the time and a counter, and a circle. Drawn into any size
+ * the way the DS-7604NI does, the whole scene stretched to fill it, so in a
+ * 704×576 frame the circle is a tall ellipse until shown at 16:9.
+ * @param {{width: number, height: number}} size
+ */
+async function frame({ width, height }) {
+  const canvas = new OffscreenCanvas(width, height);
   const g = canvas.getContext('2d');
+  g.scale(width / 320, height / 180);
   g.fillStyle = `hsl(${(Date.now() / 20) % 360} 60% 40%)`;
   g.fillRect(0, 0, 320, 180);
+  g.strokeStyle = '#fff';
+  g.lineWidth = 3;
+  g.beginPath();
+  g.arc(160, 100, 50, 0, 2 * Math.PI);
+  g.stroke();
   g.fillStyle = '#fff';
   g.font = '14px sans-serif';
   g.fillText(`${new Date().toISOString().slice(11, 23)} #${++framesDrawn}`, 8, 20);
@@ -222,17 +241,26 @@ function todaysPictures() {
  * are a new picture every time, like a camera's, unless `snapshotRefreshMs`
  * is set: then each channel serves the same cached still until it is
  * refreshed, every that many ms, the same on the main and sub stream and
- * through StreamingProxy, like the DS-7604NI (about every 1000 ms).
+ * through StreamingProxy, like the DS-7604NI (about every 1000 ms). Like
+ * its, they are `stillSize` (704×576, a 16:9 scene squeezed), and
+ * `fullSizeStill` (1920×1088) when the request asks for any other size with
+ * videoResolutionWidth/Height; set `fullSizeStill` to null for firmware that
+ * ignores the size. `urls` lists each request with its query, as `requests`
+ * does without.
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
-  /** Each channel's cached still, when snapshotRefreshMs is set. @type {Map<string, {refresh: number, blob: Blob}>} */
+  /** Each channel's cached still per size, when snapshotRefreshMs is set. @type {Map<string, {refresh: number, blob: Blob}>} */
   const stills = new Map();
   const device = {
     snapshotDelayMs,
     /** 0: a new picture every request; else how often each channel's still changes */
     snapshotRefreshMs: 0,
-    requests: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
+    /** @type {{width: number, height: number}} */
+    stillSize: STILL_SIZE,
+    /** @type {{width: number, height: number}|null} */
+    fullSizeStill: FULL_SIZE_STILL,
+    requests: [], urls: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
     unreachable: false, failedLogins: 0, noncesIssued: 0,
     /** @type {null | {lockStatus: 'lock'|'unlock', unlockTime: number, retryLoginTime: number}} */
     loginLock: null,
@@ -250,14 +278,30 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
   };
   const xml = (body, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/xml; charset="UTF-8"' } });
   const json = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/json; charset="UTF-8"' } });
-  /** A channel's live picture as it is now. @param {string} channel */
-  const livePicture = async (channel) => {
-    if (!device.snapshotRefreshMs) return frame();
+  /**
+   * The size of the still a snapshot request gets: the full-size one when it
+   * asks for a size other than the plain still's, like the DS-7604NI.
+   * @param {URLSearchParams} query
+   */
+  const stillSizeFor = (query) => {
+    const width = Number(query.get('videoResolutionWidth'));
+    const height = Number(query.get('videoResolutionHeight'));
+    const asksOtherSize = width > 0 && height > 0 && (width !== device.stillSize.width || height !== device.stillSize.height);
+    return asksOtherSize && device.fullSizeStill ? device.fullSizeStill : device.stillSize;
+  };
+  /**
+   * A channel's live picture as it is now.
+   * @param {string} channel
+   * @param {{width: number, height: number}} size
+   */
+  const livePicture = async (channel, size) => {
+    if (!device.snapshotRefreshMs) return frame(size);
     const refresh = Math.floor(performance.now() / device.snapshotRefreshMs);
-    const still = stills.get(channel);
+    const key = `${channel}|${size.width}x${size.height}`;
+    const still = stills.get(key);
     if (still?.refresh === refresh) return still.blob;
-    const blob = await frame();
-    stills.set(channel, { refresh, blob });
+    const blob = await frame(size);
+    stills.set(key, { refresh, blob });
     return blob;
   };
 
@@ -267,6 +311,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     const method = opts.method || 'GET';
     const p = u.pathname;
     device.requests.push(`${method} ${p}`);
+    device.urls.push(`${method} ${p}${u.search}`);
     // Awaited only when set, so other requests reach the device in the same tick as before
     const hold = device.holds[`${method} ${p}`];
     if (hold) await hold;
@@ -311,14 +356,15 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (method === 'POST' && p === '/ISAPI/ContentMgmt/search') {
       return xml(/<trackID>\d+03<\/trackID>/.test(String(opts.body)) ? todaysPictures() : todaysRecordings());
     }
-    if (p.startsWith('/picture/Streaming/tracks/')) return new Response(await frame(), { status: 200 });
+    // A stored picture is 1280×720 on the DS-7604NI
+    if (p.startsWith('/picture/Streaming/tracks/')) return new Response(await frame({ width: 1280, height: 720 }), { status: 200 });
     if (method === 'POST' && p.endsWith('/dailyDistribution')) {
       return xml(`<trackDailyDistribution><dayList><day><dayOfMonth>${new Date().getDate()}</dayOfMonth><record>true</record></day></dayList></trackDailyDistribution>`);
     }
     if (u.searchParams.has('starttime') && p.endsWith('/picture')) {
       const before2001 = (u.searchParams.get('starttime') ?? '').startsWith('2000');
       const image = device.recordedFrames === 'ignoresTime' || (device.recordedFrames === 'real' && !before2001);
-      return image ? new Response(await frame(), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
+      return image ? new Response(await frame(device.stillSize), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
     }
     if (p === '/ISAPI/Security/userCheck') return xml(userCheck);
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
@@ -334,6 +380,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         channel(4, 'Slide', '192.168.254.3') +
         '</InputProxyChannelList>');
     }
+    if (p === '/ISAPI/Streaming/channels') return xml(streamingChannels);
     if (p === '/ISAPI/ContentMgmt/InputProxy/channels/status') {
       // The DS-7604NI's status, with <online> false for each camera set offline
       return xml(channelStatus.replace(/(<id>(\d+)<\/id>[\s\S]*?<online>)true</g,
@@ -366,7 +413,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         };
         opts.signal?.addEventListener('abort', onAbort, { once: true });
       });
-      return new Response(await livePicture(snapshot[1]), { status: 200 });
+      return new Response(await livePicture(snapshot[1], stillSizeFor(u.searchParams)), { status: 200 });
     }
     // Channel 2 is a camera that only supports the cell grid
     if (p.endsWith('/motionDetection/capabilities')) {

@@ -25,6 +25,7 @@ import inputProxyChannelsStatusNvr from '../fixtures/inputProxyChannelsStatus-nv
 import videoInputChannelsHybrid from '../fixtures/videoInputChannels-hybrid.xml?raw';
 import inputProxyChannelsHybrid from '../fixtures/inputProxyChannels-hybrid.xml?raw';
 import userCheckNvr from '../fixtures/userCheck-nvr.xml?raw';
+import streamingChannelsNvr from '../fixtures/streamingChannels-nvr.xml?raw';
 
 export const fixtures = {
   // motionDetectionNvr is the DS-7604NI's channel 1 config as captured
@@ -40,6 +41,8 @@ export const fixtures = {
   inputProxyChannelsStatusNvr,
   // A hybrid DVR (synthetic): analog inputs 1–4, input 4 switched off, and IP cameras 5–6
   videoInputChannelsHybrid, inputProxyChannelsHybrid,
+  // The DS-7604NI's stream list: each camera's main stream 2688×1520, sub stream 640×360
+  streamingChannelsNvr,
 };
 
 const captured = import.meta.glob('../fixtures/local/*_motionDetection.xml', { query: '?raw', import: 'default', eager: true });

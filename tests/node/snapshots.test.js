@@ -7,10 +7,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthError } from '../../extension/lib/digest-auth.js';
 import { IsapiError, NotAnImageError, TimeoutError } from '../../extension/lib/errors.js';
+import { jpegSize } from '../../extension/lib/picture-size.js';
 import { SnapshotPacer } from '../../extension/lib/snapshot-pacer.js';
 import {
-  NO_SIGNAL_AFTER_FAILURES, OFFLINE_START_FAILURES, RESOLVE_AGAIN_AFTER_FAILURES, SNAPSHOT_RETRY_MAX_MS, SnapshotSource,
-  isJpeg, pollSnapshots, snapshotPaths, snapshotRetryDelay,
+  DEFAULT_FULL_SIZE, NO_SIGNAL_AFTER_FAILURES, OFFLINE_START_FAILURES, RESOLVE_AGAIN_AFTER_FAILURES, SNAPSHOT_RETRY_MAX_MS,
+  SnapshotSource, fullSizePicturePath, fullSizeUpgrade, isJpeg, pollSnapshots, snapshotPaths, snapshotRetryDelay,
 } from '../../extension/lib/snapshots.js';
 
 /** An error answer as the DS-7604NI gives it. */
@@ -21,6 +22,20 @@ const noCamera = () => answer(503, 'serviceUnavailable');
 let frameSeq = 0;
 /** A JPEG's start marker and a counter: a new picture every call, like a camera. */
 const frame = () => new Uint8Array([0xff, 0xd8, ++frameSeq >> 8, frameSeq & 0xff]);
+/**
+ * The start of a JPEG of a given size, up to its frame header, and a counter
+ * so each is a new picture.
+ * @param {number} width
+ * @param {number} height
+ */
+const sizedFrame = (width, height) => () => new Uint8Array([
+  0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, height >> 8, height & 0xff, width >> 8, width & 0xff,
+  0x03, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1, ++frameSeq >> 8, frameSeq & 0xff,
+]);
+/** The DS-7604NI's plain still, the same on both streams. */
+const nvrStill = sizedFrame(704, 576);
+/** The DS-7604NI's still when asked for a size. */
+const nvrFullStill = sizedFrame(1920, 1088);
 /** The single view's pacing. */
 const singleViewPacer = () => new SnapshotPacer({ intervalMs: 200, repeatStepMs: 150 });
 
@@ -156,6 +171,148 @@ describe('SnapshotSource', () => {
     controller.abort();
     await expect(source.next({ signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
     expect(source.failures).toBe(0);
+  });
+});
+
+describe('full-size stills', () => {
+  const nvrCamera = { id: '1', kind: 'digital' };
+  const [plain] = snapshotPaths(nvrCamera, 'main');
+  const sized = '/ISAPI/Streaming/channels/101/picture?videoResolutionWidth=2688&videoResolutionHeight=1520';
+  const mainStream = { width: 2688, height: 1520 };
+
+  /**
+   * A main-stream SnapshotSource for a channel with fullSizeUpgrade, and what it decided.
+   * @param {{id: string, kind: 'analog'|'digital'}} channel
+   * @param {ReturnType<typeof fakeDevice>} device
+   * @param {{streamSize: {width: number, height: number}|undefined}} [options] - the main stream's size, if known
+   */
+  const mainSource = (channel, device, options = { streamSize: mainStream }) => {
+    const { streamSize } = options;
+    const decided = [];
+    const source = new SnapshotSource(snapshotPaths(channel, 'main'), device.fetchSnapshot, {
+      upgrade: fullSizeUpgrade({ channel, streamSize, fetchSnapshot: device.fetchSnapshot, remember: path => decided.push(path) }),
+    });
+    return { source, decided };
+  };
+
+  it('asks for the main stream’s own size', () => {
+    expect(fullSizePicturePath('1', mainStream)).toBe(sized);
+    expect(fullSizePicturePath('12', DEFAULT_FULL_SIZE))
+      .toBe('/ISAPI/Streaming/channels/1201/picture?videoResolutionWidth=1920&videoResolutionHeight=1080');
+  });
+
+  it('switches an NVR’s IP camera to its full-size still, and keeps asking only that', async () => {
+    const device = fakeDevice({ [plain]: nvrStill, [sized]: nvrFullStill });
+    const { source, decided } = mainSource(nvrCamera, device);
+    expect(jpegSize(await source.next())).toEqual({ width: 1920, height: 1088 });
+    await source.next();
+    expect(device.calls).toEqual([plain, sized, sized]);
+    expect(decided).toEqual([sized]);
+    expect([source.path, source.paths[0]]).toEqual([sized, sized]);
+  });
+
+  it('asks for 1920×1080 when the stream size isn’t known', async () => {
+    const fallback = fullSizePicturePath('1', DEFAULT_FULL_SIZE);
+    const device = fakeDevice({ [plain]: nvrStill, [fallback]: nvrFullStill });
+    const { source, decided } = mainSource(nvrCamera, device, { streamSize: undefined });
+    await source.next();
+    expect(decided).toEqual([fallback]);
+  });
+
+  it('keeps the plain still when the sized one is refused, not an image, or no bigger', async () => {
+    const answers = [
+      () => answer(400, 'badParameters'),
+      () => answer(503, 'serviceUnavailable'),
+      () => new NotAnImageError({ method: 'GET', path: sized, contentType: 'text/html' }),
+      nvrStill, // firmware that ignores the size
+    ];
+    for (const sizedAnswer of answers) {
+      const device = fakeDevice({ [plain]: nvrStill, [sized]: sizedAnswer });
+      const { source, decided } = mainSource(nvrCamera, device);
+      expect(jpegSize(await source.next())).toEqual({ width: 704, height: 576 });
+      await source.next();
+      expect(device.calls).toEqual([plain, sized, plain]);
+      expect(decided).toEqual([null]);
+    }
+  });
+
+  it('decides nothing when the sized request gets no answer, and serves the plain still meanwhile', async () => {
+    const timeout = new TimeoutError({ method: 'GET', path: sized, address: 'h:80', timeoutMs: 10000 });
+    const device = fakeDevice({ [plain]: nvrStill, [sized]: () => timeout });
+    const { source, decided } = mainSource(nvrCamera, device);
+    expect(jpegSize(await source.next())).toEqual({ width: 704, height: 576 });
+    expect(decided).toEqual([]);
+    expect(source.path).toBe(plain);
+  });
+
+  it('looks again after a pause cut it short', async () => {
+    const controller = new AbortController();
+    const device = fakeDevice({
+      [plain]: nvrStill,
+      // The feed pauses while the first sized request is in flight
+      [sized]: () => {
+        if (controller.signal.aborted) return nvrFullStill();
+        controller.abort();
+        return controller.signal.reason;
+      },
+    });
+    const { source, decided } = mainSource(nvrCamera, device);
+    await expect(source.next({ signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect([decided, source.failures]).toEqual([[], 0]);
+    // Resumed: the plain URL, then the sized one again
+    expect(jpegSize(await source.next())).toEqual({ width: 1920, height: 1088 });
+    expect(device.calls).toEqual([plain, sized, plain, sized]);
+    expect(decided).toEqual([sized]);
+  });
+
+  it('asks a camera’s main stream for a size only when its stills are the same size on both streams', async () => {
+    const camera = { id: '1', kind: 'analog' };
+    const [sub] = snapshotPaths(camera, 'sub');
+
+    // A camera: its main-stream still is full size already
+    let device = fakeDevice({ [plain]: sizedFrame(2688, 1520), [sub]: sizedFrame(640, 360) });
+    let { source, decided } = mainSource(camera, device);
+    expect(jpegSize(await source.next())).toEqual({ width: 2688, height: 1520 });
+    expect([device.calls, decided]).toEqual([[plain, sub], [null]]);
+
+    // A camera without a sub stream
+    device = fakeDevice({ [plain]: sizedFrame(2688, 1520) });
+    ({ source, decided } = mainSource(camera, device));
+    await source.next();
+    expect([device.calls, decided]).toEqual([[plain, sub], [null]]);
+
+    // An analog channel serving the same small still on both streams, like the DS-7604NI's IP cameras
+    device = fakeDevice({ [plain]: nvrStill, [sub]: nvrStill, [sized]: nvrFullStill });
+    ({ source, decided } = mainSource(camera, device));
+    expect(jpegSize(await source.next())).toEqual({ width: 1920, height: 1088 });
+    expect([device.calls, decided]).toEqual([[plain, sub, sized], [sized]]);
+  });
+
+  it('only upgrades the plain main-stream URL, and only a frame whose size it can read', async () => {
+    // Served at StreamingProxy only: there is no sized form of that URL
+    const proxy = '/ISAPI/ContentMgmt/StreamingProxy/channels/101/picture';
+    let device = fakeDevice({ [proxy]: nvrStill });
+    let { source, decided } = mainSource(nvrCamera, device);
+    await source.next();
+    expect([device.calls, decided]).toEqual([[plain, proxy], []]);
+
+    device = fakeDevice({ [plain]: frame });
+    ({ source, decided } = mainSource(nvrCamera, device));
+    await source.next();
+    expect([device.calls, decided]).toEqual([[plain], []]);
+  });
+
+  it('tries the full-size URL first when the URL is to be found again', async () => {
+    let sizedAnswer = nvrFullStill;
+    const device = fakeDevice({ [plain]: nvrStill, [sized]: () => sizedAnswer() });
+    const { source } = mainSource(nvrCamera, device);
+    await source.next();
+    sizedAnswer = () => answer(403, 'notSupport');
+    for (let i = 0; i < RESOLVE_AGAIN_AFTER_FAILURES; i++) await expect(source.next()).rejects.toBeInstanceOf(IsapiError);
+    const before = device.calls.length;
+    await source.next();
+    expect(device.calls.slice(before)).toEqual([sized, plain]);
+    expect(source.path).toBe(plain);
   });
 });
 

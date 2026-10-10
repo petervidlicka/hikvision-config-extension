@@ -14,18 +14,25 @@
  * last one and times the requests to how often the device really has a new
  * one (pollSnapshots).
  *
+ * An NVR's main-stream ("HD") still is often no bigger than its sub-stream
+ * one; asked for a size, it serves a full-size still instead. Whether a
+ * channel's does is found out once (fullSizeUpgrade).
+ *
  * The fetching itself is passed in (lib/isapi.js binds it to a device), so
  * everything here runs without a device or a page.
  *
- * Depends on lib/digest-auth.js, lib/errors.js and lib/snapshot-pacer.js.
+ * Depends on lib/digest-auth.js, lib/errors.js, lib/picture-size.js and
+ * lib/snapshot-pacer.js.
  */
 
 import { AuthError } from './digest-auth.js';
-import { IsapiError, NotAnImageError, isFallbackError } from './errors.js';
+import { IsapiError, NetworkError, NotAnImageError, isFallbackError } from './errors.js';
+import { jpegSize, sameSize } from './picture-size.js';
 
 /** @typedef {import('./snapshot-pacer.js').SnapshotPacer} SnapshotPacer */
 
 /** @typedef {import('./channels.js').Channel} Channel */
+/** @typedef {import('./config-xml.js').Size} Size */
 /** @typedef {import('./digest-auth.js').RequestOptions} RequestOptions */
 
 /**
@@ -45,6 +52,19 @@ import { IsapiError, NotAnImageError, isFallbackError } from './errors.js';
  * One request for one frame at one URL. Rejects with the device's answer
  * (IsapiError), NotAnImageError, or the request's own errors.
  * @typedef {(path: string, options: RequestOptions) => Promise<JpegBytes>} FetchSnapshot
+ */
+
+/**
+ * A frame and the URL it came from.
+ * @typedef {{path: string, jpeg: JpegBytes}} FoundFrame
+ */
+
+/**
+ * A better URL than the one SnapshotSource found, looked for once after it
+ * found one (see fullSizeUpgrade): given that URL and its frame, it may make
+ * requests of its own, and returns a frame from the better URL to keep
+ * instead, or null to keep the one found.
+ * @typedef {(found: FoundFrame, options: RequestOptions) => Promise<FoundFrame|null>} SnapshotUpgrade
  */
 
 /** The wait after the first failed request in a row; it doubles with each further one. */
@@ -100,6 +120,114 @@ export function snapshotPaths(channel, stream) {
 }
 
 /**
+ * The size to ask for a full-size still when the channel's main stream size
+ * isn't known. The DS-7604NI serves 1920×1088 for any size other than its
+ * 704×576 default.
+ */
+export const DEFAULT_FULL_SIZE = Object.freeze({ width: 1920, height: 1080 });
+
+/**
+ * The main-stream snapshot URL that asks for a size: an NVR whose plain
+ * still is 704×576 then sends a full-size one (the DS-7604NI sends 1920×1088
+ * whatever size is asked, 2688×1520 included, about 280–345 KB instead of
+ * 66 KB, refreshed about once a second too). Still a /picture URL, so it is
+ * read as bytes and gets the full-size time limit (see lib/isapi.js).
+ * @param {string} channelId
+ * @param {Size} size - what to ask for: the channel's main stream size
+ * @returns {string}
+ * @example
+ * fullSizePicturePath('1', {width: 2688, height: 1520})
+ * // → '/ISAPI/Streaming/channels/101/picture?videoResolutionWidth=2688&videoResolutionHeight=1520'
+ */
+export function fullSizePicturePath(channelId, size) {
+  return `/ISAPI/Streaming/channels/${channelId}01/picture` +
+    `?videoResolutionWidth=${Math.round(size.width)}&videoResolutionHeight=${Math.round(size.height)}`;
+}
+
+/**
+ * Look for a channel's full-size still once its plain main-stream URL serves
+ * frames: an upgrade for the single view's SnapshotSource ("HD").
+ *
+ * The plain still is often not full size on an NVR: the DS-7604NI serves the
+ * same 704×576 still on the main and the sub stream. Asked for a size
+ * (fullSizePicturePath, with the main stream's own size so a device that
+ * honours it isn't asked to scale down), it sends a full-size one. A camera's
+ * own main-stream still is full size already, and firmware without the size
+ * parameters may refuse them, so they are only tried where the plain still
+ * is likely a copy of the small one: on an IP camera behind an NVR (kind
+ * "digital"), or where the main and sub stream stills are the same size.
+ *
+ * The outcome is passed to `remember`: the full-size URL when it sent a
+ * bigger still, or null when the plain URL is to be kept (a camera with
+ * different main and sub stills, or without a sub stream; or the sized
+ * request answered with an error, something other than an image, or a still
+ * no bigger than the plain one). A request that got no answer decides
+ * nothing, and the plain URL serves meanwhile.
+ * @param {object} init
+ * @param {Pick<Channel, 'id'|'kind'>} init.channel
+ * @param {Size|undefined} init.streamSize - the main stream's size (Channel.mainStreamSize);
+ *   DEFAULT_FULL_SIZE when unknown
+ * @param {FetchSnapshot} init.fetchSnapshot
+ * @param {(path: string|null) => void} init.remember - the full-size URL, or null for the plain one
+ * @returns {SnapshotUpgrade}
+ * @example
+ * new SnapshotSource(snapshotPaths(channel, 'main'), fetchSnapshot, {
+ *   upgrade: fullSizeUpgrade({ channel, streamSize: channel.mainStreamSize, fetchSnapshot, remember }),
+ * });
+ */
+export function fullSizeUpgrade({ channel, streamSize, fetchSnapshot, remember }) {
+  const [plainPath] = snapshotPaths(channel, 'main');
+  const [subPath] = snapshotPaths(channel, 'sub');
+  return async (found, options) => {
+    const plain = jpegSize(found.jpeg);
+    // Only the plain main-stream URL has a sized form
+    if (found.path !== plainPath || plain === null) return null;
+
+    if (channel.kind !== 'digital') {
+      const sub = await askOnce(fetchSnapshot, subPath, options);
+      if (sub === null) return null;
+      if (sub === 'refused' || !sameSize(jpegSize(sub), plain)) {
+        remember(null);
+        return null;
+      }
+    }
+
+    const path = fullSizePicturePath(channel.id, streamSize ?? DEFAULT_FULL_SIZE);
+    const full = await askOnce(fetchSnapshot, path, options);
+    if (full === null) return null;
+    const size = full === 'refused' ? null : jpegSize(full);
+    if (full === 'refused' || size === null || size.width * size.height <= plain.width * plain.height) {
+      remember(null);
+      return null;
+    }
+    remember(path);
+    return { path, jpeg: full };
+  };
+}
+
+/**
+ * One request of fullSizeUpgrade's: the frame; 'refused' when the device
+ * answered without one (an error status, or something other than an image);
+ * null when nothing answered (a timeout or network failure), which decides
+ * nothing.
+ * @param {FetchSnapshot} fetchSnapshot
+ * @param {string} path
+ * @param {RequestOptions} options
+ * @returns {Promise<JpegBytes|'refused'|null>}
+ * @throws {unknown} an abort, a rejected login, or anything unexpected
+ */
+async function askOnce(fetchSnapshot, path, options) {
+  try {
+    return await fetchSnapshot(path, options);
+  } catch (err) {
+    if (options.signal?.aborted) throw err;
+    if (err instanceof IsapiError || err instanceof NotAnImageError) return 'refused';
+    if (err instanceof NetworkError) return null;
+    throw err;
+  }
+}
+
+/**
  * How long to wait before asking a channel again after this many failed
  * requests in a row: nothing extra while frames arrive, then 0.5, 1, 2, 4,
  * 8 s and at most SNAPSHOT_RETRY_MAX_MS.
@@ -143,6 +271,9 @@ function servesNoFrames(err) {
  * answered, just not with a frame (503 for a camera that isn't there), is
  * kept like one that works: the next URLs would only answer the same way.
  *
+ * An `upgrade` (e.g. fullSizeUpgrade) runs once, after the first URL that
+ * serves frames is found, and may swap it for a better one.
+ *
  * @example
  * const source = new SnapshotSource(snapshotPaths(channel, 'sub'), (path, options) => Isapi.fetchSnapshot(config, path, options));
  * const jpeg = await source.next({ signal });
@@ -151,15 +282,22 @@ export class SnapshotSource {
   /**
    * @param {string[]} paths - the URLs to try, best first (snapshotPaths)
    * @param {FetchSnapshot} fetchSnapshot - one request to one of them
-   * @param {{offline?: boolean}} [init] - offline: the device lists the camera as
-   *   disconnected, so start with no signal and slow retries (OFFLINE_START_FAILURES)
+   * @param {{offline?: boolean, upgrade?: SnapshotUpgrade|null}} [init] - offline: the device
+   *   lists the camera as disconnected, so start with no signal and slow retries
+   *   (OFFLINE_START_FAILURES); upgrade: a better URL to look for once a URL serves frames
    */
-  constructor(paths, fetchSnapshot, { offline = false } = {}) {
+  constructor(paths, fetchSnapshot, { offline = false, upgrade = null } = {}) {
     if (paths.length === 0) throw new RangeError('A snapshot source needs at least one URL');
     /** @type {readonly string[]} */
     this.paths = paths;
     /** @type {FetchSnapshot} */
     this.fetchSnapshot = fetchSnapshot;
+    /**
+     * Still to run: cleared once it has looked, and kept for the next
+     * resolve when it was cut short (the feed paused, say).
+     * @type {SnapshotUpgrade|null}
+     */
+    this.upgrade = upgrade;
     /**
      * The URL every request goes to, once found; null until then, and again
      * each time it is to be found again.
@@ -206,13 +344,41 @@ export class SnapshotSource {
   }
 
   /**
+   * Find the URL to keep (findPath), then let the upgrade, if any is still
+   * to run, swap it for a better one. A better URL is tried first from then
+   * on, also when the URL is to be found again. An upgrade cut short (the
+   * feed paused or stopped) runs again with the next request.
+   * @private
+   * @param {RequestOptions} options
+   * @returns {Promise<JpegBytes>}
+   */
+  async resolve(options) {
+    const jpeg = await this.findPath(options);
+    const upgrade = this.upgrade;
+    if (!upgrade || this.path === null) return jpeg;
+    let better;
+    try {
+      better = await upgrade({ path: this.path, jpeg }, options);
+    } catch (err) {
+      // Find the URL again next time, then look again
+      this.path = null;
+      throw err;
+    }
+    this.upgrade = null;
+    if (!better) return jpeg;
+    this.paths = [better.path, ...this.paths.filter(path => path !== better.path)];
+    this.path = better.path;
+    return better.jpeg;
+  }
+
+  /**
    * Try the URLs in order and keep the first that serves a frame, or where
    * the device answers in a way the next URL would too.
    * @private
    * @param {RequestOptions} options
    * @returns {Promise<JpegBytes>}
    */
-  async resolve(options) {
+  async findPath(options) {
     /** @type {unknown} */
     let firstError;
     for (const path of this.paths) {

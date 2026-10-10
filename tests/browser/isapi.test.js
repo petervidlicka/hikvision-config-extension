@@ -5,8 +5,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthError } from '../../extension/lib/digest-auth.js';
 import { IsapiError, NetworkError, NotAnImageError, TimeoutError, WriteRollbackError } from '../../extension/lib/errors.js';
+import { applyStreamSizes, readMainStreamSizes } from '../../extension/lib/channels.js';
 import { readPrivacyMask } from '../../extension/lib/config-xml.js';
 import { Isapi, TIMEOUT_MS, defaultTimeoutMs } from '../../extension/lib/isapi.js';
+import { jpegSize } from '../../extension/lib/picture-size.js';
 import { RESOLVE_AGAIN_AFTER_FAILURES, isJpeg } from '../../extension/lib/snapshots.js';
 import { childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import { NVR_HOST, STATUS, createMockNvr, responseStatusXml } from '../support/mock-nvr.js';
@@ -424,6 +426,101 @@ describe('Isapi writes', () => {
   });
 });
 
+describe('picture sizes', () => {
+  const mainStream = { width: 2688, height: 1520 };
+  /** The mock NVR, answering at once, and a login of its own. */
+  const nvr = () => {
+    const device = createMockNvr({ snapshotDelayMs: 5 });
+    vi.stubGlobal('fetch', device.fetch);
+    return { device, config: { host: NVR_HOST, port: 80, username: `user${++configSeq}`, password: 'pw' } };
+  };
+  /** The snapshot URLs asked for since `since`, with their queries. */
+  const pictures = (device, since) => device.urls.slice(since).filter(u => u.includes('/picture'));
+  const plain = (ch) => `GET /ISAPI/Streaming/channels/${ch}01/picture`;
+  const sized = (ch) => `${plain(ch)}?videoResolutionWidth=2688&videoResolutionHeight=1520`;
+
+  it('reads each camera’s main stream size from the NVR’s stream list', () => {
+    const sizes = readMainStreamSizes(parseXml(fixtures.streamingChannelsNvr).documentElement);
+    expect([...sizes]).toEqual(['1', '2', '3', '4'].map(id => [id, mainStream]));
+    const list = '<StreamingChannelList><StreamingChannel><id>1201</id><Video><videoResolutionWidth>1280</videoResolutionWidth>' +
+      '<videoResolutionHeight>720</videoResolutionHeight></Video></StreamingChannel>' +
+      '<StreamingChannel><id>1202</id><Video><videoResolutionWidth>640</videoResolutionWidth>' +
+      '<videoResolutionHeight>480</videoResolutionHeight></Video></StreamingChannel>' +
+      '<StreamingChannel><id>301</id><Video><videoResolutionWidth>auto</videoResolutionWidth></Video></StreamingChannel>' +
+      '</StreamingChannelList>';
+    expect([...readMainStreamSizes(parseXml(list).documentElement)]).toEqual([['12', { width: 1280, height: 720 }]]);
+    expect(applyStreamSizes([digital('12'), digital('3')], new Map([['12', mainStream]])))
+      .toEqual([{ ...digital('12'), mainStreamSize: mainStream }, digital('3')]);
+  });
+
+  it('reads the stream list once per device, until the cache is cleared', async () => {
+    const calls = mockDevice({ '/ISAPI/Streaming/channels': { body: fixtures.streamingChannelsNvr } });
+    const config = testConfig();
+    expect((await Isapi.getStreamSizes(config)).get('2')).toEqual(mainStream);
+    await Isapi.getStreamSizes(config);
+    expect(calls).toEqual(['/ISAPI/Streaming/channels']);
+    Isapi.clearDeviceCache();
+    await Isapi.getStreamSizes(config);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('leaves the sizes unknown when the list can’t be read, asking again next time, unless nothing answers', async () => {
+    const config = testConfig();
+    let calls = mockDevice({ '/ISAPI/Streaming/channels': statusRoute(403, 4, 'lowPrivilege') });
+    expect((await Isapi.getStreamSizes(config)).size).toBe(0);
+    expect(calls).toHaveLength(1);
+    // Asked again each time, each answer only as good as the last
+    calls = mockDevice({ '/ISAPI/Streaming/channels': { body: '<!DOCTYPE html><html><head><meta charset="utf-8"></head></html>' } });
+    expect((await Isapi.getStreamSizes(config)).size).toBe(0);
+    expect(calls).toHaveLength(1);
+    calls = mockDevice({ '/ISAPI/Streaming/channels': { body: '<StreamingChannelList/>' } });
+    expect((await Isapi.getStreamSizes(config)).size).toBe(0);
+    expect(calls).toHaveLength(1);
+    mockDevice({ '/ISAPI/Streaming/channels': { unreachable: true } });
+    await expect(Isapi.getStreamSizes(config)).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it('switches an NVR camera’s HD feed to the full-size still once, then asks for it straight away', async () => {
+    const { device, config } = nvr();
+    const camera = { ...digital('1'), mainStreamSize: mainStream };
+    expect(jpegSize(await Isapi.snapshotSource(config, camera, 'main').next())).toEqual({ width: 1920, height: 1088 });
+    expect(pictures(device, 0)).toEqual([plain(1), sized(1)]);
+
+    // A later feed of the same channel, e.g. after switching channels and back
+    let since = device.urls.length;
+    expect(jpegSize(await Isapi.snapshotSource(config, camera, 'main').next())).toEqual({ width: 1920, height: 1088 });
+    expect(pictures(device, since)).toEqual([sized(1)]);
+
+    // The grid's sub stream is never asked for a size
+    since = device.urls.length;
+    expect(jpegSize(await Isapi.snapshotSource(config, digital('3'), 'sub').next())).toEqual({ width: 704, height: 576 });
+    expect(pictures(device, since)).toEqual(['GET /ISAPI/Streaming/channels/302/picture']);
+
+    // Reconnecting finds out again
+    Isapi.clearDeviceCache();
+    since = device.urls.length;
+    await Isapi.snapshotSource(config, camera, 'main').next();
+    expect(pictures(device, since)).toEqual([plain(1), sized(1)]);
+  });
+
+  it('keeps the plain URL, and remembers to, on firmware that ignores the size', async () => {
+    const { device, config } = nvr();
+    device.fullSizeStill = null;
+    const camera = { ...digital('2'), mainStreamSize: mainStream };
+    expect(jpegSize(await Isapi.snapshotSource(config, camera, 'main').next())).toEqual({ width: 704, height: 576 });
+    const since = device.urls.length;
+    await Isapi.snapshotSource(config, camera, 'main').next();
+    expect(pictures(device, 0)).toEqual([plain(2), sized(2), plain(2)]);
+    expect(pictures(device, since)).toEqual([plain(2)]);
+  });
+
+  it('asks for 1920×1080 when the stream list didn’t say', async () => {
+    const { device, config } = nvr();
+    await Isapi.snapshotSource(config, digital('4'), 'main').next();
+    expect(pictures(device, 0)).toEqual([plain(4), `${plain(4)}?videoResolutionWidth=1920&videoResolutionHeight=1080`]);
+  });
+});
+
 describe('request time limits', () => {
   it('gives each kind of request its own budget', () => {
     expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/102/picture')).toBe(TIMEOUT_MS.picture);
@@ -433,6 +530,8 @@ describe('request time limits', () => {
       .toBe(TIMEOUT_MS.fullPicture);
     // Full-size JPEGs may take seconds to download over a slow link
     expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/101/picture')).toBe(TIMEOUT_MS.fullPicture);
+    expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/101/picture?videoResolutionWidth=2688&videoResolutionHeight=1520'))
+      .toBe(TIMEOUT_MS.fullPicture);
     expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/1/picture')).toBe(TIMEOUT_MS.fullPicture);
     expect(defaultTimeoutMs('GET', '/picture/Streaming/tracks/103/?name=x')).toBe(TIMEOUT_MS.fullPicture);
     expect(defaultTimeoutMs('GET', '/ISAPI/ContentMgmt/StreamingProxy/channels/101/picture?starttime=x')).toBe(TIMEOUT_MS.fullPicture);

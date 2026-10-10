@@ -23,7 +23,10 @@
   for a save that needs a reboot, or add an error answer to
   `mockDevice.failures` (see tests/support/mock-nvr.js).
   Live snapshots are a cached still that changes once a second, like the
-  DS-7604NI's (the fps readout shows about 1); set
+  DS-7604NI's (the fps readout shows about 1), 704×576 with the 16:9 picture
+  squeezed in (its circle shows round when the aspect is right) and 1920×1088
+  in HD; set `mockDevice.fullSizeStill = null` before switching to HD for
+  firmware that ignores the requested size. Set
   `mockDevice.snapshotRefreshMs = 0` for a camera that sends a new picture
   for every request (about 3–5 fps), and switch to another tab and back to
   see the feeds stop and resume in `mockDevice.requests`.

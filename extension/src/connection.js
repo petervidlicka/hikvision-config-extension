@@ -3,6 +3,7 @@
  * connection details.
  */
 
+import { applyStreamSizes } from '../lib/channels.js';
 import { forgetDigestSessions } from '../lib/digest-auth.js';
 import { NetworkError } from '../lib/errors.js';
 import { Isapi } from '../lib/isapi.js';
@@ -177,11 +178,15 @@ export function disconnect() {
   setStatus('Ready');
 }
 
-/** Fetch the channel list and show it in the sidebar. */
+/**
+ * Fetch the channel list, with each camera's picture size (which the live
+ * view shows its pictures' aspect by), and show it in the sidebar.
+ */
 export async function loadChannels() {
   if (!state.config) return;
   try {
-    state.channels = await Isapi.getChannels(state.config);
+    const channels = await Isapi.getChannels(state.config);
+    state.channels = applyStreamSizes(channels, await Isapi.getStreamSizes(state.config));
     dom.channelList.innerHTML = '';
 
     state.channels.forEach((ch, i) => {

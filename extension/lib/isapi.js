@@ -14,7 +14,7 @@
  */
 
 import {
-  applyChannelStatus, mergeChannelLists, readChannelList, readChannelStatus, readStreamingChannels,
+  applyChannelStatus, mergeChannelLists, readChannelList, readChannelStatus, readMainStreamSizes, readStreamingChannels,
 } from './channels.js';
 import { applyPrivacyMask, readAlarmOutputs, readLightAudioChannels, readMotionTriggerCap } from './config-xml.js';
 import {
@@ -27,7 +27,7 @@ import {
 import {
   buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey, toDeviceTime,
 } from './playback.js';
-import { SnapshotSource, isJpeg, snapshotPaths } from './snapshots.js';
+import { SnapshotSource, fullSizeUpgrade, isJpeg, snapshotPaths } from './snapshots.js';
 import {
   childElements, childText, cloneXml, findDescendant, parseXml, parseXmlOrNull, serializeXml,
 } from './xml.js';
@@ -36,12 +36,14 @@ import {
 /** @typedef {import('./config-xml.js').AlarmOutput} AlarmOutput */
 /** @typedef {import('./config-xml.js').DeviceRect} DeviceRect */
 /** @typedef {import('./config-xml.js').EventActionSupport} EventActionSupport */
+/** @typedef {import('./config-xml.js').Size} Size */
 /** @typedef {import('./config-xml.js').UnusedPrivacySlots} UnusedPrivacySlots */
 /** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
 /** @typedef {import('./digest-auth.js').DigestResponse} DigestResponse */
 /** @typedef {import('./digest-auth.js').RequestOptions} RequestOptions */
 /** @typedef {import('./playback.js').Recording} Recording */
 /** @typedef {import('./playback.js').StoredPicture} StoredPicture */
+/** @typedef {import('./snapshots.js').FetchSnapshot} FetchSnapshot */
 /** @typedef {import('./snapshots.js').SnapshotStream} SnapshotStream */
 
 /**
@@ -152,7 +154,7 @@ const CHANNEL_LIST_PATHS = Object.freeze({
   digital: '/ISAPI/ContentMgmt/InputProxy/channels',
 });
 
-/** The stream list, for firmware with neither channel list. */
+/** The stream list: each channel's stream sizes, and the channels of firmware with neither channel list. */
 const STREAMING_CHANNELS_PATH = '/ISAPI/Streaming/channels';
 
 /** Which IP cameras an NVR is connected to (see Isapi.getChannelStatus). */
@@ -373,6 +375,46 @@ export const Isapi = {
   },
 
   /**
+   * The size of each channel's main stream (see readMainStreamSizes): the
+   * camera's real picture aspect, and the size to ask an NVR's full-size
+   * still in. Read once per device, until clearDeviceCache().
+   *
+   * Only for showing pictures right, so a device that answers with an error,
+   * or with something other than a list of sizes, leaves the sizes unknown
+   * (and is asked again next time) rather than failing the channel list. A
+   * rejected login or a device that doesn't answer still fails it.
+   * @param {DeviceConfig} config
+   * @returns {Promise<Map<string, Size>>} channel id → main stream size; empty when unknown
+   */
+  getStreamSizes(config) {
+    const key = deviceKey(config);
+    const cached = streamSizes.get(key);
+    if (cached) return cached;
+
+    const loading = (async () => {
+      let resp;
+      try {
+        resp = await this.request(config, 'GET', STREAMING_CHANNELS_PATH);
+      } catch (err) {
+        if (err instanceof IsapiError) return null;
+        throw err;
+      }
+      const doc = parseXmlOrNull(String(resp.data));
+      const read = doc ? readMainStreamSizes(doc.documentElement) : null;
+      return read?.size ? read : null;
+    })();
+    /** @type {Promise<Map<string, Size>>} */
+    const sizes = loading.then(read => read ?? new Map());
+    streamSizes.set(key, sizes);
+    /** Keep only a list the device sent; the caller still sees the outcome */
+    const forget = () => {
+      if (streamSizes.get(key) === sizes) streamSizes.delete(key);
+    };
+    loading.then(read => { if (read === null) forget(); }, forget);
+    return sizes;
+  },
+
+  /**
    * Fetch one JPEG frame of a channel, finding the URL that serves it (see
    * snapshotPaths in lib/snapshots.js): the stream asked for, then the main
    * stream for a camera without a sub-stream, StreamingProxy for an IP
@@ -403,17 +445,33 @@ export const Isapi = {
    * requests fail (see SnapshotSource and pollSnapshots in lib/snapshots.js).
    * A camera the device lists as offline starts out with no signal and slow
    * retries.
+   *
+   * The main stream ("HD", which only the single view shows; the grid shows
+   * the sub stream) is full size: where the plain main-stream still isn't, as
+   * on an NVR, the sized URL is used instead (fullSizeUpgrade). Whether it
+   * is, is found out once per channel and remembered until clearDeviceCache(),
+   * so later feeds start with the right URL at no extra request.
    * @param {DeviceConfig} config
-   * @param {Pick<Channel, 'id'|'kind'|'online'>} channel
+   * @param {Pick<Channel, 'id'|'kind'|'online'|'mainStreamSize'>} channel
    * @param {SnapshotStream} [stream]
    * @returns {SnapshotSource}
    */
   snapshotSource(config, channel, stream = 'main') {
-    return new SnapshotSource(
-      snapshotPaths(channel, stream),
-      (path, options) => this.fetchSnapshot(config, path, options),
-      { offline: channel.online === false },
-    );
+    /** @type {FetchSnapshot} */
+    const fetchSnapshot = (path, options) => this.fetchSnapshot(config, path, options);
+    const paths = snapshotPaths(channel, stream);
+    const offline = channel.online === false;
+    if (stream !== 'main') return new SnapshotSource(paths, fetchSnapshot, { offline });
+
+    const key = `${deviceKey(config)}|${channel.id}`;
+    const fullSize = fullSizeStills.get(key);
+    if (fullSize !== undefined) return new SnapshotSource(fullSize ? [fullSize, ...paths] : paths, fetchSnapshot, { offline });
+    return new SnapshotSource(paths, fetchSnapshot, {
+      offline,
+      upgrade: fullSizeUpgrade({
+        channel, streamSize: channel.mainStreamSize, fetchSnapshot, remember: path => fullSizeStills.set(key, path),
+      }),
+    });
   },
 
   /**
@@ -806,11 +864,14 @@ export const Isapi = {
   },
 
   /**
-   * Forget everything read about devices' hardware (getEventActionSupport),
-   * e.g. on disconnect, so reconnecting reads it afresh.
+   * Forget everything read about devices' hardware (getEventActionSupport,
+   * getStreamSizes, which snapshot URL is full size), e.g. on disconnect, so
+   * reconnecting reads it afresh.
    */
   clearDeviceCache() {
     eventActionSupport.clear();
+    streamSizes.clear();
+    fullSizeStills.clear();
   },
 };
 
@@ -820,6 +881,17 @@ export const Isapi = {
  * @type {Map<string, Promise<{support: EventActionSupport, provisional: boolean}>>}
  */
 const eventActionSupport = new Map();
+
+/** getStreamSizes results per device. @type {Map<string, Promise<Map<string, Size>>>} */
+const streamSizes = new Map();
+
+/**
+ * Per device and channel, the URL of the full-size main-stream still, or
+ * null where the plain one is kept (see fullSizeUpgrade); channels not yet
+ * looked at are missing.
+ * @type {Map<string, string|null>}
+ */
+const fullSizeStills = new Map();
 
 /**
  * A device and user, for per-device caches.

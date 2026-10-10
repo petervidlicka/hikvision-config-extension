@@ -28,12 +28,18 @@ const readoutFps = () => {
   return match ? Number(match[1]) : null;
 };
 
-/** Dispatch canvas mouse events at a fraction of the canvas size. */
+/**
+ * Dispatch canvas mouse events at a fraction of the canvas size. Events land
+ * on whole pixels, so each point is rounded to one inside the canvas, which
+ * may start part-way through a pixel.
+ */
 function canvasPointer() {
   const canvas = $('drawCanvas');
+  const pixel = (start, size, fraction) =>
+    Math.min(Math.max(Math.round(start + fraction * size), Math.ceil(start)), Math.floor(start + size) - 1);
   const at = (fx, fy) => {
     const r = canvas.getBoundingClientRect();
-    return { clientX: r.left + fx * r.width, clientY: r.top + fy * r.height, bubbles: true, button: 0 };
+    return { clientX: pixel(r.left, r.width, fx), clientY: pixel(r.top, r.height, fy), bubbles: true, button: 0 };
   };
   const click = (fx, fy) => {
     canvas.dispatchEvent(new MouseEvent('mousedown', at(fx, fy)));
@@ -109,6 +115,20 @@ describe('config page', () => {
     expect($('statusRight').textContent).toMatch(/^Channel 1 · SD · \d+\.\d fps$/);
   });
 
+  it('shows the NVR’s squeezed 704×576 still at its camera’s 16:9, with the drawing canvas on it', async () => {
+    // Each camera's main stream size, from the stream list read once at Connect
+    expect(device.requests.filter(r => r === 'GET /ISAPI/Streaming/channels')).toHaveLength(1);
+    expect(state.channels.map(ch => ch.mainStreamSize)).toEqual(Array(4).fill({ width: 2688, height: 1520 }));
+    await vi.waitFor(() => expect(dom.videoFeed.classList.contains('stream-aspect')).toBe(true));
+    expect([dom.videoFeed.naturalWidth, dom.videoFeed.naturalHeight]).toEqual([704, 576]);
+    const img = dom.videoFeed.getBoundingClientRect();
+    expect(img.width / img.height).toBeCloseTo(2688 / 1520, 1);
+    // The canvas covers the picture as shown, and keeps the frame's pixels as its coordinates
+    const canvas = dom.canvas.getBoundingClientRect();
+    for (const side of ['left', 'top', 'width', 'height']) expect(canvas[side]).toBeCloseTo(img[side], 0);
+    expect([dom.canvas.width, dom.canvas.height]).toEqual([704, 576]);
+  });
+
   it('shows an NVR’s cached still once per change and reads its real rate, without slowing a camera down', async () => {
     const picture = 'GET /ISAPI/Streaming/channels/102/picture';
     let shown = 0;
@@ -150,11 +170,20 @@ describe('config page', () => {
     }
   }, 15_000);
 
-  it('switches the single view to the HD stream and remembers it', async () => {
+  it('switches the single view to the HD stream, a full-size still from the NVR, and remembers it', async () => {
+    const since = device.urls.length;
     $('streamBtnHd').click();
     expect(chromeStub.store.local.streamType).toBe('main');
-    await vi.waitFor(() => expect(device.requests.at(-1)).toBe('GET /ISAPI/Streaming/channels/101/picture'), { timeout: 3000 });
+    // The NVR's plain HD still is the same 704×576 as SD, so it is asked for the main stream's size
+    await vi.waitFor(() => expect(dom.videoFeed.naturalWidth).toBe(1920), { timeout: 5000 });
+    expect(device.urls.slice(since).filter(u => u.includes('/picture')).slice(0, 2)).toEqual([
+      'GET /ISAPI/Streaming/channels/101/picture',
+      'GET /ISAPI/Streaming/channels/101/picture?videoResolutionWidth=2688&videoResolutionHeight=1520',
+    ]);
     expect($('statusRight').textContent).toMatch(/^Channel 1 · HD/);
+    // A 1920×1088 still has the camera's aspect already, and the canvas takes its pixels
+    expect(dom.videoFeed.classList.contains('stream-aspect')).toBe(false);
+    expect([dom.canvas.width, dom.canvas.height]).toEqual([1920, 1088]);
     // The SD frame in flight was cancelled, not left running next to the HD one
     expect(device.maxInFlightSnapshots).toBe(1);
   });
@@ -204,6 +233,27 @@ describe('config page', () => {
     }
   });
 
+  it('shows grid cells at their cameras’ 16:9, and never asks the grid for full-size stills', async () => {
+    const since = device.urls.length;
+    $('gridViewTab').click();
+    try {
+      await vi.waitFor(() => expect(document.querySelectorAll('.grid-feed.loaded')).toHaveLength(4), { timeout: 3000 });
+      for (const img of document.querySelectorAll('.grid-feed')) {
+        expect([img.naturalWidth, img.classList.contains('stream-aspect')]).toEqual([704, true]);
+        const r = img.getBoundingClientRect();
+        expect(r.width / r.height).toBeCloseTo(2688 / 1520, 1);
+        // Centred in its cell
+        const cell = img.parentElement.getBoundingClientRect();
+        expect(r.left - cell.left).toBeCloseTo(cell.right - r.right, 0);
+        expect(r.top - cell.top).toBeCloseTo(cell.bottom - r.bottom, 0);
+      }
+      const asked = device.urls.slice(since).filter(u => u.includes('/picture'));
+      expect(new Set(asked)).toEqual(new Set([1, 2, 3, 4].map(ch => `GET /ISAPI/Streaming/channels/${ch}02/picture`)));
+    } finally {
+      $('singleViewTab').click();
+    }
+  });
+
   it('asks for no frames while the tab is hidden, and picks up the views on screen when it’s back', async () => {
     const pictures = (since) => device.requests.slice(since).filter(r => r.endsWith('/picture'));
     $('gridViewTab').click();
@@ -229,6 +279,8 @@ describe('config page', () => {
       expect(pictures(since)).toEqual([]);
       setPageVisibility('visible');
       await vi.waitFor(() => expect(pictures(since)).toEqual(['GET /ISAPI/Streaming/channels/101/picture'])); // HD, chosen above
+      // Straight for the full-size still, found earlier
+      expect(device.urls.at(-1)).toBe('GET /ISAPI/Streaming/channels/101/picture?videoResolutionWidth=2688&videoResolutionHeight=1520');
     } finally {
       delete document.visibilityState;
       document.dispatchEvent(new Event('visibilitychange'));
