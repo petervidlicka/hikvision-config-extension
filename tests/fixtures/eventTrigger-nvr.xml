@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<EventTrigger version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<id>VMD-1</id>
+<eventType>VMD</eventType>
+<dynVideoInputChannelID>1</dynVideoInputChannelID>
+<EventTriggerNotificationList version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<EventTriggerNotification>
+<id>record-1</id>
+<notificationMethod>record</notificationMethod>
+<dynVideoInputID>1</dynVideoInputID>
+</EventTriggerNotification>
+<EventTriggerNotification>
+<id>center</id>
+<notificationMethod>center</notificationMethod>
+</EventTriggerNotification>
+</EventTriggerNotificationList>
+</EventTrigger>

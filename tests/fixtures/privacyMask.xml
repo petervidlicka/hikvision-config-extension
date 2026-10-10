@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PrivacyMask version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<enabled>true</enabled>
+<normalizedScreenSize><normalizedScreenWidth>704</normalizedScreenWidth><normalizedScreenHeight>576</normalizedScreenHeight></normalizedScreenSize>
+<PrivacyMaskRegionList>
+<PrivacyMaskRegion>
+<id>1</id>
+<enabled>true</enabled>
+<RegionCoordinatesList>
+<RegionCoordinates><positionX>10</positionX><positionY>20</positionY></RegionCoordinates>
+<RegionCoordinates><positionX>110</positionX><positionY>20</positionY></RegionCoordinates>
+<RegionCoordinates><positionX>110</positionX><positionY>120</positionY></RegionCoordinates>
+<RegionCoordinates><positionX>10</positionX><positionY>120</positionY></RegionCoordinates>
+</RegionCoordinatesList>
+<maskType>gray</maskType>
+</PrivacyMaskRegion>
+<PrivacyMaskRegion>
+<id>2</id>
+<enabled>false</enabled>
+<RegionCoordinatesList></RegionCoordinatesList>
+<maskType>gray</maskType>
+</PrivacyMaskRegion>
+</PrivacyMaskRegionList>
+</PrivacyMask>

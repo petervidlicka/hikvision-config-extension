@@ -2,11 +2,10 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "hikvision-ext",
+      "name": "browser-tests",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "--directory", "/Users/peter/Dev files/hikvision-config-extension"],
-      "port": 8765,
-      "autoPort": true
+      "runtimeArgs": ["-m", "http.server", "8765", "--bind", "127.0.0.1"],
+      "port": 8765
     }
   ]
 }
