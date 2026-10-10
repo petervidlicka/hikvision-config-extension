@@ -9,6 +9,9 @@
  */
 
 import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
+import {
+  SEARCH_PAGE_SIZE, buildCalendarXml, buildSearchXml, parseCalendar, parseSearchResult, toDeviceTime,
+} from './playback.js';
 import { childElements, childText, parseXml, serializeXml } from './xml.js';
 
 /**
@@ -21,6 +24,10 @@ export function rethrowAuthError(err) {
 }
 
 /** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
+/** @typedef {import('./playback.js').Recording} Recording */
+
+/** Stop paging a recording search after this many results. */
+const MAX_SEARCH_RESULTS = 2000;
 
 /**
  * A camera channel. `kind` says which URL family configures it: "analog"
@@ -228,6 +235,70 @@ export const Isapi = {
       const path = `${base}/regions`;
       return { doc: await this.getXml(config, path), path };
     }
+  },
+
+  /**
+   * All recordings of a channel's main stream in a time range, following the
+   * device's paging until it reports it's done.
+   * @param {DeviceConfig} config
+   * @param {string} channelId
+   * @param {Date} start
+   * @param {Date} end
+   * @returns {Promise<Recording[]>} sorted by start time
+   */
+  async searchRecordings(config, channelId, start, end) {
+    const searchId = crypto.randomUUID();
+    /** @type {Recording[]} */
+    const recordings = [];
+    for (let position = 0; position < MAX_SEARCH_RESULTS; position += SEARCH_PAGE_SIZE) {
+      const body = buildSearchXml({ searchId, trackId: `${channelId}01`, start, end, position });
+      const resp = await this.request(config, 'POST', '/ISAPI/ContentMgmt/search', body);
+      const page = parseSearchResult(parseXml(String(resp.data)));
+      recordings.push(...page.recordings);
+      if (page.status !== 'MORE' || page.recordings.length === 0) break;
+    }
+    return recordings.sort((a, b) => a.start.getTime() - b.start.getTime());
+  },
+
+  /**
+   * Days of a month that have recordings on a channel.
+   * @param {DeviceConfig} config
+   * @param {string} channelId
+   * @param {number} year
+   * @param {number} month - 1–12
+   * @returns {Promise<number[]>}
+   */
+  async getRecordingDays(config, channelId, year, month) {
+    const resp = await this.request(config, 'POST',
+      `/ISAPI/ContentMgmt/record/tracks/${channelId}01/dailyDistribution`, buildCalendarXml(year, month));
+    return parseCalendar(parseXml(String(resp.data)));
+  },
+
+  /**
+   * A still image from recorded video at a moment. Not part of documented
+   * ISAPI, so only some firmware supports it; returns null when the device
+   * doesn't answer with a JPEG.
+   * @param {DeviceConfig} config
+   * @param {string} channelId
+   * @param {Date} time
+   * @returns {Promise<Blob|null>}
+   */
+  async getRecordedFrame(config, channelId, time) {
+    const at = encodeURIComponent(toDeviceTime(time));
+    const paths = [
+      `/ISAPI/ContentMgmt/StreamingProxy/channels/${channelId}01/picture?starttime=${at}`,
+      `/ISAPI/Streaming/channels/${channelId}01/picture?starttime=${at}`,
+    ];
+    for (const path of paths) {
+      try {
+        const resp = await this.request(config, 'GET', path);
+        const bytes = new Uint8Array(/** @type {ArrayBuffer} */ (resp.data));
+        if (bytes[0] === 0xff && bytes[1] === 0xd8) return new Blob([bytes], { type: 'image/jpeg' });
+      } catch (err) {
+        rethrowAuthError(err);
+      }
+    }
+    return null;
   },
 
   /** @param {string} channelId */

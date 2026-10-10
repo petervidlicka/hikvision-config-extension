@@ -6,19 +6,45 @@ import { Isapi } from '../lib/isapi.js';
 import { bindCanvasEvents, redraw, resizeCanvas } from './canvas.js';
 import { connect, disconnect, handleAuthFailure, loadSavedCredentials } from './connection.js';
 import { cancelScan, showConnectionForm, showScanIntro, startScan } from './scan.js';
-import { byId, dom, state } from './state.js';
+import { byId, dom, queryAll, state } from './state.js';
 import { eventsTool } from './tools/events.js';
 import { motionTool } from './tools/motion.js';
 import { privacyTool } from './tools/privacy.js';
 import { ToolRegistry, initToolRegistry, switchTool, toggleConfig } from './tools/registry.js';
 import { switchSection, switchToGridView, switchToLiveViewSingle, toggleMaximizeCell } from './views.js';
 import { setStreamType } from './feed.js';
+import { initialPlaybackState, renderTimeline, seekFromClick, setDate, setFilter, setSpeed, shiftDate, skip, togglePlay } from './playback.js';
 
 /** Wire up the page: buttons, keyboard shortcuts and window events. */
 function bindAppEvents() {
   // Section tabs
   byId('liveViewSectionTab').addEventListener('click', () => switchSection('liveview'));
   byId('configSectionTab').addEventListener('click', () => switchSection('config'));
+  byId('playbackSectionTab').addEventListener('click', () => switchSection('playback'));
+
+  // Playback controls
+  byId('pbPlayPauseBtn').addEventListener('click', togglePlay);
+  byId('pbSkipBackBtn').addEventListener('click', () => skip(-10));
+  byId('pbSkipFwdBtn').addEventListener('click', () => skip(10));
+  byId('pbLiveBtn').addEventListener('click', () => switchSection('liveview'));
+  byId('pbTimelineWrap').addEventListener('click', seekFromClick);
+  byId('pbDatePrev').addEventListener('click', () => shiftDate(-1));
+  byId('pbDateNext').addEventListener('click', () => shiftDate(1));
+  const dateInput = byId('pbDateInput', HTMLInputElement);
+  byId('pbDateLabel').addEventListener('click', () => dateInput.showPicker());
+  dateInput.addEventListener('change', () => {
+    const [y, m, d] = dateInput.value.split('-').map(Number);
+    if (y && m && d) setDate(new Date(y, m - 1, d));
+  });
+  byId('pbFilter', HTMLSelectElement).addEventListener('change', (e) => {
+    setFilter(/** @type {HTMLSelectElement} */ (e.target).value === 'events' ? 'events' : 'all');
+  });
+  queryAll(document, '.pb-speed').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const speed = Number(btn.dataset.speed);
+      setSpeed(speed === 2 || speed === 4 ? speed : 1);
+    });
+  });
 
   // Live View sub-tabs
   byId('singleViewTab').addEventListener('click', () => {
@@ -51,6 +77,7 @@ function bindAppEvents() {
   window.addEventListener('resize', () => {
     resizeCanvas();
     redraw();
+    if (state.activeSection === 'playback') renderTimeline();
   });
 
   document.addEventListener('keydown', (e) => {
@@ -64,7 +91,7 @@ function bindAppEvents() {
       if (state.activeSection === 'liveview') {
         if (e.key === '1') { state.viewMode = 'single'; switchToLiveViewSingle(); }
         if (e.key === '2') switchToGridView();
-      } else {
+      } else if (state.activeSection === 'config') {
         // Config mode: number keys switch tools
         if (keyIdx < tools.length) {
           switchTool(tools[keyIdx].id);
@@ -84,6 +111,7 @@ function bindAppEvents() {
   });
 }
 
+state.playback = initialPlaybackState();
 ToolRegistry.register(motionTool);
 ToolRegistry.register(privacyTool);
 ToolRegistry.register(eventsTool);

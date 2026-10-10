@@ -28,7 +28,8 @@
  * @property {'single'|'grid'} viewMode
  * @property {((() => void)|null)[]} gridFeedStops - per-cell loop stoppers
  * @property {(string|null)[]} gridCellChannels - channel id per grid cell
- * @property {'liveview'|'config'} activeSection
+ * @property {'liveview'|'playback'|'config'} activeSection
+ * @property {import('./playback.js').PlaybackState} playback - Playback section state
  * @property {number|null} gridExpandedCell - maximized grid cell
  * @property {boolean} configExpanded
  * @property {AbortController|null} scanAbort - cancels a running network scan

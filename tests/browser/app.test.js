@@ -161,6 +161,29 @@ describe('config page', () => {
     expect(body).toContain('<gridMap>800000' + '0'.repeat(102) + '</gridMap>');
   });
 
+  it('shows the day’s recordings and frames in Playback', async () => {
+    $('playbackSectionTab').click();
+    await vi.waitFor(() => expect($('pbInfo').textContent).toMatch(/^2 recordings, 32 min, 1 triggered by events\./));
+    expect($('pbDateLabel').textContent).toBe('Today');
+    expect($('pbTimestamp').textContent).toBe('08:00:00');
+    expect(device.requests).toContain('GET /ISAPI/ContentMgmt/StreamingProxy/channels/201/picture');
+    await vi.waitFor(() => expect(dom.videoFeed.src).toMatch(/^blob:/));
+    expect($('toolTabs').style.display).toBe('none');
+
+    // Clicking the timeline moves the playhead
+    const wrap = $('pbTimelineWrap').getBoundingClientRect();
+    $('pbTimelineWrap').dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: wrap.left + wrap.width * (14.1 / 24), clientY: wrap.top + 5 }));
+    // Clicks land on whole pixels, a few minutes apart on a narrow timeline
+    expect($('pbTimestamp').textContent).toMatch(/^14:0\d/);
+  });
+
+  it('explains when a device has no frames from recordings', async () => {
+    device.recordedFrames = false;
+    document.querySelectorAll('.channel-item')[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect($('pbInfo').textContent).toContain('doesn’t provide still images'));
+    expect(state.playback.framesSupported).toBe(false);
+  });
+
   it('stops everything after one failed login when the device rejects the password', async () => {
     $('liveViewSectionTab').click();
     device.rejectAuth = true;

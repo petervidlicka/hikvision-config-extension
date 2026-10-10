@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<trackDailyDistribution version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<dayList>
+<day><id>1</id><dayOfMonth>1</dayOfMonth><record>false</record></day>
+<day><id>2</id><dayOfMonth>2</dayOfMonth><record>true</record><recordType>time</recordType></day>
+<day><id>3</id><dayOfMonth>9</dayOfMonth><record>true</record><recordType>event</recordType></day>
+<day><id>4</id><dayOfMonth>10</dayOfMonth><record>true</record></day>
+</dayList>
+</trackDailyDistribution>
