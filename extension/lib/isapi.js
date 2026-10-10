@@ -668,8 +668,8 @@ export const Isapi = {
    *
    * Each is optional: a device without the resource just offers less (see
    * resolveEventActions). A failed load, or one where the device answered
-   * an error other than "not here" (e.g. busy), isn't kept, so the next
-   * load asks again.
+   * an error other than "not here" (e.g. busy) or a body that isn't XML,
+   * isn't kept, so the next load asks again.
    * @param {DeviceConfig} config
    * @returns {Promise<EventActionSupport>}
    * @throws {NetworkError|AuthError} when the device didn't answer or rejected the login
@@ -715,8 +715,8 @@ function deviceKey(config) {
 
 /**
  * Read what getEventActionSupport returns. `provisional` is set when the
- * device answered one of the requests with an error other than "not here":
- * it was treated as absent for this load only.
+ * device answered one of the requests with an error other than "not here",
+ * or with a body that isn't XML: it was treated as absent for this load only.
  * @param {DeviceConfig} config
  * @returns {Promise<{support: EventActionSupport, provisional: boolean}>}
  */
@@ -737,10 +737,16 @@ async function loadEventActionSupport(config) {
       return null;
     }
   };
-  /** @param {string} path */
+  /**
+   * An optional XML resource, or null. A body that isn't XML (empty, or some
+   * firmware's HTML page) is treated like a busy answer: absent, for this load.
+   * @param {string} path
+   */
   const optionalXml = async (path) => {
     const body = await optional(path);
-    return body === null ? null : parseXml(body);
+    const doc = body === null ? null : parseXmlOrNull(body);
+    if (body !== null && doc === null) provisional = true;
+    return doc;
   };
 
   const triggerCap = readMotionTriggerCap(await optionalXml('/ISAPI/Event/triggersCap'));

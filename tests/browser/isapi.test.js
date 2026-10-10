@@ -492,6 +492,23 @@ describe('event actions', () => {
     expect(new Set(calls)).toEqual(nvrRequests);
   });
 
+  it('treats a lookup answered with something other than XML as absent, for that load only', async () => {
+    const config = testConfig();
+    mockDevice({ ...nvrRoutes(), '/ISAPI/Event/triggersCap': { body: '' } });
+    const support = await Isapi.getEventActionSupport(config);
+    expect(support.triggerCap).toBeNull(); // every action offered, as without triggersCap
+    expect(support.alarmOutputs.map(o => o.id)).toEqual(['301', '401']);
+    const calls = mockDevice(nvrRoutes());
+    expect((await Isapi.getEventActionSupport(config)).triggerCap).not.toBeNull();
+    expect(new Set(calls)).toEqual(nvrRequests);
+
+    const htmlPage = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>Not found</body></html>';
+    mockDevice({ ...nvrRoutes(), '/ISAPI/System/IO/outputs': { body: htmlPage } });
+    const other = await Isapi.getEventActionSupport(testConfig());
+    expect(other.alarmOutputs).toEqual([]);
+    expect(other.triggerCap).toMatchObject({ isSupportIO: true });
+  });
+
   it('reads IP cameras’ addresses from the NVR’s channel list', async () => {
     mockDevice({
       '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'notSupport'),

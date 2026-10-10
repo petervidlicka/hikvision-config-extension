@@ -47,17 +47,21 @@ export function showToast(msg, type = 'info') {
 /**
  * Confirm a save in a toast and the status bar. When the device stored the
  * change but applies it only after a reboot, say so — otherwise the save
- * looks like it did nothing.
+ * looks like it did nothing. A save that finishes after the user moved on
+ * to another channel names the channel it saved, so it isn't taken for the
+ * one on screen.
  * @param {string} subject - what was saved, e.g. "Motion detection"
  * @param {WriteResult} result - what Isapi.putXml returned
+ * @param {string|null} [channelId] - the channel saved; the active one by default
  */
-export function reportSaved(subject, result) {
-  const channel = `Channel ${state.activeChannel}`;
+export function reportSaved(subject, result, channelId = state.activeChannel) {
+  const channel = `Channel ${channelId}`;
+  const what = channelId === state.activeChannel ? subject : `${subject} for channel ${channelId}`;
   if (result.rebootRequired) {
-    showToast(`${subject} saved — reboot the device for this to take effect`, 'success');
+    showToast(`${what} saved — reboot the device for this to take effect`, 'success');
     setStatus('Config saved — reboot required', channel);
   } else {
-    showToast(`${subject} saved successfully!`, 'success');
+    showToast(`${what} saved successfully!`, 'success');
     setStatus('Config saved', channel);
   }
 }

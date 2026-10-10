@@ -457,11 +457,22 @@ describe('event actions a device and channel offer', () => {
     expect(reasons(actions)).toEqual({
       record: null, center: 'notSupported', email: 'notSupported', beep: 'notSupported', IO: null,
       whiteLight: 'notSupported',
-      audio: null, // the flag isn't named at all: the bare method, as before
+      audio: 'notSupported', // not named, on a device that names the other *Out flag
     });
     // An unsupported action still knows its entry, so its toggle can show the state
     expect(actions.center.spec?.method).toBe('center');
-    expect(actions.audio.spec?.method).toBe('audio');
+    expect(actions.audio.spec).toBeNull();
+  });
+
+  it('never falls back to a bare light or speaker method on a device naming either *Out flag', () => {
+    const { isSupportAudioOut, ...lightOnly } = nvrSupport().triggerCap;
+    expect(isSupportAudioOut).toBe(true);
+    const support = { ...nvrSupport(), triggerCap: lightOnly };
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3);
+    const actions = resolveEventActions(doc, support, { id: '3', ipAddress: '192.168.254.4' });
+    expect(actions.whiteLight).toEqual({ spec: lightAudioNotification('whiteLightOut', '3'), unavailable: null });
+    // The DS-7604NI family fails the whole save on a bare "audio" entry
+    expect(actions.audio).toEqual({ spec: null, unavailable: 'notSupported' });
   });
 
   it('keeps the old behaviour on a device without triggersCap', () => {

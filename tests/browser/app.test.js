@@ -199,8 +199,11 @@ describe('config page', () => {
     for (const [key, hint] of hints) {
       expect($(`eventRow_${key}`).classList.contains('unavailable')).toBe(true);
       expect($(`eventRow_${key}`).title).toBe(hint);
+      // Hovering the label says why too, not what the action would do
+      expect($(`eventRow_${key}`).querySelector('span').title).toBe(hint);
     }
     expect($('eventRow_center').classList.contains('unavailable')).toBe(false);
+    expect($('eventRow_center').querySelector('span').title).toBe('Send alert to Hik-Connect mobile app');
     $('eventToggle_whiteLight').click();
     expect($('eventToggle_whiteLight').classList.contains('on')).toBe(false);
   });
@@ -228,6 +231,38 @@ describe('config page', () => {
 
     // What the device offers was read once, not per channel
     expect(device.requests.filter(r => r === 'GET /ISAPI/Event/triggersCap')).toHaveLength(1);
+  });
+
+  it('keeps the channel moved on to when an earlier channel’s save finishes late', async () => {
+    const key = 'PUT /ISAPI/Event/triggers/VMD-3';
+    const sent = () => device.requests.filter(r => r === key).length;
+    const triggerId = () => state.eventTriggerDoc?.getElementsByTagName('id')[0]?.textContent;
+    let release = () => {};
+    device.holds[key] = new Promise(resolve => { release = resolve; });
+    try {
+      // Save channel 3, and switch to channel 1 while the device is still answering
+      $('eventToggle_beep').click();
+      const before = sent();
+      $('saveEventsBtn').click();
+      await vi.waitFor(() => expect(sent()).toBe(before + 1));
+      document.querySelectorAll('.channel-item')[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await vi.waitFor(() => expect(state.eventActionTargets).not.toBeNull());
+      expect(triggerId()).toBe('VMD-1');
+
+      release();
+      await vi.waitFor(() => expect(toast()).toBe('Event actions for channel 3 saved successfully!'));
+      expect(device.triggers.read('3')).toContain('<notificationMethod>beep</notificationMethod>');
+      // The panel still holds channel 1's trigger, so its next save goes there
+      expect(triggerId()).toBe('VMD-1');
+      $('saveEventsBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('Event actions saved successfully!'));
+      const { path, body } = device.puts.at(-1);
+      expect(path).toBe('/ISAPI/Event/triggers/VMD-1');
+      expect(body).not.toContain('VMD-3');
+    } finally {
+      release();
+      delete device.holds[key];
+    }
   });
 
   it('edits the cell grid on a grid-only camera', async () => {

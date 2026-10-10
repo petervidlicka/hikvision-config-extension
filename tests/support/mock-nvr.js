@@ -176,9 +176,9 @@ function todaysPictures() {
  *
  * Tests can make it misbehave: `unreachable` fails every request like a
  * wrong IP address, `failures` answers "METHOD /path" with an error status
- * (only the first `times` requests, when set), and `writeStatus` changes
- * what a successful PUT or DELETE reports (e.g. statusCode 7, reboot
- * required). `privacy.read(path)` shows the privacy masks a channel stores,
+ * (only the first `times` requests, when set), `holds` keeps "METHOD /path"
+ * unanswered until its promise settles, and `writeStatus` changes what a
+ * successful PUT or DELETE reports (e.g. statusCode 7, reboot required). `privacy.read(path)` shows the privacy masks a channel stores,
  * `triggers.read(channel)` its motion trigger.
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
@@ -188,6 +188,8 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     unreachable: false,
     /** @type {Record<string, {httpStatus: number, statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string, times?: number}>} */
     failures: {},
+    /** @type {Record<string, Promise<void>>} */
+    holds: {},
     writeStatus: STATUS.ok,
     privacy: createPrivacyStore(),
     triggers: createTriggerStore(),
@@ -203,6 +205,9 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     const method = opts.method || 'GET';
     const p = u.pathname;
     device.requests.push(`${method} ${p}`);
+    // Awaited only when set, so other requests reach the device in the same tick as before
+    const hold = device.holds[`${method} ${p}`];
+    if (hold) await hold;
     if (device.unreachable) throw new TypeError('Failed to fetch');
     if (device.rejectAuth) {
       return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Digest realm="r", nonce="n", qop="auth"' } });

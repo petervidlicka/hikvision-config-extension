@@ -10,7 +10,7 @@
 
 import { applyNotifications, hasNotification, resolveEventActions } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
-import { byId, state } from '../state.js';
+import { byId, query, state } from '../state.js';
 import { loadTool } from './registry.js';
 import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
 import { cloneXml } from '../../lib/xml.js';
@@ -56,9 +56,12 @@ const UNAVAILABLE_HINTS = {
 function showToggles() {
   EVENT_ACTIONS.forEach(a => {
     const unavailable = state.eventActionTargets?.[a.key].unavailable ?? null;
+    const hint = unavailable ? UNAVAILABLE_HINTS[unavailable] : null;
     const row = byId(`eventRow_${a.key}`);
     row.classList.toggle('unavailable', unavailable !== null);
-    row.title = unavailable ? UNAVAILABLE_HINTS[unavailable] : '';
+    row.title = hint ?? '';
+    // The label's own title (the description) would win over the row's when hovered
+    query(row, 'span').title = hint ?? a.description;
     const toggle = byId(`eventToggle_${a.key}`);
     toggle.classList.toggle('on', state.eventActions[a.key]);
     toggle.setAttribute('aria-disabled', String(unavailable !== null));
@@ -151,6 +154,8 @@ export const eventsTool = {
 
   async save() {
     if (!state.config || !state.activeChannel) return;
+    const config = state.config;
+    const channelId = state.activeChannel;
     const loaded = state.eventTriggerDoc;
     const targets = state.eventActionTargets;
     if (!loaded || !targets) {
@@ -167,12 +172,15 @@ export const eventsTool = {
 
     setStatus('Saving event actions...');
     try {
-      const path = Isapi.eventTriggerSavePath(loaded, state.activeChannel);
-      const result = await Isapi.putXml(state.config, path, doc);
-      state.eventTriggerDoc = doc;
-      reportSaved('Event actions', result);
+      const result = await Isapi.putXml(config, Isapi.eventTriggerSavePath(loaded, channelId), doc);
+      // Only while the panel still holds the trigger this save started from:
+      // after a switch it holds another channel's, and a later save of that
+      // channel's toggles must not go to this trigger.
+      if (state.eventTriggerDoc === loaded) state.eventTriggerDoc = doc;
+      reportSaved('Event actions', result, channelId);
     } catch (err) {
-      showToast('Failed to save event actions: ' + errorMessage(err), 'error');
+      const which = state.activeChannel === channelId ? '' : ` for channel ${channelId}`;
+      showToast(`Failed to save event actions${which}: ${errorMessage(err)}`, 'error');
       setStatus('Save failed');
     }
   },

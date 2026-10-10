@@ -819,12 +819,13 @@ export function readLightAudioChannels(json, listName) {
  * - Alarm Output switches the channel's own camera relay (an output on the
  *   camera's IP address, e.g. DS-7604NI channel 3 → 301), else the device's
  *   first local output, else nothing.
- * - White Light and Audio Alarm, on a device whose triggersCap has
- *   isSupportWhiteLightOut / isSupportAudioOut (NVRs), switch the channel's
- *   own camera, if the NVR lists it. A device that doesn't name those flags
- *   keeps the bare "whiteLight" / "audio" methods this extension always wrote.
- *   Those are unverified: the DS-7604NI rejects them (badXmlContent), and no
- *   standalone camera has been tested.
+ * - White Light and Audio Alarm, on a device whose triggersCap names
+ *   isSupportWhiteLightOut or isSupportAudioOut (NVRs), switch the channel's
+ *   own camera, if the NVR lists it; one of the two the device doesn't flag
+ *   true is unavailable. A device that names neither flag keeps the bare
+ *   "whiteLight" / "audio" methods this extension always wrote. Those are
+ *   unverified: the DS-7604NI rejects them (badXmlContent, failing the whole
+ *   save), and no standalone camera has been tested.
  *
  * @param {XMLDocument} doc - the channel's trigger, for how it names channels
  * @param {EventActionSupport} support
@@ -844,6 +845,11 @@ export function resolveEventActions(doc, support, channel) {
     unavailable: cap !== null && cap[flag] !== true ? 'notSupported' : spec ? null : missing,
   });
   const output = alarmOutputFor(support.alarmOutputs, channel.ipAddress, cap?.isSupportIOOutputUnify === true);
+  // Either flag marks a device that addresses lights and speakers per camera,
+  // so neither action may fall back to the bare method there
+  const outFlavour = cap !== null && ('isSupportWhiteLightOut' in cap || 'isSupportAudioOut' in cap);
+  /** @param {string} flag */
+  const outFlag = flag => (outFlavour ? cap?.[flag] === true : undefined);
 
   return {
     record: gate(recordNotification(doc, channel.id), 'isSupportRecord'),
@@ -851,9 +857,9 @@ export function resolveEventActions(doc, support, channel) {
     email: gate(methodNotification('email'), 'isSupportEmail'),
     beep: gate(methodNotification('beep'), 'isSupportBeep'),
     IO: gate(output && alarmOutputNotification(output), 'isSupportIO', 'noAlarmOutput'),
-    whiteLight: lightAudioAction(cap?.isSupportWhiteLightOut, 'whiteLight', 'whiteLightOut',
+    whiteLight: lightAudioAction(outFlag('isSupportWhiteLightOut'), 'whiteLight', 'whiteLightOut',
       support.whiteLightChannels, channel.id, 'noWhiteLight'),
-    audio: lightAudioAction(cap?.isSupportAudioOut, 'audio', 'audioOut',
+    audio: lightAudioAction(outFlag('isSupportAudioOut'), 'audio', 'audioOut',
       support.audioChannels, channel.id, 'noSpeaker'),
   };
 }
@@ -877,7 +883,8 @@ function alarmOutputFor(outputs, ipAddress, unify) {
 
 /**
  * White Light or Audio Alarm for one channel (see resolveEventActions).
- * @param {boolean|undefined} flag - the device's isSupport…Out flag; undefined when it doesn't name it
+ * @param {boolean|undefined} flag - the device's isSupport…Out flag (false when only the other one is
+ *   named); undefined when it names neither
  * @param {string} bareMethod - what devices without the flag get
  * @param {'whiteLightOut'|'audioOut'} outMethod
  * @param {Set<string>} channels - channels the NVR lists for this action

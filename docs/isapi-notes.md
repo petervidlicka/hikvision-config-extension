@@ -118,15 +118,19 @@ The web UI (`eventMotion.js`) and write tests on the DS-7604NI (V4.75.206,
   (`AudioAlarmList[]`): channels 3 and 4 here. Both shapes were stored in
   write tests. A bare `<notificationMethod>whiteLight</notificationMethod>` or
   `audio`, which older versions wrote, fails the whole PUT with 400
-  `badXmlContent` ("Tag 16 is invalid (two root tags)"). Devices whose
-  triggersCap doesn't name the `*Out` flags still get the bare names; that is
-  unverified, since no standalone camera has been tested.
+  `badXmlContent` ("Tag 16 is invalid (two root tags)"). A device whose
+  triggersCap names either `*Out` flag never gets a bare name: a light or
+  speaker flag it leaves out disables that toggle. Devices that name neither
+  still get the bare names; that is unverified, since no standalone camera has
+  been tested.
 - **`notificationRecurrence`**: the NVR accepts it on a record entry but drops
   it, and neither the NVR, its web UI nor the SDK writes it. New entries copy
   it only when the trigger's own entries carry it (camera firmware).
 
 triggersCap, the outputs and the light and speaker lists describe the hardware,
-so the extension reads them once per connection. A save goes to
+so the extension reads them once per connection. One that answers an error
+other than "not here" (e.g. 503 busy), or a body that isn't XML, counts as
+absent for that load only. A save goes to
 `/ISAPI/Event/triggers/{id of the loaded trigger}`. When the per-trigger GET
 isn't there, the trigger is picked out of `/ISAPI/Event/triggers` by
 `videoInputChannelID`, `dynVideoInputChannelID` or id `VMD-{ch}`.
