@@ -3,9 +3,10 @@
  * and device-time handling.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { parseDeviceTime, toDeviceTime } from '../../extension/lib/device-time.js';
 import {
-  SEARCH_PAGE_SIZE, buildSearchXml, isEventRecordType, nextRecordingStart, parseCalendar, parseDeviceTime, parsePictures,
-  parseRecordings, parseSearchPage, recordKind, recordingAt, searchMatchKey, toDeviceTime,
+  SEARCH_PAGE_SIZE, buildSearchXml, isEventRecordType, nextRecordingStart, parseCalendar, parsePictures,
+  parseRecordings, parseSearchPage, recordKind, recordingAt, searchMatchKey,
 } from '../../extension/lib/playback.js';
 import { Isapi, MAX_SEARCH_REQUESTS } from '../../extension/lib/isapi.js';
 import { parseXml } from '../../extension/lib/xml.js';
@@ -20,12 +21,18 @@ import videoP128 from '../fixtures/search-nvr-video-p128.xml?raw';
 import picturesP0 from '../fixtures/search-nvr-pictures-p0.xml?raw';
 import picturesP64 from '../fixtures/search-nvr-pictures-p64.xml?raw';
 
+/**
+ * A device wall-clock time as the floating Date the extension keeps it as
+ * (see lib/device-time.js), with a month counted from 1.
+ */
+const at = (y, mo, d, h = 0, mi = 0, s = 0) => new Date(Date.UTC(y, mo - 1, d, h, mi, s));
+
 /** @param {string} xml */
 const recordingsOf = (xml) => parseRecordings(parseSearchPage(parseXml(xml)).matches);
 
 describe('device time', () => {
-  it('is local wall-clock time with a Z suffix, not UTC', () => {
-    const t = new Date(2026, 9, 10, 14, 5, 9);
+  it('is the device’s wall-clock time with a Z suffix, kept as a floating Date', () => {
+    const t = at(2026, 10, 10, 14, 5, 9);
     expect(toDeviceTime(t)).toBe('2026-10-10T14:05:09Z');
     expect(parseDeviceTime('2026-10-10T14:05:09Z')).toEqual(t);
     expect(parseDeviceTime('2026-10-10T14:05:09+02:00')).toEqual(t);
@@ -36,7 +43,7 @@ describe('device time', () => {
 describe('recording search', () => {
   it('builds the request the way the Hikvision web UI does', () => {
     const xml = buildSearchXml({
-      searchId: 'abc', trackId: '101', start: new Date(2026, 9, 10), end: new Date(2026, 9, 10, 23, 59, 59), position: 64,
+      searchId: 'abc', trackId: '101', start: at(2026, 10, 10), end: at(2026, 10, 10, 23, 59, 59), position: 64,
     });
     const root = parseXml(xml).documentElement;
     expect(root.localName).toBe('CMSearchDescription');
@@ -52,7 +59,7 @@ describe('recording search', () => {
     const { status, matches } = parseSearchPage(parseXml(searchPage1));
     expect(status).toBe('MORE');
     const recordings = parseRecordings(matches);
-    expect(recordings.map(r => [r.start.getHours(), r.start.getMinutes(), r.kind, r.isEvent]))
+    expect(recordings.map(r => [r.start.getUTCHours(), r.start.getUTCMinutes(), r.kind, r.isEvent]))
       .toEqual([[8, 0, 'continuous', false], [14, 5, 'event', true]]);
     expect(recordings[1].uri).toContain('name=00000000102000000');
   });
@@ -82,7 +89,7 @@ describe('recording search', () => {
   it('parses picture-track results as stored pictures', () => {
     const doc = parseXml(searchPage1.replaceAll('<trackID>101</trackID>', '<trackID>103</trackID>'));
     const pictures = parsePictures(parseSearchPage(doc).matches);
-    expect(pictures.map(p => p.time.getHours())).toEqual([8, 14]);
+    expect(pictures.map(p => p.time.getUTCHours())).toEqual([8, 14]);
     expect(pictures[0].uri).toMatch(/^rtsp:/);
   });
 
@@ -110,10 +117,10 @@ describe('recording search', () => {
 
   it('finds the recording at a moment and the next one after a gap', () => {
     const recordings = recordingsOf(searchPage1);
-    expect(recordingAt(recordings, new Date(2026, 9, 10, 8, 15))).toBe(recordings[0]);
-    expect(recordingAt(recordings, new Date(2026, 9, 10, 9, 0))).toBeNull();
-    expect(nextRecordingStart(recordings, new Date(2026, 9, 10, 9, 0))).toEqual(new Date(2026, 9, 10, 14, 5, 10));
-    expect(nextRecordingStart(recordings, new Date(2026, 9, 10, 20, 0))).toBeNull();
+    expect(recordingAt(recordings, at(2026, 10, 10, 8, 15))).toBe(recordings[0]);
+    expect(recordingAt(recordings, at(2026, 10, 10, 9, 0))).toBeNull();
+    expect(nextRecordingStart(recordings, at(2026, 10, 10, 9, 0))).toEqual(at(2026, 10, 10, 14, 5, 10));
+    expect(nextRecordingStart(recordings, at(2026, 10, 10, 20, 0))).toBeNull();
   });
 
   it('parses the month calendar', () => {
@@ -173,7 +180,7 @@ describe('Isapi playback requests', () => {
   /** @param {string} xml @param {string[]} items @returns {string} the page with these matches instead */
   const withMatches = (xml, items) => xml.replace(/<matchList>[\s\S]*<\/matchList>/, () => `<matchList>${items.join('')}</matchList>`);
 
-  const threeDays = [new Date(2026, 9, 7), new Date(2026, 9, 10, 23, 59, 59)];
+  const threeDays = [at(2026, 10, 7), at(2026, 10, 10, 23, 59, 59)];
 
   it('steps by the matches received, not by the page size or numOfMatches', async () => {
     const bodies = stubSearch(pagesAt({ 0: videoP0, 64: videoP64, 128: videoP128 }));
@@ -187,19 +194,19 @@ describe('Isapi playback requests', () => {
     // All 139, including the ~22 hours a 100-step would skip (positions 64–99)
     expect(recordings).toHaveLength(139);
     expect(new Set(recordings.map(r => r.uri)).size).toBe(139);
-    expect(recordings.some(r => r.start.getTime() === new Date(2026, 9, 8, 15, 44, 49).getTime())).toBe(true);
+    expect(recordings.some(r => r.start.getTime() === at(2026, 10, 8, 15, 44, 49).getTime())).toBe(true);
     expect(recordings.map(r => r.start.getTime())).toEqual(recordings.map(r => r.start.getTime()).sort((a, b) => a - b));
-    expect(recordings.at(-1).start).toEqual(new Date(2026, 9, 10, 13, 8, 3));
+    expect(recordings.at(-1).start).toEqual(at(2026, 10, 10, 13, 8, 3));
   });
 
   it('pages picture searches the same way, where numOfMatches is only the page’s count', async () => {
     const bodies = stubSearch(pagesAt({ 0: picturesP0, 64: picturesP64 }));
-    const pictures = await Isapi.searchPictures(config(), '1', new Date(2026, 9, 1), new Date(2026, 9, 10, 23, 59, 59));
+    const pictures = await Isapi.searchPictures(config(), '1', at(2026, 10, 1), at(2026, 10, 10, 23, 59, 59));
     expect(bodies.map(positionOf)).toEqual([0, 64]);
     expect(bodies.every(b => b.includes('<trackID>103</trackID>'))).toBe(true);
     expect(pictures).toHaveLength(113);
-    expect(pictures[0].time).toEqual(new Date(2026, 9, 1, 3, 10, 19));
-    expect(pictures.at(-1).time).toEqual(new Date(2026, 9, 10, 12, 7, 47));
+    expect(pictures[0].time).toEqual(at(2026, 10, 1, 3, 10, 19));
+    expect(pictures.at(-1).time).toEqual(at(2026, 10, 10, 12, 7, 47));
   });
 
   it('drops repeats when pages overlap', async () => {

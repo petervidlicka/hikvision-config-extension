@@ -2,6 +2,7 @@
  * Entry point of the config page (app.html).
  */
 
+import { parseDateKey } from '../lib/device-time.js';
 import { Isapi } from '../lib/isapi.js';
 import { bindCanvasEvents, redraw, resizeCanvas } from './canvas.js';
 import { connect, disconnect, handleAuthFailure, loadSavedCredentials } from './connection.js';
@@ -33,8 +34,8 @@ function bindAppEvents() {
   const dateInput = byId('pbDateInput', HTMLInputElement);
   byId('pbDateLabel').addEventListener('click', () => dateInput.showPicker());
   dateInput.addEventListener('change', () => {
-    const [y, m, d] = dateInput.value.split('-').map(Number);
-    if (y && m && d) setDate(new Date(y, m - 1, d));
+    const day = parseDateKey(dateInput.value);
+    if (day) setDate(day);
   });
   byId('pbFilter', HTMLSelectElement).addEventListener('change', (e) => {
     setFilter(/** @type {HTMLSelectElement} */ (e.target).value === 'events' ? 'events' : 'all');

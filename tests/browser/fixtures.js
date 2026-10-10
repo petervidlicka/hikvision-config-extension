@@ -26,6 +26,7 @@ import videoInputChannelsHybrid from '../fixtures/videoInputChannels-hybrid.xml?
 import inputProxyChannelsHybrid from '../fixtures/inputProxyChannels-hybrid.xml?raw';
 import userCheckNvr from '../fixtures/userCheck-nvr.xml?raw';
 import streamingChannelsNvr from '../fixtures/streamingChannels-nvr.xml?raw';
+import systemTimeNvr from '../fixtures/systemTime-nvr.xml?raw';
 
 export const fixtures = {
   // motionDetectionNvr is the DS-7604NI's channel 1 config as captured
@@ -43,6 +44,8 @@ export const fixtures = {
   videoInputChannelsHybrid, inputProxyChannelsHybrid,
   // The DS-7604NI's stream list: each camera's main stream 2688×1520, sub stream 640×360
   streamingChannelsNvr,
+  // The DS-7604NI's clock, read at 13:03 CEST: right wall-clock time, "+01:00" without daylight saving
+  systemTimeNvr,
 };
 
 const captured = import.meta.glob('../fixtures/local/*_motionDetection.xml', { query: '?raw', import: 'default', eager: true });

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<Time version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<timeMode>platform</timeMode>
+<platformType>EZVIZ</platformType>
+<localTime>2026-10-10T13:03:16+01:00</localTime>
+<timeZone>CST-1:00:00DST01:00:00,M3.5.0/02:00:00,M10.5.0/02:00:00</timeZone>
+</Time>

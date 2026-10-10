@@ -14,6 +14,7 @@ read -rs "pw?Password for $user@$host: "; echo
 
 paths=(
   "/ISAPI/System/deviceInfo"
+  "/ISAPI/System/time"
   "/ISAPI/System/Video/inputs/channels"
   "/ISAPI/ContentMgmt/InputProxy/channels"
   "/ISAPI/ContentMgmt/InputProxy/channels/status"

@@ -30,6 +30,9 @@
   `mockDevice.snapshotRefreshMs = 0` for a camera that sends a new picture
   for every request (about 3–5 fps), and switch to another tab and back to
   see the feeds stop and resume in `mockDevice.requests`.
+  Playback finds the same recordings on every day. Its "Today" is the
+  device's: set `mockDevice.localTime = '2026-10-25T15:00:00+01:00'` before
+  Connect for a device on another date (here the day the clocks go back).
   Use host 192.168.0.108 and any password to connect.
 -->
 <script type="module">

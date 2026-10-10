@@ -6,10 +6,12 @@
  * privacy masks and event triggers stored the way the NVR stores them, the
  * cameras on channels 3 and 4 with a relay, white light and speaker,
  * errors and write results as <ResponseStatus> bodies, the userCheck
- * login check, which cameras are online, their 2688×1520 main streams, and
- * the NVR's squeezed 704×576 snapshots.
+ * login check, which cameras are online, their 2688×1520 main streams, the
+ * NVR's squeezed 704×576 snapshots, and its clock with an offset that
+ * leaves out daylight saving.
  *
- * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
+ * Used by tests/browser/app.test.js, tests/timezones/ and the manual harness
+ * in tests/harness/.
  */
 import motionDetection from '../fixtures/motionDetection-nvr.xml?raw';
 import motionCapabilities from '../fixtures/motionCapabilities-nvr.xml?raw';
@@ -24,6 +26,7 @@ import audioAlarmChannels from '../fixtures/audioAlarmChannels-nvr.json?raw';
 import userCheck from '../fixtures/userCheck-nvr.xml?raw';
 import channelStatus from '../fixtures/inputProxyChannelsStatus-nvr.xml?raw';
 import streamingChannels from '../fixtures/streamingChannels-nvr.xml?raw';
+import systemTime from '../fixtures/systemTime-nvr.xml?raw';
 
 export const NVR_HOST = '192.168.0.108';
 
@@ -195,23 +198,48 @@ async function frame({ width, height }) {
   return canvas.convertToBlob({ type: 'image/jpeg' });
 }
 
-/** Today's recordings: continuous 08:00–08:30, a manual one at 10:00 and a motion event at 14:05. */
-function todaysRecordings() {
-  const d = new Date();
-  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  /** @param {string} start @param {string} end @param {string} type */
-  const item = (start, end, type) => `<searchMatchItem><trackID>101</trackID>
+/**
+ * A moment on the browser's wall clock, as a device writes its own time.
+ * @param {Date} moment
+ * @returns {string} "YYYY-MM-DDThh:mm:ss"
+ */
+function wallClock(moment) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${moment.getFullYear()}-${pad(moment.getMonth() + 1)}-${pad(moment.getDate())}` +
+    `T${pad(moment.getHours())}:${pad(moment.getMinutes())}:${pad(moment.getSeconds())}`;
+}
+
+/**
+ * Every day's recordings: continuous 08:00–08:30, a manual one at 10:00 and
+ * a motion event at 14:05.
+ * @type {{start: string, end: string, type: string}[]}
+ */
+const DAILY_RECORDINGS = [
+  { start: '08:00:00', end: '08:30:00', type: 'CMR' },
+  { start: '10:00:00', end: '10:05:00', type: 'manual' },
+  { start: '14:05:10', end: '14:06:40', type: 'VideoMotion' },
+];
+
+/**
+ * A video search's answer: the recordings at these wall-clock times on a day.
+ * @param {string} day - "YYYY-MM-DD", the day the search starts on
+ * @param {{start: string, end: string, type: string}[]} recordings
+ */
+function recordingsOn(day, recordings) {
+  /** @param {{start: string, end: string, type: string}} r */
+  const item = ({ start, end, type }) => `<searchMatchItem><trackID>101</trackID>
     <timeSpan><startTime>${day}T${start}Z</startTime><endTime>${day}T${end}Z</endTime></timeSpan>
     <mediaSegmentDescriptor><playbackURI>rtsp://${NVR_HOST}/Streaming/tracks/101/?name=${start}</playbackURI></mediaSegmentDescriptor>
     <metadataMatches><metadataDescriptor>recordType.meta.std-cgi.com/${type}</metadataDescriptor></metadataMatches></searchMatchItem>`;
-  return `<CMSearchResult><responseStatusStrg>OK</responseStatusStrg><numOfMatches>3</numOfMatches><matchList>
-    ${item('08:00:00', '08:30:00', 'CMR')}${item('10:00:00', '10:05:00', 'manual')}${item('14:05:10', '14:06:40', 'VideoMotion')}</matchList></CMSearchResult>`;
+  return `<CMSearchResult><responseStatusStrg>OK</responseStatusStrg><numOfMatches>${recordings.length}</numOfMatches><matchList>
+    ${recordings.map(item).join('')}</matchList></CMSearchResult>`;
 }
 
-/** Today's picture track: one stored picture at 00:46:08. */
-function todaysPictures() {
-  const d = new Date();
-  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+/**
+ * A picture search's answer: one stored picture at 00:46:08 on a day.
+ * @param {string} day - "YYYY-MM-DD"
+ */
+function picturesOn(day) {
   return `<CMSearchResult><responseStatusStrg>OK</responseStatusStrg><numOfMatches>1</numOfMatches><matchList>
     <searchMatchItem><trackID>103</trackID><timeSpan><startTime>${day}T00:46:08Z</startTime><endTime>${day}T00:46:08Z</endTime></timeSpan>
     <mediaSegmentDescriptor><contentType>picture</contentType>
@@ -236,6 +264,12 @@ function todaysPictures() {
  * (e.g. ['4']); their snapshots answer 503 serviceUnavailable, as an empty
  * channel's do on the DS-7604NI. `privacy.read(path)` shows the privacy
  * masks a channel stores, `triggers.read(channel)` its motion trigger.
+ *
+ * Every day has `recordings` (wall-clock times; the search answers for the
+ * day it starts on) and a stored picture at 00:46:08, and `searches` lists
+ * the search bodies. The device's clock (/ISAPI/System/time) is the
+ * browser's wall clock, or `localTime` when set: e.g. a device in another
+ * time zone, or on a daylight-saving changeover day.
  *
  * Live snapshots take `snapshotDelayMs` to answer (changeable later) and
  * are a new picture every time, like a camera's, unless `snapshotRefreshMs`
@@ -275,6 +309,12 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     triggers: createTriggerStore(),
     /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
     recordedFrames: /** @type {'real'|'ignoresTime'|'none'} */ ('real'),
+    /** What /ISAPI/System/time says, e.g. "2026-10-25T15:00:00+01:00"; null: the browser's wall clock */
+    localTime: /** @type {string|null} */ (null),
+    /** Each day's recordings, by wall-clock time */
+    recordings: DAILY_RECORDINGS,
+    /** @type {string[]} the bodies of recording and picture searches */
+    searches: [],
   };
   const xml = (body, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/xml; charset="UTF-8"' } });
   const json = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/json; charset="UTF-8"' } });
@@ -354,12 +394,20 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       return xml(responseStatusXml(p, device.writeStatus));
     }
     if (method === 'POST' && p === '/ISAPI/ContentMgmt/search') {
-      return xml(/<trackID>\d+03<\/trackID>/.test(String(opts.body)) ? todaysPictures() : todaysRecordings());
+      const body = String(opts.body);
+      const day = /<startTime>(\d{4}-\d{2}-\d{2})T/.exec(body)?.[1] ?? '';
+      device.searches.push(body);
+      return xml(/<trackID>\d+03<\/trackID>/.test(body) ? picturesOn(day) : recordingsOn(day, device.recordings));
     }
     // A stored picture is 1280×720 on the DS-7604NI
     if (p.startsWith('/picture/Streaming/tracks/')) return new Response(await frame({ width: 1280, height: 720 }), { status: 200 });
     if (method === 'POST' && p.endsWith('/dailyDistribution')) {
-      return xml(`<trackDailyDistribution><dayList><day><dayOfMonth>${new Date().getDate()}</dayOfMonth><record>true</record></day></dayList></trackDailyDistribution>`);
+      // Every day has recordings, as every day's search finds some
+      const year = Number(/<year>(\d+)</.exec(String(opts.body))?.[1]);
+      const month = Number(/<monthOfYear>(\d+)</.exec(String(opts.body))?.[1]);
+      const days = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      return xml('<trackDailyDistribution><dayList>' + Array.from({ length: days }, (_, i) =>
+        `<day><dayOfMonth>${i + 1}</dayOfMonth><record>true</record></day>`).join('') + '</dayList></trackDailyDistribution>');
     }
     if (u.searchParams.has('starttime') && p.endsWith('/picture')) {
       const before2001 = (u.searchParams.get('starttime') ?? '').startsWith('2000');
@@ -367,6 +415,11 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       return image ? new Response(await frame(device.stillSize), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
     }
     if (p === '/ISAPI/Security/userCheck') return xml(userCheck);
+    if (p === '/ISAPI/System/time') {
+      // Like the DS-7604NI's: the right wall-clock time with a "+01:00" that
+      // leaves out daylight saving
+      return xml(systemTime.replace(/<localTime>[^<]*</, `<localTime>${device.localTime ?? `${wallClock(new Date())}+01:00`}<`));
+    }
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
     if (p === '/ISAPI/System/Video/inputs/channels') return xml(responseStatusXml(p, STATUS.notSupport), 403);
     if (p === '/ISAPI/ContentMgmt/InputProxy/channels') {

@@ -363,7 +363,7 @@ describe('Isapi', () => {
   });
 
   it('treats any error answer as "no recorded frame", but not a missing answer', async () => {
-    const time = new Date(2024, 0, 1, 12);
+    const time = new Date(Date.UTC(2024, 0, 1, 12));
     mockDevice({}); // 404 everywhere
     expect(await Isapi.getRecordedFrame(testConfig(), '1', time)).toBeNull();
 
@@ -372,6 +372,36 @@ describe('Isapi', () => {
 
     mockDevice({ '/ISAPI/ContentMgmt/StreamingProxy/channels/101/picture': { unreachable: true } });
     await expect(Isapi.getRecordedFrame(testConfig(), '1', time)).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it('asks for recorded frames at the device’s wall-clock time, whatever the browser’s zone', async () => {
+    // 02:30 on the day clocks spring forward: no such time in Central Europe, but the device's clock shows it
+    let calls = mockDevice({});
+    await Isapi.getRecordedFrame(testConfig(), '1', new Date(Date.UTC(2027, 2, 28, 2, 30)));
+    expect(calls[0]).toBe('/ISAPI/ContentMgmt/StreamingProxy/channels/101/picture?starttime=2027-03-28T02%3A30%3A00Z');
+    // The probe for firmware that ignores the time asks for midnight at the start of 2000
+    calls = mockDevice({});
+    expect(await Isapi.ignoresRecordedFrameTime(testConfig(), '1')).toBe(false);
+    expect(calls[0]).toMatch(/\?starttime=2000-01-01T00%3A00%3A00Z$/);
+  });
+
+  it('reads the device’s wall-clock time and ignores the offset it gives', async () => {
+    // Captured at 13:03 CEST: the wall-clock part is right, "+01:00" leaves out daylight saving
+    mockDevice({ '/ISAPI/System/time': { body: fixtures.systemTimeNvr } });
+    expect(await Isapi.getDeviceTime(testConfig())).toEqual(new Date(Date.UTC(2026, 9, 10, 13, 3, 16)));
+
+    // A device that doesn't tell its time leaves "today" to the browser's clock
+    for (const route of [
+      statusRoute(403, 4, 'notSupport'), statusRoute(403, 4, 'lowPrivilege'), { status: 404 },
+      { body: '<html><body>Not XML</body></html>' }, { body: '<Time><timeMode>NTP</timeMode></Time>' },
+      { body: '<Time><localTime>2026-02-30T10:00:00+01:00</localTime></Time>' },
+    ]) {
+      mockDevice({ '/ISAPI/System/time': route });
+      expect(await Isapi.getDeviceTime(testConfig())).toBeNull();
+    }
+    // No answer isn't an answer
+    mockDevice({ '/ISAPI/System/time': { unreachable: true } });
+    await expect(Isapi.getDeviceTime(testConfig())).rejects.toBeInstanceOf(NetworkError);
   });
 
   it('doesn’t take a slow answer for a moment before any recording as the live image', async () => {

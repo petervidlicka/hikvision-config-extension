@@ -5,27 +5,41 @@
  *
  * Browsers can't decode the device's recorded video stream without
  * Hikvision's plugin, so "playing" steps through still frames.
+ *
+ * Days and times are the device's wall-clock time, as floating Dates (see
+ * lib/device-time.js), so a day is always 00:00–23:59:59 on the device's
+ * clock, whatever the browser's time zone and on daylight-saving changeover
+ * days too. "Today" is the device's today, from its own clock.
  */
 
+import {
+  addDays, clockOffsetMs, dateKey, dayFraction, deviceNow, endOfDay, formatDate, localWallClock, sameDay, sameMonth,
+  startOfDay, timeAtDayFraction, timeOfDay,
+} from '../lib/device-time.js';
 import { AuthError } from '../lib/digest-auth.js';
+import { NetworkError } from '../lib/errors.js';
 import { Isapi } from '../lib/isapi.js';
-import { nextRecordingStart, recordingAt } from '../lib/playback.js';
+import { RecordingDaysCache, nextRecordingStart, recordingAt } from '../lib/playback.js';
 import { clearFrame, fitStreamAspect, showFrame } from './feed.js';
 import { resizeCanvas } from './canvas.js';
 import { byId, dom, queryAll, state } from './state.js';
 import { errorMessage, setStatus } from './ui.js';
 
+/** @typedef {import('../lib/digest-auth.js').DeviceConfig} DeviceConfig */
 /** @typedef {import('../lib/playback.js').Recording} Recording */
 /** @typedef {import('../lib/playback.js').RecordKind} RecordKind */
 /** @typedef {import('../lib/playback.js').StoredPicture} StoredPicture */
 
 /**
  * @typedef {object} PlaybackState
- * @property {Date} date - the day shown (local midnight)
+ * @property {Date} date - the day shown: its midnight on the device's clock, floating
+ * @property {number|null} clockOffsetMs - how far the device's clock is ahead of the browser's
+ *   (see deviceToday); null until read on this connection
  * @property {Recording[]} recordings - that day's recordings, sorted
  * @property {StoredPicture[]} pictures - that day's stored pictures, sorted
  * @property {number[]} recordingDays - days of that month with recordings
- * @property {Date|null} current - playhead position
+ * @property {RecordingDaysCache} calendar - the shown channel's months asked for so far
+ * @property {Date|null} current - playhead position, floating
  * @property {boolean} playing
  * @property {1|2|4} speed - recorded seconds per real second
  * @property {'all'|'events'} filter
@@ -34,7 +48,6 @@ import { errorMessage, setStatus } from './ui.js';
  * @property {number} searchId - ignores results of superseded searches
  */
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 /** Real time between frames while playing. */
 const PLAY_TICK_MS = 1000;
 /** How close (px) a click must be to a picture marker to open it. */
@@ -53,13 +66,19 @@ const RECORD_COLORS = {
   event: 'rgba(239, 68, 68, 0.75)',
 };
 
-/** @returns {PlaybackState} */
+/**
+ * Playback as a new connection starts it: today by the browser's clock,
+ * until the device's own clock is read.
+ * @returns {PlaybackState}
+ */
 export function initialPlaybackState() {
   return {
-    date: startOfDay(new Date()),
+    date: startOfDay(localWallClock()),
+    clockOffsetMs: null,
     recordings: [],
     pictures: [],
     recordingDays: [],
+    calendar: new RecordingDaysCache(),
     current: null,
     playing: false,
     speed: 1,
@@ -70,25 +89,63 @@ export function initialPlaybackState() {
   };
 }
 
-/** @param {Date} date */
-function startOfDay(date) {
-  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+/**
+ * The device's date now, which recordings are filed under: by the device's
+ * clock once read, by the browser's until then (or when the device doesn't
+ * tell its time). The two differ when the browser is in another time zone,
+ * so the device's newest day may be the browser's tomorrow or yesterday.
+ * @returns {Date} floating midnight
+ */
+function deviceToday() {
+  return startOfDay(deviceNow(state.playback.clockOffsetMs ?? 0));
 }
 
-/** @param {Date} a @param {Date} b */
-function sameDay(a, b) {
-  return a.toDateString() === b.toDateString();
-}
-
-/** Show the Playback section for the active channel. */
-export function enterPlayback() {
+/**
+ * Show the Playback section for the active channel. The first time on a
+ * connection it reads the device's clock first, and then shows the
+ * device's today (unless a visit whose clock read failed showed another
+ * day than the browser's today: the user may have picked it).
+ * @returns {Promise<void>}
+ */
+export async function enterPlayback() {
   byId('playbackSection').style.display = 'block';
   byId('playbackBar').style.display = '';
   dom.noFeed.style.display = 'none';
   dom.canvasWrapper.style.display = 'block';
   dom.canvas.style.cursor = 'default';
   clearFrame(dom.videoFeed);
-  setDate(state.playback.date);
+
+  const pb = state.playback;
+  if (pb.clockOffsetMs === null && state.config) {
+    const showsToday = pb.searchId === 0 || sameDay(pb.date, deviceToday());
+    setInfo('Searching recordings…');
+    await readDeviceClock(state.config, pb);
+    // Left Playback, or disconnected, while the device answered
+    if (state.playback !== pb || state.activeSection !== 'playback') return;
+    if (showsToday) pb.date = deviceToday();
+  }
+  setDate(pb.date);
+}
+
+/**
+ * Learn how far the device's clock is from the browser's, once per
+ * connection. A device that doesn't tell its time (an error answer) leaves
+ * the browser's clock to stand in for good.
+ * @param {DeviceConfig} config
+ * @param {PlaybackState} pb
+ * @returns {Promise<void>}
+ */
+async function readDeviceClock(config, pb) {
+  try {
+    const time = await Isapi.getDeviceTime(config);
+    pb.clockOffsetMs = time ? clockOffsetMs(time) : 0;
+  } catch (err) {
+    // No answer (NetworkError, TimeoutError): the browser's clock stands in
+    // for now and the next visit asks again. The search that follows asks
+    // the same device, so it reports the failure. A rejected login has
+    // already disconnected (Isapi.onAuthFailure).
+    if (!(err instanceof NetworkError || err instanceof AuthError)) throw err;
+  }
 }
 
 /**
@@ -110,32 +167,32 @@ export function resetPlayback() {
 }
 
 /**
- * Show a day: update the date controls and search its recordings.
- * @param {Date} date
+ * Show a day: update the date controls and search its recordings. Days up
+ * to the device's today can be shown, even when that is the browser's
+ * tomorrow.
+ * @param {Date} date - floating, any time of that day
  */
 export function setDate(date) {
   const pb = state.playback;
   pb.date = startOfDay(date);
   pause();
 
-  const today = new Date();
-  const yesterday = new Date(today.getTime() - DAY_MS);
+  const today = deviceToday();
   byId('pbDateLabel').textContent = sameDay(pb.date, today) ? 'Today'
-    : sameDay(pb.date, yesterday) ? 'Yesterday'
-      : pb.date.toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
+    : sameDay(pb.date, addDays(today, -1)) ? 'Yesterday'
+      : formatDate(pb.date, { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' });
   const input = byId('pbDateInput', HTMLInputElement);
-  input.value = `${pb.date.getFullYear()}-${String(pb.date.getMonth() + 1).padStart(2, '0')}-${String(pb.date.getDate()).padStart(2, '0')}`;
-  input.max = new Date(today.getTime() - today.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
-  byId('pbDateNext', HTMLButtonElement).disabled = sameDay(pb.date, today);
+  input.value = dateKey(pb.date);
+  input.max = dateKey(today);
+  byId('pbDateNext', HTMLButtonElement).disabled = pb.date >= today;
 
   searchDay();
 }
 
 /** @param {number} delta - days to move, e.g. -1 */
 export function shiftDate(delta) {
-  const next = new Date(state.playback.date);
-  next.setDate(next.getDate() + delta);
-  if (next > new Date()) return;
+  const next = addDays(state.playback.date, delta);
+  if (next > deviceToday()) return;
   setDate(next);
 }
 
@@ -155,12 +212,12 @@ async function searchDay() {
   pb.current = null;
   renderTimeline();
 
-  const dayEnd = new Date(date.getTime() + DAY_MS - 1000);
+  const dayEnd = endOfDay(date);
   try {
     const [recordings, pictures, days, ignoresTime] = await Promise.all([
       Isapi.searchRecordings(config, channelId, date, dayEnd),
       Isapi.searchPictures(config, channelId, date, dayEnd).catch(() => []),
-      Isapi.getRecordingDays(config, channelId, date.getFullYear(), date.getMonth() + 1).catch(() => []),
+      recordingDaysOf(config, channelId, date, pb.calendar),
       // Only ask once per channel whether stills from recordings are real
       pb.framesSupported === null ? Isapi.ignoresRecordedFrameTime(config, channelId) : Promise.resolve(false),
     ]);
@@ -176,6 +233,29 @@ async function searchDay() {
     if (searchId !== pb.searchId || err instanceof AuthError) return;
     setInfo(`Search failed: ${errorMessage(err)}`);
     renderTimeline();
+  }
+}
+
+/**
+ * The days with recordings in a day's month, asked for only when the
+ * calendar cache doesn't have them (see RecordingDaysCache).
+ * @param {DeviceConfig} config
+ * @param {string} channelId
+ * @param {Date} date - floating
+ * @param {RecordingDaysCache} calendar - the connection's cache
+ * @returns {Promise<number[]>} empty when the calendar request failed: it is optional, and asked again next time
+ */
+async function recordingDaysOf(config, channelId, date, calendar) {
+  const year = date.getUTCFullYear();
+  const month = date.getUTCMonth() + 1;
+  const cached = calendar.get(channelId, year, month, { now: performance.now(), currentMonth: sameMonth(date, deviceToday()) });
+  if (cached) return cached;
+  try {
+    return calendar.set(channelId, year, month, await Isapi.getRecordingDays(config, channelId, year, month), performance.now());
+  } catch {
+    // Only the summary lists these days; the day's own search, sent to the
+    // same device at the same time, reports what went wrong
+    return [];
   }
 }
 
@@ -195,7 +275,7 @@ function describeDay() {
     lines.push(`${pb.pictures.length} stored picture${pb.pictures.length > 1 ? 's' : ''}: click a yellow marker to view.`);
   }
   if (pb.recordingDays.length > 0) {
-    const month = pb.date.toLocaleDateString(undefined, { month: 'long' });
+    const month = formatDate(pb.date, { month: 'long' });
     lines.push(`Days with recordings in ${month}: ${pb.recordingDays.join(', ')}.`);
   }
   if (pb.framesSupported === false) lines.push(FRAMES_UNSUPPORTED);
@@ -242,7 +322,7 @@ export function renderTimeline() {
   }
 
   /** @param {Date} t */
-  const toX = (t) => ((t.getTime() - pb.date.getTime()) / DAY_MS) * width;
+  const toX = (t) => dayFraction(t, pb.date) * width;
   for (const r of pb.recordings) {
     if (pb.filter === 'events' && !r.isEvent) continue;
     g.fillStyle = RECORD_COLORS[r.kind];
@@ -267,19 +347,19 @@ function updatePlayhead() {
   const pb = state.playback;
   const playhead = byId('pbPlayhead');
   playhead.style.display = pb.current ? '' : 'none';
-  byId('pbTimestamp').textContent = pb.current ? pb.current.toTimeString().slice(0, 8) : '--:--:--';
+  byId('pbTimestamp').textContent = pb.current ? timeOfDay(pb.current) : '--:--:--';
   if (pb.current) {
-    playhead.style.left = `${(((pb.current.getTime() - pb.date.getTime()) / DAY_MS) * 100).toFixed(3)}%`;
+    playhead.style.left = `${(dayFraction(pb.current, pb.date) * 100).toFixed(3)}%`;
   }
 }
 
 /**
  * Jump to a moment and show the frame there.
- * @param {Date} time
+ * @param {Date} time - floating, kept within the shown day
  */
 export function seek(time) {
   const pb = state.playback;
-  const dayEnd = new Date(pb.date.getTime() + DAY_MS - 1000);
+  const dayEnd = endOfDay(pb.date);
   pb.current = time < pb.date ? pb.date : time > dayEnd ? dayEnd : time;
   updatePlayhead();
   showFrameAt(pb.current);
@@ -294,13 +374,12 @@ export function seekFromClick(e) {
   const pb = state.playback;
   const rect = byId('pbTimelineWrap').getBoundingClientRect();
   const x = Math.min(rect.width, Math.max(0, e.clientX - rect.left));
-  const picture = pb.pictures.find(p =>
-    Math.abs(((p.time.getTime() - pb.date.getTime()) / DAY_MS) * rect.width - x) <= MARKER_HIT_PX);
+  const picture = pb.pictures.find(p => Math.abs(dayFraction(p.time, pb.date) * rect.width - x) <= MARKER_HIT_PX);
   if (picture) {
     showStoredPicture(picture);
     return;
   }
-  seek(new Date(pb.date.getTime() + (x / rect.width) * DAY_MS));
+  seek(timeAtDayFraction(pb.date, x / rect.width));
 }
 
 /**
@@ -328,7 +407,7 @@ async function showStoredPicture(picture) {
     if (state.activeSection !== 'playback') return;
     dom.videoFeed.onload = fitPlaybackFrame;
     showFrame(dom.videoFeed, blob);
-    setStatus(`Stored picture from ${picture.time.toTimeString().slice(0, 8)}`);
+    setStatus(`Stored picture from ${timeOfDay(picture.time)}`);
   } catch (err) {
     if (!(err instanceof AuthError)) setStatus(`Couldn’t load picture: ${errorMessage(err)}`);
   }
@@ -424,6 +503,7 @@ export function setFilter(filter) {
 /** The active channel changed while in Playback: search it for the same day. */
 export function onPlaybackChannelChange() {
   state.playback.framesSupported = null;
+  state.playback.calendar.clear();
   clearFrame(dom.videoFeed);
   setDate(state.playback.date);
 }

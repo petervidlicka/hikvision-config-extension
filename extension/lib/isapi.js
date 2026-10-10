@@ -9,14 +9,16 @@
  * one policy (isFallbackError in lib/errors.js): move on only when the device
  * answered "not here", stop on anything that would fail the same way again.
  *
- * Depends on lib/channels.js, lib/config-xml.js, lib/digest-auth.js,
- * lib/errors.js, lib/playback.js, lib/snapshots.js and lib/xml.js.
+ * Depends on lib/channels.js, lib/config-xml.js, lib/device-time.js,
+ * lib/digest-auth.js, lib/errors.js, lib/playback.js, lib/snapshots.js and
+ * lib/xml.js.
  */
 
 import {
   applyChannelStatus, mergeChannelLists, readChannelList, readChannelStatus, readMainStreamSizes, readStreamingChannels,
 } from './channels.js';
 import { applyPrivacyMask, readAlarmOutputs, readLightAudioChannels, readMotionTriggerCap } from './config-xml.js';
+import { parseDeviceTime, toDeviceTime } from './device-time.js';
 import {
   AuthError, digestFetch, forgetDigestSessions, forgetRejectedCredentials, rejectCredentials,
 } from './digest-auth.js';
@@ -25,7 +27,7 @@ import {
   parseLoginStatus, parseResponseStatus,
 } from './errors.js';
 import {
-  buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey, toDeviceTime,
+  buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey,
 } from './playback.js';
 import { SnapshotSource, fullSizeUpgrade, isJpeg, snapshotPaths } from './snapshots.js';
 import {
@@ -159,6 +161,9 @@ const STREAMING_CHANNELS_PATH = '/ISAPI/Streaming/channels';
 
 /** Which IP cameras an NVR is connected to (see Isapi.getChannelStatus). */
 const CHANNEL_STATUS_PATH = '/ISAPI/ContentMgmt/InputProxy/channels/status';
+
+/** The device's clock and time zone (see Isapi.getDeviceTime). */
+const SYSTEM_TIME_PATH = '/ISAPI/System/time';
 
 export const Isapi = {
   /**
@@ -652,8 +657,8 @@ export const Isapi = {
    * or only repeats from firmware that ignores the position.
    * @param {DeviceConfig} config
    * @param {string} trackId - e.g. "101" for channel 1's main stream, "103" for its pictures
-   * @param {Date} start
-   * @param {Date} end
+   * @param {Date} start - the device's wall-clock time, floating (lib/device-time.js)
+   * @param {Date} end - the same
    * @returns {Promise<Element[]>} searchMatchItem elements without repeats, in the order received
    */
   async searchMatches(config, trackId, start, end) {
@@ -680,13 +685,37 @@ export const Isapi = {
    * All recordings of a channel's main stream in a time range.
    * @param {DeviceConfig} config
    * @param {string} channelId
-   * @param {Date} start
-   * @param {Date} end
+   * @param {Date} start - the device's wall-clock time, floating (lib/device-time.js)
+   * @param {Date} end - the same
    * @returns {Promise<Recording[]>} sorted by start time
    */
   async searchRecordings(config, channelId, start, end) {
     const matches = await this.searchMatches(config, `${channelId}01`, start, end);
     return parseRecordings(matches).sort((a, b) => a.start.getTime() - b.start.getTime());
+  },
+
+  /**
+   * The device's wall-clock time now, from <localTime> in /ISAPI/System/time,
+   * which tells playback which day is "today" for the device's recordings.
+   * Only the wall-clock part counts: the DS-7604NI writes 13:23 CEST as
+   * "13:23:07+01:00", an offset without daylight saving, so the offset is
+   * ignored, like every device time (lib/device-time.js).
+   * @param {DeviceConfig} config
+   * @returns {Promise<Date|null>} floating; null when the device doesn't say
+   *   (an error answer such as notSupport or lowPrivilege, or no usable <localTime>)
+   * @throws {Error} AuthError, NetworkError or TimeoutError
+   */
+  async getDeviceTime(config) {
+    let resp;
+    try {
+      resp = await this.request(config, 'GET', SYSTEM_TIME_PATH);
+    } catch (err) {
+      if (err instanceof IsapiError) return null;
+      throw err;
+    }
+    const doc = parseXmlOrNull(String(resp.data));
+    const localTime = doc ? childText(doc.documentElement, 'localTime') : null;
+    return localTime ? parseDeviceTime(localTime) : null;
   },
 
   /**
@@ -707,8 +736,8 @@ export const Isapi = {
    * Pictures on a channel's picture track (track …03) in a time range.
    * @param {DeviceConfig} config
    * @param {string} channelId
-   * @param {Date} start
-   * @param {Date} end
+   * @param {Date} start - the device's wall-clock time, floating (lib/device-time.js)
+   * @param {Date} end - the same
    * @returns {Promise<StoredPicture[]>} sorted by time
    */
   async searchPictures(config, channelId, start, end) {
@@ -743,7 +772,7 @@ export const Isapi = {
    */
   async ignoresRecordedFrameTime(config, channelId) {
     try {
-      return (await this.getRecordedFrame(config, channelId, new Date(2000, 0, 1))) !== null;
+      return (await this.getRecordedFrame(config, channelId, new Date(Date.UTC(2000, 0, 1)))) !== null;
     } catch (err) {
       // A device that ignores the time answers as fast as a live snapshot
       if (err instanceof TimeoutError) return false;
@@ -759,7 +788,7 @@ export const Isapi = {
    * ignoresRecordedFrameTime() first.
    * @param {DeviceConfig} config
    * @param {string} channelId
-   * @param {Date} time
+   * @param {Date} time - the device's wall-clock time, floating (lib/device-time.js)
    * @returns {Promise<Blob|null>}
    */
   async getRecordedFrame(config, channelId, time) {

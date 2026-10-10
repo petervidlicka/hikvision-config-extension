@@ -210,6 +210,48 @@ four kinds (`recordKind` in `lib/playback.js`; `personOrVehicel` is an event).
 Manual and command recordings are not events, so the events-only filter leaves
 them out. This NVR records on a schedule and only ever returns `timing`.
 
+### Device time and days
+
+Search times, results and recorded-frame `starttime` values are the device's
+wall-clock time with a `Z` suffix: `2026-10-25T12:00:00Z` is 12:00 on the
+NVR's clock, not UTC. iVMS sends the fields as they are (zero time
+difference), and the web UI searches whole days of them.
+
+The extension used to hold these as browser-local `Date`s and measure a day as
+24 hours of elapsed time from local midnight. On a daylight-saving changeover
+day that is wrong: with the browser in Europe/Prague, 2026-10-25 lasts 25 hours,
+so the search ended at 22:59:59 (the last hour of recordings was never shown)
+and 12:00 was drawn at 13:00; on 2027-03-28 (23 hours) the search ran to 00:59
+the next day, everything after 02:00 was drawn an hour early, and a recording
+at 02:30 (a time Prague skips) was shown at 03:30. A browser in another zone
+than the NVR couldn't reach the NVR's newest day either, because "today" and
+the date picker's limit followed the browser's date.
+
+So device times are "floating" Dates (`lib/device-time.js`): the wall-clock
+fields stored as if they were UTC and read only in UTC. A day is then always
+00:00:00–23:59:59 and 12:00 is half-way along the timeline, in any zone. Tests
+run this in Europe/Prague and America/New_York on both zones' changeover days
+(`tests/timezones`).
+
+"Today" is the device's. Playback reads `<localTime>` from `GET
+/ISAPI/System/time` once per connection, keeps how far that is from the
+browser's wall clock, and allows days up to the device's today, even when that
+is the browser's tomorrow. Only the wall-clock part counts: the DS-7604NI
+(V4.75) answered `2026-10-10T13:23:07+01:00` at 13:23 CEST, an offset that
+leaves daylight saving out (its `<timeZone>` is
+`CST-1:00:00DST01:00:00,M3.5.0/02:00:00,M10.5.0/02:00:00`), so no offset is
+ever used. A device that refuses the request (or has no `<localTime>`) leaves
+"today" to the browser's clock.
+
+### Month calendar
+
+`POST /ISAPI/ContentMgmt/record/tracks/{id}01/dailyDistribution` answers for a
+whole month (about 2.8 KB), so it is asked for once per channel and month, as
+the web UI does (it asks again only when the month changes), not with every
+day's search. Only the device's current month can still gain days, so its
+answer is asked for again after 5 minutes. Changing the channel or
+reconnecting starts afresh.
+
 ## Errors and write results
 
 Error answers carry a `<ResponseStatus>` body (`statusCode`, `statusString`,

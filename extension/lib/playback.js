@@ -1,15 +1,19 @@
 /**
  * Recording search and calendar requests for playback, and parsing of their
  * results. Formats follow Hikvision's own web UI (playback/search.js):
- * - Device times are local wall-clock time written with a "Z" suffix, e.g.
- *   "2026-10-10T14:05:00Z" means 14:05 on the device's clock, not UTC.
+ * - Device times are the device's wall-clock time written with a "Z" suffix,
+ *   e.g. "2026-10-10T14:05:00Z" means 14:05 on the device's clock, not UTC.
+ *   They are kept as floating Dates (see lib/device-time.js).
  * - The search request misspells its paging field as <searchResultPostion>.
  * - A page holds at most 64 matches, however many <maxResults> asks for, so
  *   the next page starts after the matches actually received.
+ * - One calendar answer covers a month, so it is asked for once per month
+ *   (RecordingDaysCache), not with every day's search.
  *
- * Depends on lib/xml.js.
+ * Depends on lib/device-time.js and lib/xml.js.
  */
 
+import { parseDeviceTime, toDeviceTime } from './device-time.js';
 import { childElement, childElements, childText, findDescendant, xmlPath } from './xml.js';
 
 /**
@@ -34,8 +38,8 @@ export const SEARCH_PAGE_SIZE = 50;
 /**
  * A recorded stretch of video.
  * @typedef {object} Recording
- * @property {Date} start - device wall-clock time, as a local Date
- * @property {Date} end
+ * @property {Date} start - the device's wall-clock time, as a floating Date (lib/device-time.js)
+ * @property {Date} end - the same
  * @property {string} uri - playbackURI, identifies the recording on the device
  * @property {RecordKind} kind - why it was recorded, for its timeline colour
  * @property {boolean} isEvent - kind is "event": what the events-only filter shows
@@ -45,34 +49,9 @@ export const SEARCH_PAGE_SIZE = 50;
  * A still picture stored on the device's picture track (scheduled or
  * event-triggered captures).
  * @typedef {object} StoredPicture
- * @property {Date} time
+ * @property {Date} time - the device's wall-clock time, as a floating Date
  * @property {string} uri - where to fetch it, an http URL on the device
  */
-
-/** @param {number} n */
-const pad = (n) => String(n).padStart(2, '0');
-
-/**
- * Format a Date as device time: its local wall-clock time with a "Z" suffix.
- * @param {Date} date
- * @returns {string}
- */
-export function toDeviceTime(date) {
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}Z`;
-}
-
-/**
- * Parse a device time as local wall-clock time, ignoring any zone suffix.
- * @param {string} text - e.g. "2026-10-10T14:05:00Z"
- * @returns {Date|null}
- */
-export function parseDeviceTime(text) {
-  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})/.exec(text.trim());
-  if (!m) return null;
-  const [, y, mo, d, h, mi, s] = m.map(Number);
-  return new Date(y, mo - 1, d, h, mi, s);
-}
 
 /** Escape text for an XML element body. @param {string} text */
 const escapeXml = (text) => text.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' })[c] ?? c);
@@ -82,8 +61,8 @@ const escapeXml = (text) => text.replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&g
  * @param {object} params
  * @param {string} params.searchId - same id for every page of one search
  * @param {string} params.trackId - channel × 100 + 1 for the main stream, e.g. "101"
- * @param {Date} params.start
- * @param {Date} params.end
+ * @param {Date} params.start - floating
+ * @param {Date} params.end - floating
  * @param {number} params.position - index of the first result on this page
  * @returns {string}
  */
@@ -224,6 +203,64 @@ export function parseCalendar(doc) {
     .filter(day => childText(day, 'record') === 'true')
     .map(day => parseInt(childText(day, 'dayOfMonth') ?? '', 10))
     .filter(n => n >= 1 && n <= 31);
+}
+
+/**
+ * How long a calendar of the device's current month is reused. The month
+ * gains days as recording goes on, so after this a new day shows up.
+ */
+export const CALENDAR_MAX_AGE_MS = 5 * 60 * 1000;
+
+/**
+ * The days with recordings that calendar requests returned, per channel and
+ * month. One answer covers a whole month, so stepping through its days
+ * needs one request, not one a day: Hikvision's web UI asks again only when
+ * the month changes. Only the device's current month can still change, so
+ * only its answer goes stale (CALENDAR_MAX_AGE_MS). Times are passed in.
+ *
+ * @example
+ * const days = cache.get('1', 2026, 10, { now, currentMonth: true })
+ *   ?? cache.set('1', 2026, 10, await Isapi.getRecordingDays(config, '1', 2026, 10), now);
+ */
+export class RecordingDaysCache {
+  constructor() {
+    /** @type {Map<string, {days: number[], fetchedAt: number}>} */
+    this.entries = new Map();
+  }
+
+  /**
+   * A month's days with recordings, unless they must be asked for (again).
+   * @param {string} channelId
+   * @param {number} year
+   * @param {number} month - 1–12
+   * @param {{now: number, currentMonth: boolean}} when - now in ms (any clock that set() is given too),
+   *   and whether this is the device's current month
+   * @returns {number[]|null} null when not known, or a current month's answer is older than CALENDAR_MAX_AGE_MS
+   */
+  get(channelId, year, month, { now, currentMonth }) {
+    const entry = this.entries.get(`${channelId}/${year}-${month}`);
+    if (!entry || (currentMonth && now - entry.fetchedAt > CALENDAR_MAX_AGE_MS)) return null;
+    return entry.days;
+  }
+
+  /**
+   * Keep a month's days with recordings as the device just returned them.
+   * @param {string} channelId
+   * @param {number} year
+   * @param {number} month - 1–12
+   * @param {number[]} days
+   * @param {number} now - ms, on the clock get() is given
+   * @returns {number[]} the days
+   */
+  set(channelId, year, month, days, now) {
+    this.entries.set(`${channelId}/${year}-${month}`, { days, fetchedAt: now });
+    return days;
+  }
+
+  /** Forget every month, e.g. when another channel is shown. */
+  clear() {
+    this.entries.clear();
+  }
 }
 
 /**
