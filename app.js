@@ -671,10 +671,11 @@ ToolRegistry.register({
       state.privacyEnabled = pm.enabled;
       document.getElementById('privacyToggle').classList.toggle('on', state.privacyEnabled);
 
-      // Older firmware uses a 704x576 grid, newer a 0–10000 normalized range
+      // Use the coordinate space the device declares; otherwise guess between
+      // the 704x576 grid of older firmware and a 0–10000 normalized range
       const allPoints = pm.regions.flat();
-      state.privacyNormW = allPoints.some(p => p.x > 1000) ? 10000 : 704;
-      state.privacyNormH = allPoints.some(p => p.y > 1000) ? 10000 : 576;
+      state.privacyNormW = pm.screen?.width ?? (allPoints.some(p => p.x > 1000) ? 10000 : 704);
+      state.privacyNormH = pm.screen?.height ?? (allPoints.some(p => p.y > 1000) ? 10000 : 576);
 
       state.privacyRegions = pm.regions.map(points => {
         const xs = points.map(p => p.x);

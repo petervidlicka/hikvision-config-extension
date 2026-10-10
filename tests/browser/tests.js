@@ -178,8 +178,35 @@ test('event save adds a record entry for the channel', async () => {
   applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(), channelId: '3' });
   applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['record']), channelId: '3' });
   const rec = triggerNotifications(doc).find(n => childText(n, 'notificationMethod') === 'record');
-  eq(childText(rec, 'videoInputID'), '3');
+  eq([childText(rec, 'videoInputID'), childText(rec, 'dynVideoInputID')], ['3', '3']);
   eq([...readNotificationMethods(doc)], ['FTP', 'record']);
+});
+
+test('NVR trigger: new record entry uses dyn fields and device-style id', async () => {
+  const doc = parseXml(await fixture('eventTrigger-nvr.xml'));
+  applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['center']), channelId: '1' });
+  eq([...readNotificationMethods(doc)], ['center'], 'record removed');
+  applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['center', 'record', 'IO']), channelId: '1' });
+  const rec = triggerNotifications(doc).find(n => childText(n, 'notificationMethod') === 'record');
+  eq([childText(rec, 'id'), childText(rec, 'dynVideoInputID'), childText(rec, 'videoInputID')], ['record-1', '1', null]);
+  const io = triggerNotifications(doc).find(n => childText(n, 'notificationMethod') === 'IO');
+  eq(childText(io, 'id'), 'IO-1');
+});
+
+test('NVR privacy mask: declared screen size, first region added to an empty list', async () => {
+  const doc = parseXml(await fixture('privacyMask-nvr.xml'));
+  eq(readPrivacyMask(doc).screen, { width: 704, height: 576 });
+  applyPrivacyMask(doc, { enabled: true, rects: [{ x1: 10, y1: 20, x2: 300, y2: 200 }] });
+  const pm = readPrivacyMask(doc);
+  eq([pm.enabled, pm.regions.length], [true, 1]);
+  eq(pm.regions[0][2], { x: 300, y: 200 });
+});
+
+test('motion target read from layout targetType', () => {
+  const doc = parseXml('<MotionDetection xmlns="urn:x"><enabled>true</enabled><MotionDetectionLayout>' +
+    '<sensitivityLevel>40</sensitivityLevel><targetType>human,vehicle</targetType></MotionDetectionLayout></MotionDetection>');
+  const md = readMotionConfig(doc);
+  eq([md.detectHuman, md.detectVehicle], [true, true]);
 });
 
 /* ── isapi.js (mocked network) ──────────────────────────────────────────── */
