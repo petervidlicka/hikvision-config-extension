@@ -91,11 +91,16 @@ export function enterPlayback() {
   setDate(state.playback.date);
 }
 
-/** Hide the Playback section and stop playing. */
+/**
+ * Hide the Playback section and stop playing. The still shown last (a
+ * 1280×720 stored picture, a recorded frame) goes too: it isn't the live
+ * picture, so it mustn't stand in for it under the drawing tools.
+ */
 export function leavePlayback() {
   pause();
   byId('playbackSection').style.display = 'none';
   byId('playbackBar').style.display = 'none';
+  clearFrame(dom.videoFeed);
 }
 
 /** Forget everything about the last device (on disconnect). */

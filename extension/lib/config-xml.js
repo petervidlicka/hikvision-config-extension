@@ -5,7 +5,8 @@
  * only the fields the UI controls. Anything else — firmware-specific fields,
  * notification methods we don't expose, a mask slot's maskType — is sent
  * back exactly as received. Coordinates in documents are raw device units;
- * the privacy mask helpers also map them to and from canvas pixels, because
+ * the motion and privacy helpers also map them to and from fractions of the
+ * picture (lib/shapes.js), the units the tools keep their shapes in, because
  * that mapping (Y from the bottom) is easy to get wrong in the UI.
  *
  * For event actions this module also reads what a device offers (triggersCap,
@@ -17,6 +18,9 @@
  */
 
 import { appendElement, childElement, childElements, childText, findDescendant, setChildText, xmlPath } from './xml.js';
+
+/** @typedef {import('./shapes.js').ImagePoint} ImagePoint */
+/** @typedef {import('./shapes.js').ImageRect} ImageRect */
 
 /* ── Motion detection ───────────────────────────────────────────────────── */
 
@@ -119,6 +123,15 @@ function intText(el, name) {
 }
 
 /**
+ * @param {number} value
+ * @param {number} min
+ * @param {number} max
+ */
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
  * Read the RegionCoordinates points under an element.
  * @param {Element} el
  * @returns {DevicePoint[]}
@@ -128,6 +141,37 @@ export function readCoordinates(el) {
     x: intText(c, 'positionX') || 0,
     y: intText(c, 'positionY') || 0,
   }));
+}
+
+/**
+ * A stored motion region as corners on the picture, the units the motion
+ * tool keeps it in. Device units are 0–1000 on both axes with Y from the
+ * BOTTOM (MOTION_COORDINATE_SCALE); the picture has Y=0 at the top, so Y is
+ * flipped. Values off the 0–1000 range are clamped onto the picture.
+ * @param {DevicePoint[]} points - one region, as readMotionConfig returns it
+ * @returns {ImagePoint[]}
+ * @example
+ * motionRegionToImage([{x: 250, y: 1000}, {x: 500, y: 0}])
+ * // → [{x: 0.25, y: 0}, {x: 0.5, y: 1}]: the top edge, then the bottom edge
+ */
+export function motionRegionToImage(points) {
+  /** @param {number} v - device units */
+  const fraction = v => clamp(v, 0, MOTION_COORDINATE_SCALE) / MOTION_COORDINATE_SCALE;
+  return points.map(p => ({ x: fraction(p.x), y: 1 - fraction(p.y) }));
+}
+
+/**
+ * Corners on the picture as the device region to save: the inverse of
+ * motionRegionToImage, rounded to whole units and clamped to 0–1000.
+ * @param {ImagePoint[]} points
+ * @returns {DevicePoint[]}
+ * @example
+ * imageToMotionRegion([{x: 0.25, y: 0}, {x: 1.2, y: 0.5}]) // → [{x: 250, y: 1000}, {x: 1000, y: 500}]
+ */
+export function imageToMotionRegion(points) {
+  /** @param {number} v - fraction of the picture */
+  const toDevice = v => clamp(Math.round(v * MOTION_COORDINATE_SCALE), 0, MOTION_COORDINATE_SCALE);
+  return points.map(p => ({ x: toDevice(p.x), y: toDevice(1 - p.y) }));
 }
 
 /**
@@ -321,12 +365,6 @@ export const DEFAULT_PRIVACY_SCREEN = Object.freeze({ width: 704, height: 576 })
  */
 
 /**
- * A rectangle on the drawn image in pixels, Y=0 at the top, as the privacy
- * tool keeps it.
- * @typedef {{x: number, y: number, w: number, h: number}} PixelRect
- */
-
-/**
  * A mask rectangle in device units, given by two opposite corners.
  * @typedef {{x1: number, y1: number, x2: number, y2: number}} DeviceRect
  */
@@ -394,60 +432,50 @@ function hasArea(points) {
 }
 
 /**
- * @param {number} value
- * @param {number} min
- * @param {number} max
- */
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-/**
- * Where a stored privacy mask appears on the image, as a canvas rectangle.
+ * Where a stored privacy mask is on the picture, as the rectangle the
+ * privacy tool keeps.
  *
  * Privacy coordinates are in the document's normalizedScreenSize units,
- * stretched over the whole image, with Y measured from the BOTTOM: on the
+ * stretched over the whole picture, with Y measured from the BOTTOM: on the
  * DS-7604NI a region at positionY 432–576 masks the top quarter of the
- * picture. The canvas has Y=0 at the top, so Y is flipped. The tool edits
+ * picture. The picture has Y=0 at the top, so Y is flipped. The tool edits
  * rectangles, so a polygon becomes its bounding box.
  * @param {DevicePoint[]} points - one region, as readPrivacyMask returns it
  * @param {Size} screen - the document's normalizedScreenSize, or DEFAULT_PRIVACY_SCREEN
- * @param {Size} canvas - canvas size in pixels
- * @returns {PixelRect}
+ * @returns {ImageRect}
  * @example
- * privacyRegionToCanvas([{x: 0, y: 432}, {x: 704, y: 576}], {width: 704, height: 576}, {width: 1408, height: 1152})
- * // → {x: 0, y: 0, w: 1408, h: 288}: the top quarter
+ * privacyRegionToImage([{x: 0, y: 432}, {x: 704, y: 576}], {width: 704, height: 576})
+ * // → {x: 0, y: 0, w: 1, h: 0.25}: the top quarter
  */
-export function privacyRegionToCanvas(points, screen, canvas) {
+export function privacyRegionToImage(points, screen) {
   const box = boundingBox(points.map(p => ({
     x: clamp(p.x, 0, screen.width),
     y: clamp(p.y, 0, screen.height),
   })));
   return {
-    x: (box.minX / screen.width) * canvas.width,
-    y: (1 - box.maxY / screen.height) * canvas.height,
-    w: ((box.maxX - box.minX) / screen.width) * canvas.width,
-    h: ((box.maxY - box.minY) / screen.height) * canvas.height,
+    x: box.minX / screen.width,
+    y: 1 - box.maxY / screen.height,
+    w: (box.maxX - box.minX) / screen.width,
+    h: (box.maxY - box.minY) / screen.height,
   };
 }
 
 /**
- * A rectangle drawn on the canvas as the device rectangle to save: the
- * inverse of privacyRegionToCanvas, rounded to whole units and clamped to
- * the screen. Y counts from the bottom, so y1 (the top edge) is the larger.
- * @param {PixelRect} rect
+ * A rectangle on the picture as the device rectangle to save: the inverse
+ * of privacyRegionToImage, rounded to whole units and clamped to the
+ * screen. Y counts from the bottom, so y1 (the top edge) is the larger.
+ * @param {ImageRect} rect
  * @param {Size} screen - the document's normalizedScreenSize, or DEFAULT_PRIVACY_SCREEN
- * @param {Size} canvas - canvas size in pixels
  * @returns {DeviceRect}
  * @example
- * canvasRectToPrivacy({x: 0, y: 0, w: 1408, h: 288}, {width: 704, height: 576}, {width: 1408, height: 1152})
+ * imageRectToPrivacy({x: 0, y: 0, w: 1, h: 0.25}, {width: 704, height: 576})
  * // → {x1: 0, y1: 576, x2: 704, y2: 432}
  */
-export function canvasRectToPrivacy(rect, screen, canvas) {
-  /** @param {number} px */
-  const toX = px => clamp(Math.round((px / canvas.width) * screen.width), 0, screen.width);
-  /** @param {number} py */
-  const toY = py => clamp(Math.round((1 - py / canvas.height) * screen.height), 0, screen.height);
+export function imageRectToPrivacy(rect, screen) {
+  /** @param {number} fx - fraction of the picture's width */
+  const toX = fx => clamp(Math.round(fx * screen.width), 0, screen.width);
+  /** @param {number} fy - fraction of the picture's height, from the top */
+  const toY = fy => clamp(Math.round((1 - fy) * screen.height), 0, screen.height);
   return { x1: toX(rect.x), y1: toY(rect.y), x2: toX(rect.x + rect.w), y2: toY(rect.y + rect.h) };
 }
 

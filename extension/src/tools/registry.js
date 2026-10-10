@@ -8,11 +8,13 @@ import { dom, queryAll, state } from '../state.js';
 
 // ─── Tool Registry ──────────────────────────────────────────────────────────
 /** @typedef {import('../state.js').AppState} AppState */
-/** @typedef {import('../state.js').CanvasPoint} CanvasPoint */
+/** @typedef {import('../../lib/shapes.js').ImagePoint} ImagePoint */
 
 /**
  * A configuration tool. Each tool owns a sidebar panel, draws on the canvas
- * over the live feed, and loads/saves one ISAPI resource.
+ * over the live feed, and loads/saves one ISAPI resource. Pointer positions
+ * come as fractions of the picture (see lib/shapes.js), and tools keep their
+ * shapes that way, converting to canvas pixels only to draw and hit-test.
  * @typedef {object} Tool
  * @property {string} id - unique key, e.g. "motion"
  * @property {string} label - display name, e.g. "Motion Detection"
@@ -21,10 +23,10 @@ import { dom, queryAll, state } from '../state.js';
  * @property {() => Partial<AppState>} initState - initial values of the tool's state fields
  * @property {() => void} resetState - called on channel switch
  * @property {(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => void} draw
- * @property {(pos: CanvasPoint, e: MouseEvent) => void} onMouseDown
- * @property {(pos: CanvasPoint, e: MouseEvent) => void} onMouseMove
- * @property {(pos: CanvasPoint, e: MouseEvent) => void} onMouseUp
- * @property {(pos: CanvasPoint, e: MouseEvent) => void} [onDblClick]
+ * @property {(pos: ImagePoint, e: MouseEvent) => void} onMouseDown
+ * @property {(pos: ImagePoint, e: MouseEvent) => void} onMouseMove
+ * @property {(pos: ImagePoint, e: MouseEvent) => void} onMouseUp
+ * @property {(pos: ImagePoint, e: MouseEvent) => void} [onDblClick]
  * @property {() => Promise<void>} load - read config from the device
  * @property {() => Promise<void>} save - write config to the device
  * @property {() => void} bindPanel - attach listeners once the panel is in the DOM

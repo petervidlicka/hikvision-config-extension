@@ -500,9 +500,7 @@ describe('config page', () => {
     $('configTabs').querySelector('[data-tool="privacy"]').click();
     await vi.waitFor(() => expect(state.privacyDoc).not.toBeNull());
     // The NVR stores a mask at the top left and one at the bottom right, both reading enabled=false
-    const { width, height } = dom.canvas;
-    expect(state.privacyRegions.map(r => [r.x / width, r.y / height, r.w / width, r.h / height]))
-      .toEqual([[0, 0, 0.25, 0.25], [0.75, 0.75, 0.25, 0.25]]);
+    expect(state.privacyRegions).toEqual([{ x: 0, y: 0, w: 0.25, h: 0.25 }, { x: 0.75, y: 0.75, w: 0.25, h: 0.25 }]);
     expect($('privacyToggle').classList.contains('on')).toBe(true);
 
     // Delete the bottom-right mask and draw one along the top right
@@ -529,7 +527,7 @@ describe('config page', () => {
     $('loadPrivacyBtn').click();
     await vi.waitFor(() => expect(toast()).toBe('Privacy mask config loaded'));
     expect(state.privacyRegions).toHaveLength(2);
-    expect(state.privacyRegions[1].y / height).toBeCloseTo(0.05, 2);
+    expect(state.privacyRegions[1].y).toBeCloseTo(0.05, 2);
   });
 
   it('shows the day’s recordings and frames in Playback', async () => {
@@ -566,6 +564,82 @@ describe('config page', () => {
     await vi.waitFor(() => expect($('statusText').textContent).toBe('Stored picture from 00:46:08'));
     expect(device.requests).toContain('GET /picture/Streaming/tracks/103/');
     expect($('pbTimestamp').textContent).toBe('00:46:08');
+  });
+
+  it('keeps privacy masks where the device has them when the picture under them changes size', async () => {
+    // The 1280×720 stored picture was shown last; channel 1's live stills are 1920×1088 (HD, chosen above)
+    expect([dom.canvas.width, dom.canvas.height]).toEqual([1280, 720]);
+    const path = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/privacyMask';
+    /** Each mask's corners in a document, as sorted "x,y" */
+    const maskCorners = (xml) => xml.split(/<PrivacyMaskRegion[\s>]/).slice(1)
+      .map(region => [...region.matchAll(/<positionX>(\d+)<\/positionX>\s*<positionY>(\d+)</g)].map(m => `${m[1]},${m[2]}`).sort());
+    const stored = maskCorners(device.privacy.read(path));
+    expect(stored).toHaveLength(2);
+
+    const pictures = ['GET /ISAPI/Streaming/channels/101/picture', 'GET /ISAPI/Streaming/channels/102/picture'];
+    let release = () => {};
+    const firstFrame = new Promise(resolve => { release = resolve; });
+    for (const key of pictures) device.holds[key] = firstFrame;
+    try {
+      // Configuration reads the masks before the first live frame is in
+      $('configSectionTab').click();
+      expect(dom.videoFeed.hasAttribute('src')).toBe(false); // the stored picture doesn't pass for live
+      await vi.waitFor(() => expect(state.privacyDoc).not.toBeNull());
+      expect([dom.canvas.width, dom.canvas.height]).toEqual([1280, 720]);
+      expect(state.privacyRegions).toEqual([{ x: 0, y: 0, w: 0.25, h: 0.25 }, { x: 0.75, y: 0.75, w: 0.25, h: 0.25 }]);
+    } finally {
+      release();
+      for (const key of pictures) delete device.holds[key];
+    }
+
+    // The first frame gives the canvas other pixels; saving sends back the device's own coordinates
+    await vi.waitFor(() => expect([dom.canvas.width, dom.canvas.height]).toEqual([1920, 1088]), { timeout: 5000 });
+    const puts = device.puts.length;
+    $('savePrivacyBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+    expect(device.puts.at(-1).path).toBe(path);
+    expect(maskCorners(device.puts.at(-1).body)).toEqual(stored);
+  });
+
+  it('saves motion regions in the same device units whatever size the canvas had when they were loaded or drawn', async () => {
+    $('configTabs').querySelector('[data-tool="motion"]').click();
+    await vi.waitFor(() => expect(state.motionDoc).not.toBeNull());
+    /** Click Save; the corners of the regions sent, in order */
+    const save = async () => {
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      return [...device.puts.at(-1).body.matchAll(/<positionX>(\d+)<\/positionX><positionY>(\d+)</g)].map(m => [+m[1], +m[2]]);
+    };
+    /** Give the canvas a frame's pixels, as a frame of that size does */
+    const frameSize = (width, height) => Object.assign(dom.canvas, { width, height });
+
+    // Loaded over one frame, saved over a smaller one
+    frameSize(704, 576);
+    expect(await save()).toEqual([[651, 684], [751, 701], [952, 544], [850, 147], [616, 486]]);
+
+    // The same square drawn over frames of one size, then while the frame
+    // changes size half-way through it and again before it's saved
+    const { click, dblclick } = canvasPointer();
+    /** @param {number[][]} sizes - the frame's size at the start, half-way, and when saving */
+    const drawSquare = (sizes) => {
+      $('clearMotionRegionsBtn').click();
+      frameSize(...sizes[0]);
+      click(0.1, 0.1); click(0.4, 0.1);
+      frameSize(...sizes[1]);
+      click(0.4, 0.4); dblclick(0.1, 0.4);
+      expect(state.motionRegions.map(r => r.points.length)).toEqual([4]);
+      frameSize(...sizes[2]);
+      return save();
+    };
+    const steady = await drawSquare([[704, 576], [704, 576], [704, 576]]);
+    expect(await drawSquare([[704, 576], [1920, 1088], [1280, 720]])).toEqual(steady);
+    // 10–40 % across and down, Y from the bottom (give or take a pixel of the small canvas
+    // here, since pointer events land on whole screen pixels)
+    [[100, 900], [400, 900], [400, 600], [100, 600]].forEach(([x, y], i) => {
+      expect(Math.abs(steady[i][0] - x)).toBeLessThanOrEqual(10);
+      expect(Math.abs(steady[i][1] - y)).toBeLessThanOrEqual(10);
+    });
   });
 
   it('stops everything after one failed login when the device rejects the password', async () => {

@@ -1,9 +1,14 @@
 /**
  * Motion detection tool: draw polygon regions, sensitivity and targets.
+ * Regions are kept as fractions of the picture (lib/shapes.js) and become
+ * device units only when saved.
  */
 
-import { MOTION_COORDINATE_SCALE, applyMotionConfig, readMotionCapabilities, readMotionConfig } from '../../lib/config-xml.js';
+import {
+  applyMotionConfig, imageToMotionRegion, motionRegionToImage, readMotionCapabilities, readMotionConfig,
+} from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
+import { pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
 import { loadTool } from './registry.js';
@@ -14,25 +19,12 @@ import { cloneXml } from '../../lib/xml.js';
 // TOOL: Motion Detection (polygon region-based)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Check if a point is inside a polygon using ray casting.
- * @param {number} px
- * @param {number} py
- * @param {import('../state.js').CanvasPoint[]} points
- */
-export function pointInPolygon(px, py, points) {
-  let inside = false;
-  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-    const xi = points[i].x, yi = points[i].y;
-    const xj = points[j].x, yj = points[j].y;
-    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
 /** @typedef {import('./registry.js').Tool} Tool */
+
+/** Clicking this close to the first corner, in canvas pixels, closes the polygon. */
+const CLOSE_DISTANCE_PX = 12;
+/** A click this close to the last corner, in canvas pixels, is the same corner again. */
+const SAME_CORNER_PX = 4;
 
 /** @satisfies {Tool} */
 export const motionTool = {
@@ -118,13 +110,16 @@ export const motionTool = {
       drawGrid(ctx, canvas);
       return;
     }
+    /** @param {import('../../lib/shapes.js').ImagePoint} p */
+    const px = p => toPixels(p, canvas);
     // Draw completed regions
     state.motionRegions.forEach((reg, i) => {
       if (reg.points.length < 3) return;
+      const points = reg.points.map(px);
       ctx.beginPath();
-      ctx.moveTo(reg.points[0].x, reg.points[0].y);
-      for (let p = 1; p < reg.points.length; p++) {
-        ctx.lineTo(reg.points[p].x, reg.points[p].y);
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let p = 1; p < points.length; p++) {
+        ctx.lineTo(points[p].x, points[p].y);
       }
       ctx.closePath();
       ctx.fillStyle = 'rgba(74, 108, 247, 0.3)';
@@ -134,7 +129,7 @@ export const motionTool = {
       ctx.stroke();
 
       // Draw vertices
-      reg.points.forEach(p => {
+      points.forEach(p => {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(74, 108, 247, 0.9)';
@@ -142,8 +137,8 @@ export const motionTool = {
       });
 
       // Label
-      const cx = reg.points.reduce((s, p) => s + p.x, 0) / reg.points.length;
-      const cy = reg.points.reduce((s, p) => s + p.y, 0) / reg.points.length;
+      const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
+      const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
       ctx.fillStyle = 'rgba(74, 108, 247, 0.9)';
       ctx.font = 'bold 12px "JetBrains Mono", monospace';
       ctx.fillText(`Region ${i + 1}`, cx - 30, cy + 4);
@@ -151,7 +146,7 @@ export const motionTool = {
 
     // Draw in-progress polygon
     if (state.drawingPoints.length > 0) {
-      const pts = state.drawingPoints;
+      const pts = state.drawingPoints.map(px);
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let p = 1; p < pts.length; p++) {
@@ -159,7 +154,8 @@ export const motionTool = {
       }
       // Line to current mouse position
       if (state.mousePos) {
-        ctx.lineTo(state.mousePos.x, state.mousePos.y);
+        const mouse = px(state.mousePos);
+        ctx.lineTo(mouse.x, mouse.y);
       }
       ctx.strokeStyle = 'rgba(74, 108, 247, 0.6)';
       ctx.lineWidth = 2;
@@ -194,7 +190,7 @@ export const motionTool = {
     if (e.button === 2) {
       // Right-click: delete region under cursor
       for (let i = state.motionRegions.length - 1; i >= 0; i--) {
-        if (pointInPolygon(pos.x, pos.y, state.motionRegions[i].points)) {
+        if (pointInPolygon(pos, state.motionRegions[i].points)) {
           state.motionRegions.splice(i, 1);
           updateRegionList();
           redraw();
@@ -207,7 +203,7 @@ export const motionTool = {
     const pts = state.drawingPoints;
 
     // Clicking near the start vertex closes the polygon
-    if (pts.length >= 2 && Math.hypot(pos.x - pts[0].x, pos.y - pts[0].y) < 12) {
+    if (pts.length >= 2 && pixelDistance(pos, pts[0], dom.canvas) < CLOSE_DISTANCE_PX) {
       closePolygon();
       return;
     }
@@ -219,7 +215,7 @@ export const motionTool = {
 
     // The clicks of a double-click land on the same spot — don't add duplicate corners
     const last = pts[pts.length - 1];
-    if (last && Math.hypot(pos.x - last.x, pos.y - last.y) < 4) return;
+    if (last && pixelDistance(pos, last, dom.canvas) < SAME_CORNER_PX) return;
 
     pts.push({ x: pos.x, y: pos.y });
     if (pts.length >= state.motionCaps.maxPoints) {
@@ -282,14 +278,7 @@ export const motionTool = {
         byId('sensitivityVal').textContent = String(md.sensitivity);
       }
 
-      // Device coordinates are 0–1000 with Y=0 at the bottom; the canvas has Y=0 at the top
-      const scale = MOTION_COORDINATE_SCALE;
-      state.motionRegions = md.regions.map(points => ({
-        points: points.map(p => ({
-          x: (p.x / scale) * dom.canvas.width,
-          y: (1 - p.y / scale) * dom.canvas.height,
-        })),
-      }));
+      state.motionRegions = md.regions.map(points => ({ points: motionRegionToImage(points) }));
       state.drawingPoints = [];
 
       state.dynamicAnalysis = md.dynamicAnalysis;
@@ -326,9 +315,6 @@ export const motionTool = {
     const rawSensitivity = Number(byId('sensitivitySlider', HTMLInputElement).value);
     const sensitivity = Math.min(max, Math.max(min, min + Math.round((rawSensitivity - min) / step) * step));
 
-    const scale = MOTION_COORDINATE_SCALE;
-    /** @param {number} v - fraction of the image, 0–1 */
-    const toDevice = v => Math.min(scale, Math.max(0, Math.round(v * scale)));
     // Edit a copy so a failed save leaves the loaded config intact
     const doc = cloneXml(state.motionDoc);
 
@@ -340,11 +326,7 @@ export const motionTool = {
         enabled: state.motionEnabled,
         sensitivity,
         dynamicAnalysis: state.dynamicAnalysis,
-        // Flip Y back to the device convention (Y=0 at the bottom)
-        regions: state.motionRegions.map(reg => reg.points.map(p => ({
-          x: toDevice(p.x / dom.canvas.width),
-          y: toDevice(1 - p.y / dom.canvas.height),
-        }))),
+        regions: state.motionRegions.map(reg => imageToMotionRegion(reg.points)),
         targetTypes: caps.targetTypes.length
           ? caps.targetTypes.filter(t => (t === 'human' && state.detectHuman) || (t === 'vehicle' && state.detectVehicle))
           : undefined,
@@ -453,15 +435,15 @@ function applyCapabilities() {
 }
 
 /**
- * The grid cell under a canvas position, or null outside the grid.
- * @param {import('../state.js').CanvasPoint} pos
+ * The grid cell under a point on the picture, or null outside the grid.
+ * @param {import('../../lib/shapes.js').ImagePoint} pos
  * @returns {{row: number, col: number}|null}
  */
 function gridCellAt(pos) {
   const grid = state.motionGrid;
   if (!grid) return null;
-  const col = Math.floor((pos.x / dom.canvas.width) * grid.cols);
-  const row = Math.floor((pos.y / dom.canvas.height) * grid.rows);
+  const col = Math.floor(pos.x * grid.cols);
+  const row = Math.floor(pos.y * grid.rows);
   return row >= 0 && row < grid.rows && col >= 0 && col < grid.cols ? { row, col } : null;
 }
 

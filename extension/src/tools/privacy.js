@@ -1,13 +1,15 @@
 /**
- * Privacy mask tool: draw rectangular masks over the image. Device
- * coordinates (Y from the bottom) are mapped by the helpers in
- * lib/config-xml.js, and Isapi.savePrivacyMask does the save.
+ * Privacy mask tool: draw rectangular masks over the image. Masks are kept
+ * as fractions of the picture (lib/shapes.js); device coordinates (Y from
+ * the bottom) are mapped by the helpers in lib/config-xml.js, and
+ * Isapi.savePrivacyMask does the save.
  */
 
 import {
-  DEFAULT_PRIVACY_SCREEN, canvasRectToPrivacy, privacyRegionToCanvas, readPrivacyMask,
+  DEFAULT_PRIVACY_SCREEN, imageRectToPrivacy, privacyRegionToImage, readPrivacyMask,
 } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
+import { rectContains, rectFromCorners, rectToPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
 import { loadTool } from './registry.js';
@@ -18,6 +20,9 @@ import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } fr
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** @typedef {import('./registry.js').Tool} Tool */
+
+/** A drag smaller than this on either side, in canvas pixels, draws no mask. */
+const MIN_MASK_SIDE_PX = 10;
 
 /** @satisfies {Tool} */
 export const privacyTool = {
@@ -73,7 +78,8 @@ export const privacyTool = {
   },
 
   draw(ctx, canvas) {
-    state.privacyRegions.forEach((reg, i) => {
+    state.privacyRegions.forEach((mask, i) => {
+      const reg = rectToPixels(mask, canvas);
       ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
       ctx.fillRect(reg.x, reg.y, reg.w, reg.h);
       ctx.strokeStyle = 'rgba(239, 68, 68, 0.8)';
@@ -87,10 +93,7 @@ export const privacyTool = {
 
     // Draw in-progress rectangle
     if (state.isDrawing && state.drawStart && state.drawCurrent) {
-      const x = Math.min(state.drawStart.x, state.drawCurrent.x);
-      const y = Math.min(state.drawStart.y, state.drawCurrent.y);
-      const w = Math.abs(state.drawCurrent.x - state.drawStart.x);
-      const h = Math.abs(state.drawCurrent.y - state.drawStart.y);
+      const { x, y, w, h } = rectToPixels(rectFromCorners(state.drawStart, state.drawCurrent), canvas);
       ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
       ctx.fillRect(x, y, w, h);
       ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
@@ -105,8 +108,7 @@ export const privacyTool = {
     if (e.button === 2) {
       // Right-click: delete region under cursor
       for (let i = state.privacyRegions.length - 1; i >= 0; i--) {
-        const r = state.privacyRegions[i];
-        if (pos.x >= r.x && pos.x <= r.x + r.w && pos.y >= r.y && pos.y <= r.y + r.h) {
+        if (rectContains(state.privacyRegions[i], pos)) {
           state.privacyRegions.splice(i, 1);
           updateRegionList();
           redraw();
@@ -131,12 +133,10 @@ export const privacyTool = {
 
   onMouseUp(pos, e) {
     if (state.isDrawing && state.drawStart) {
-      const x = Math.min(state.drawStart.x, pos.x);
-      const y = Math.min(state.drawStart.y, pos.y);
-      const w = Math.abs(pos.x - state.drawStart.x);
-      const h = Math.abs(pos.y - state.drawStart.y);
-      if (w > 10 && h > 10) {
-        state.privacyRegions.push({ x, y, w, h });
+      const mask = rectFromCorners(state.drawStart, pos);
+      const { w, h } = rectToPixels(mask, dom.canvas);
+      if (w > MIN_MASK_SIDE_PX && h > MIN_MASK_SIDE_PX) {
+        state.privacyRegions.push(mask);
         updateRegionList();
       }
     }
@@ -158,7 +158,7 @@ export const privacyTool = {
       const screen = pm.screen ?? DEFAULT_PRIVACY_SCREEN;
       state.privacyNormW = screen.width;
       state.privacyNormH = screen.height;
-      state.privacyRegions = pm.regions.map(points => privacyRegionToCanvas(points, screen, dom.canvas));
+      state.privacyRegions = pm.regions.map(points => privacyRegionToImage(points, screen));
 
       updateRegionList();
       redraw();
@@ -181,7 +181,7 @@ export const privacyTool = {
     const screen = { width: state.privacyNormW, height: state.privacyNormH };
     const mask = {
       enabled: state.privacyEnabled,
-      rects: state.privacyRegions.map(reg => canvasRectToPrivacy(reg, screen, dom.canvas)),
+      rects: state.privacyRegions.map(rect => imageRectToPrivacy(rect, screen)),
     };
 
     setStatus('Saving privacy mask config...');

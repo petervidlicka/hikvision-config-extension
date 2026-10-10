@@ -583,7 +583,7 @@ export const Isapi = {
    * @param {DeviceConfig} config
    * @param {string} path - where getPrivacyMask loaded the document from
    * @param {XMLDocument} original - the document as loaded; not modified
-   * @param {{enabled: boolean, rects: DeviceRect[]}} mask - device units, e.g. from canvasRectToPrivacy
+   * @param {{enabled: boolean, rects: DeviceRect[]}} mask - device units, e.g. from imageRectToPrivacy
    * @returns {Promise<{doc: XMLDocument, result: WriteResult}>} the document the device now has, and whether it needs a reboot
    * @throws {WriteRollbackError} when restoring the loaded masks after a failed PUT failed too
    * @throws {IsapiError|NetworkError|AuthError} the request that failed, when the device was left as it was

@@ -335,7 +335,14 @@ channel's main-stream aspect when its own differs from it by more than 3 %
 `object-fit: fill`. The 1920×1088 still (0.2 % off 16:9) and the 1280×720
 stored pictures are shown as they are, as is any frame when the stream list
 can't be read. The drawing canvas follows the displayed size; its pixels stay
-the frame's.
+the frame's. So the canvas changes size with the frame: 704×576 SD, 1920×1088
+HD, a 1280×720 stored picture in Playback (cleared when Playback is left), or
+the default 300×150 before the first frame. The motion and privacy tools
+therefore keep their shapes as fractions of the picture (`lib/shapes.js`) and
+use canvas pixels only to draw and hit-test. Device units come in only on
+load and save (`motionRegionToImage`/`imageToMotionRegion`,
+`privacyRegionToImage`/`imageRectToPrivacy` in `lib/config-xml.js`), so a
+frame of another size between loading, drawing and saving moves nothing.
 
 ## Logins and lockout
 

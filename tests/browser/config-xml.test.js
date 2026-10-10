@@ -4,10 +4,11 @@
 import { describe, expect, it } from 'vitest';
 import { childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import {
-  DEFAULT_PRIVACY_SCREEN, alarmOutputNotification, applyMotionConfig, applyNotifications, canvasRectToPrivacy, decodeGridMap,
-  encodeGridMap, applyPrivacyMask, hasNotification, lightAudioNotification, methodNotification, privacyRegionList,
-  privacyRegionToCanvas, readAlarmOutputs, readLightAudioChannels, readMotionCapabilities, readMotionConfig,
-  readMotionTriggerCap, readNotificationMethods, readPrivacyMask, recordNotification, resolveEventActions, triggerNotifications,
+  DEFAULT_PRIVACY_SCREEN, alarmOutputNotification, applyMotionConfig, applyNotifications, decodeGridMap,
+  encodeGridMap, applyPrivacyMask, hasNotification, imageRectToPrivacy, imageToMotionRegion, lightAudioNotification,
+  methodNotification, motionRegionToImage, privacyRegionList, privacyRegionToImage, readAlarmOutputs, readLightAudioChannels,
+  readMotionCapabilities, readMotionConfig, readMotionTriggerCap, readNotificationMethods, readPrivacyMask, recordNotification,
+  resolveEventActions, triggerNotifications,
 } from '../../extension/lib/config-xml.js';
 import { fixtures, motionFixtures } from './fixtures.js';
 
@@ -142,6 +143,27 @@ describe('motion detection', () => {
   });
 });
 
+describe('motion region coordinates', () => {
+  it('measures Y from the bottom: positionY 1000 is the top of the picture', () => {
+    expect(motionRegionToImage([{ x: 0, y: 1000 }, { x: 250, y: 750 }, { x: 1000, y: 0 }]))
+      .toEqual([{ x: 0, y: 0 }, { x: 0.25, y: 0.25 }, { x: 1, y: 1 }]);
+    expect(imageToMotionRegion([{ x: 0, y: 0 }, { x: 0.25, y: 0.25 }, { x: 1, y: 1 }]))
+      .toEqual([{ x: 0, y: 1000 }, { x: 250, y: 750 }, { x: 1000, y: 0 }]);
+  });
+
+  it('gives back the device’s own coordinates for a region loaded and saved unchanged', () => {
+    const [region] = readMotionConfig(parseXml(fixtures.motionDetectionNvr)).regions;
+    expect(imageToMotionRegion(motionRegionToImage(region))).toEqual(region);
+  });
+
+  it('rounds to whole units and clamps to the picture', () => {
+    expect(imageToMotionRegion([{ x: 0.12345, y: 0.6789 }])).toEqual([{ x: 123, y: 321 }]);
+    // Dragged past the edges, or stored out of range
+    expect(imageToMotionRegion([{ x: -0.1, y: 1.2 }, { x: 1.5, y: -0.3 }])).toEqual([{ x: 0, y: 0 }, { x: 1000, y: 1000 }]);
+    expect(motionRegionToImage([{ x: -20, y: 1200 }])).toEqual([{ x: 0, y: 0 }]);
+  });
+});
+
 describe('motion grid (grid-only cameras)', () => {
   // The device's own map from channel 1 (see docs/isapi-notes.md): 18 rows × 22 columns
   const deviceMap = '0000000000000000000000000000000003c00003e00007f80007f80007f80003f80001f80001f00000f0000070000020000000000000';
@@ -252,36 +274,46 @@ describe('privacy mask', () => {
 
 describe('privacy mask coordinates', () => {
   const screen = DEFAULT_PRIVACY_SCREEN;
-  const canvas = { width: 640, height: 360 };
 
   it('measures Y from the bottom: a region at positionY 432–576 is the top quarter', () => {
     const top = [{ x: 0, y: 576 }, { x: 704, y: 576 }, { x: 704, y: 432 }, { x: 0, y: 432 }];
-    expect(privacyRegionToCanvas(top, screen, canvas)).toEqual({ x: 0, y: 0, w: 640, h: 90 });
+    expect(privacyRegionToImage(top, screen)).toEqual({ x: 0, y: 0, w: 1, h: 0.25 });
 
     // The NVR fixture: region 1 top-left, region 2 bottom-right
     const [topLeft, bottomRight] = readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions)).regions;
-    expect(privacyRegionToCanvas(topLeft, screen, canvas)).toEqual({ x: 0, y: 0, w: 160, h: 90 });
-    expect(privacyRegionToCanvas(bottomRight, screen, canvas)).toEqual({ x: 480, y: 270, w: 160, h: 90 });
+    expect(privacyRegionToImage(topLeft, screen)).toEqual({ x: 0, y: 0, w: 0.25, h: 0.25 });
+    expect(privacyRegionToImage(bottomRight, screen)).toEqual({ x: 0.75, y: 0.75, w: 0.25, h: 0.25 });
   });
 
-  it('saves a rectangle at the top of the canvas near positionY = screen height', () => {
-    expect(canvasRectToPrivacy({ x: 64, y: 0, w: 320, h: 36 }, screen, canvas))
+  it('saves a rectangle at the top of the picture near positionY = screen height', () => {
+    expect(imageRectToPrivacy({ x: 0.1, y: 0, w: 0.5, h: 0.1 }, screen))
       .toEqual({ x1: 70, y1: 576, x2: 422, y2: 518 });
-    expect(canvasRectToPrivacy({ x: 0, y: 324, w: 640, h: 36 }, screen, canvas))
+    expect(imageRectToPrivacy({ x: 0, y: 0.9, w: 1, h: 0.1 }, screen))
       .toEqual({ x1: 0, y1: 58, x2: 704, y2: 0 });
   });
 
   it('round-trips, rounding to whole units and clamping to the screen', () => {
-    const rect = { x: 100, y: 50, w: 200, h: 120 };
-    const device = canvasRectToPrivacy(rect, screen, canvas);
+    const rect = { x: 0.15, y: 0.14, w: 0.31, h: 0.33 };
+    const device = imageRectToPrivacy(rect, screen);
     expect(Object.values(device).every(Number.isInteger)).toBe(true);
     const corners = [{ x: device.x1, y: device.y1 }, { x: device.x2, y: device.y2 }];
-    const back = privacyRegionToCanvas(corners, screen, canvas);
-    for (const key of ['x', 'y', 'w', 'h']) expect(back[key]).toBeCloseTo(rect[key], 0);
+    const back = privacyRegionToImage(corners, screen);
+    for (const key of ['x', 'y', 'w', 'h']) expect(back[key]).toBeCloseTo(rect[key], 2);
 
-    // Dragged past the edges of the image
-    expect(canvasRectToPrivacy({ x: -20, y: -10, w: 700, h: 400 }, screen, canvas)).toEqual({ x1: 0, y1: 576, x2: 704, y2: 0 });
-    expect(privacyRegionToCanvas([{ x: -50, y: 700 }, { x: 900, y: -5 }], screen, canvas)).toEqual({ x: 0, y: 0, w: 640, h: 360 });
+    // A stored region loaded and saved unchanged keeps the device's own coordinates
+    const [topLeft, bottomRight] = readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions)).regions;
+    expect(imageRectToPrivacy(privacyRegionToImage(topLeft, screen), screen)).toEqual({ x1: 0, y1: 576, x2: 176, y2: 432 });
+    expect(imageRectToPrivacy(privacyRegionToImage(bottomRight, screen), screen)).toEqual({ x1: 528, y1: 144, x2: 704, y2: 0 });
+
+    // Dragged past the edges of the picture
+    expect(imageRectToPrivacy({ x: -0.03, y: -0.03, w: 1.1, h: 1.1 }, screen)).toEqual({ x1: 0, y1: 576, x2: 704, y2: 0 });
+    expect(privacyRegionToImage([{ x: -50, y: 700 }, { x: 900, y: -5 }], screen)).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+  });
+
+  it('uses the document’s own screen size', () => {
+    const screen1080 = { width: 1920, height: 1080 };
+    expect(privacyRegionToImage([{ x: 960, y: 1080 }, { x: 1920, y: 540 }], screen1080)).toEqual({ x: 0.5, y: 0, w: 0.5, h: 0.5 });
+    expect(imageRectToPrivacy({ x: 0.5, y: 0, w: 0.5, h: 0.5 }, screen1080)).toEqual({ x1: 960, y1: 1080, x2: 1920, y2: 540 });
   });
 });
 
