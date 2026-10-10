@@ -742,9 +742,10 @@ describe('config page', () => {
     try {
       // The InputProxy URL busy: the System one answers, and polygons stay
       device.failures[caps[0]] = busy;
+      const requests = device.requests.length;
       await reloadMotion();
       expect(state.motionMode).toBe('region');
-      expect(device.requests.slice(-3)).toContain(caps[1]);
+      expect(device.requests.slice(requests)).toContain(caps[1]);
 
       // Neither: the camera's own grid, as Hikvision's web UI falls back to, with the
       // levels from the layout capabilities
