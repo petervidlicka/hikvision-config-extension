@@ -1,11 +1,13 @@
 /**
  * Live snapshots without a device: the URLs a channel's frames may come
  * from, finding one and keeping it, the wait after failed requests, and the
- * polling loop on fake timers.
+ * polling loop on fake timers, against a camera that sends a new picture
+ * every time and an NVR that repeats a cached one for a second.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthError } from '../../extension/lib/digest-auth.js';
 import { IsapiError, NotAnImageError, TimeoutError } from '../../extension/lib/errors.js';
+import { SnapshotPacer } from '../../extension/lib/snapshot-pacer.js';
 import {
   NO_SIGNAL_AFTER_FAILURES, OFFLINE_START_FAILURES, RESOLVE_AGAIN_AFTER_FAILURES, SNAPSHOT_RETRY_MAX_MS, SnapshotSource,
   isJpeg, pollSnapshots, snapshotPaths, snapshotRetryDelay,
@@ -16,7 +18,11 @@ const answer = (httpStatus, subStatusCode) =>
   new IsapiError({ method: 'GET', path: '/x', httpStatus, status: { statusCode: null, statusString: null, subStatusCode, subStatusString: null } });
 const notHere = () => answer(403, 'notSupport');
 const noCamera = () => answer(503, 'serviceUnavailable');
-const frame = () => new Blob([new Uint8Array([0xff, 0xd8])], { type: 'image/jpeg' });
+let frameSeq = 0;
+/** A JPEG's start marker and a counter: a new picture every call, like a camera. */
+const frame = () => new Uint8Array([0xff, 0xd8, ++frameSeq >> 8, frameSeq & 0xff]);
+/** The single view's pacing. */
+const singleViewPacer = () => new SnapshotPacer({ intervalMs: 200, repeatStepMs: 150 });
 
 /**
  * A fake device: `answers` maps a path to what it answers (a function, so
@@ -24,7 +30,7 @@ const frame = () => new Blob([new Uint8Array([0xff, 0xd8])], { type: 'image/jpeg
  */
 function fakeDevice(answers) {
   const calls = [];
-  /** @type {(path: string, options: object) => Promise<Blob>} */
+  /** @type {(path: string, options: object) => Promise<Uint8Array>} */
   const fetchSnapshot = async (path, options) => {
     calls.push(path);
     options.signal?.throwIfAborted();
@@ -153,6 +159,32 @@ describe('SnapshotSource', () => {
   });
 });
 
+/**
+ * A device that takes `latencyMs` to answer each request with a picture:
+ * a new one every time (a camera), or with `refreshMs`, the same cached
+ * still until it is refreshed, like the DS-7604NI (about once a second).
+ * Runs on fake time; counts requests and the different pictures it sent.
+ * @param {{latencyMs: number, refreshMs?: number}} behaviour
+ */
+function pictureDevice({ latencyMs, refreshMs }) {
+  const start = Date.now();
+  let calls = 0;
+  let answered = 0;
+  const sent = new Set();
+  /** @type {(path: string, options: {signal?: AbortSignal}) => Promise<Uint8Array>} */
+  const fetchSnapshot = async (path, { signal }) => {
+    calls++;
+    await new Promise(resolve => setTimeout(resolve, latencyMs));
+    signal?.throwIfAborted();
+    answered++;
+    // The still is refreshed 0.5 s after the device starts, then every refreshMs
+    const n = refreshMs ? Math.floor((Date.now() - start + refreshMs / 2) / refreshMs) : calls;
+    sent.add(n);
+    return new Uint8Array([0xff, 0xd8, n >> 8, n & 0xff]);
+  };
+  return { fetchSnapshot, calls: () => calls, answered: () => answered, picturesSent: () => sent.size };
+}
+
 describe('pollSnapshots', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -163,12 +195,49 @@ describe('pollSnapshots', () => {
 
   const paths = snapshotPaths({ id: '2', kind: 'analog' }, 'sub');
 
+  it('shows each picture of an NVR’s cached still once, from fewer requests than polling every 200 ms', async () => {
+    // The DS-7604NI: a request takes ~190 ms, the still changes once a second
+    const nvr = pictureDevice({ latencyMs: 190, refreshMs: 1000 });
+    const pacer = singleViewPacer();
+    let frames = 0;
+    let repeats = 0;
+    const stop = pollSnapshots(new SnapshotSource(paths, nvr.fetchSnapshot), {
+      pacer,
+      onFrame: () => frames++,
+      onRepeat: () => repeats++,
+    });
+    await vi.advanceTimersByTimeAsync(10_000);
+    stop();
+
+    // Every picture the device sent was shown, once; every other answer was a repeat
+    expect(nvr.picturesSent()).toBe(11);
+    expect(frames).toBe(nvr.picturesSent());
+    expect(repeats).toBe(nvr.answered() - frames);
+    expect(pacer.framesPerSecond(performance.now())).toBeCloseTo(1, 1);
+    // Polling every 200 ms would have asked 50 times (each request takes 190 ms), 5 per picture
+    expect(nvr.calls()).toBeLessThan(0.75 * 50);
+    expect(nvr.calls() / frames).toBeLessThan(3.5);
+  });
+
+  it('keeps asking a camera every interval: a new picture every time isn’t slowed down', async () => {
+    const camera = pictureDevice({ latencyMs: 50 });
+    const pacer = singleViewPacer();
+    let frames = 0;
+    const stop = pollSnapshots(new SnapshotSource(paths, camera.fetchSnapshot), { pacer, onFrame: () => frames++ });
+    await vi.advanceTimersByTimeAsync(9_990);
+    stop();
+    // At 0, 0.2, … 9.8 s, each answered 50 ms later
+    expect(camera.calls()).toBe(50);
+    expect(frames).toBe(50);
+    expect(pacer.framesPerSecond(performance.now())).toBe(5);
+  });
+
   it('asks a failing channel once per tick, ever less often, and recovers', async () => {
     let answerFirst = noCamera;
     const device = fakeDevice({ [paths[0]]: () => answerFirst() });
     const events = [];
     const stop = pollSnapshots(new SnapshotSource(paths, device.fetchSnapshot), {
-      intervalMs: 200,
+      pacer: singleViewPacer(),
       onFrame: () => events.push('frame'),
       onError: err => events.push(err.httpStatus),
       onNoSignal: lost => events.push(lost ? 'no signal' : 'signal'),
@@ -206,7 +275,7 @@ describe('pollSnapshots', () => {
     const device = fakeDevice({ [paths[0]]: noCamera });
     const events = [];
     const stop = pollSnapshots(new SnapshotSource(paths, device.fetchSnapshot, { offline: true }), {
-      intervalMs: 500,
+      pacer: new SnapshotPacer({ intervalMs: 500, repeatStepMs: 500 }),
       onFrame: () => events.push('frame'),
       onNoSignal: lost => events.push(lost ? 'no signal' : 'signal'),
     });
@@ -220,7 +289,7 @@ describe('pollSnapshots', () => {
 
   it('stops after a rejected login, and aborts the request in flight when stopped', async () => {
     const device = fakeDevice({ [paths[0]]: () => new AuthError(null) });
-    pollSnapshots(new SnapshotSource(paths, device.fetchSnapshot), { intervalMs: 200, onFrame: () => {} });
+    pollSnapshots(new SnapshotSource(paths, device.fetchSnapshot), { pacer: singleViewPacer(), onFrame: () => {} });
     await vi.advanceTimersByTimeAsync(60000);
     expect(device.calls).toHaveLength(1);
 
@@ -230,7 +299,7 @@ describe('pollSnapshots', () => {
       signal = options.signal;
       return new Promise(() => {});
     });
-    const stop = pollSnapshots(hanging, { intervalMs: 200, onFrame: () => {} });
+    const stop = pollSnapshots(hanging, { pacer: singleViewPacer(), onFrame: () => {} });
     stop();
     expect(signal?.aborted).toBe(true);
   });

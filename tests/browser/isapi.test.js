@@ -7,7 +7,7 @@ import { AuthError } from '../../extension/lib/digest-auth.js';
 import { IsapiError, NetworkError, NotAnImageError, TimeoutError, WriteRollbackError } from '../../extension/lib/errors.js';
 import { readPrivacyMask } from '../../extension/lib/config-xml.js';
 import { Isapi, TIMEOUT_MS, defaultTimeoutMs } from '../../extension/lib/isapi.js';
-import { RESOLVE_AGAIN_AFTER_FAILURES } from '../../extension/lib/snapshots.js';
+import { RESOLVE_AGAIN_AFTER_FAILURES, isJpeg } from '../../extension/lib/snapshots.js';
 import { childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import { NVR_HOST, STATUS, createMockNvr, responseStatusXml } from '../support/mock-nvr.js';
 import { fixtures } from './fixtures.js';
@@ -273,7 +273,7 @@ describe('Isapi', () => {
     expect(source.noSignal).toBe(true);
 
     device.offlineChannels = [];
-    expect((await source.next()).type).toBe('image/jpeg');
+    expect(isJpeg(await source.next())).toBe(true);
     expect([source.failures, source.retryDelayMs, source.noSignal]).toEqual([0, 0, false]);
   });
 

@@ -9,16 +9,21 @@
  * unplugged, an empty channel, which answers 503 on the DS-7604NI) is asked
  * less and less often (snapshotRetryDelay) instead of several times a
  * second for as long as it is on screen, and counts as "no signal" so the
- * page can say so rather than spin or show a frozen frame as live.
+ * page can say so rather than spin or show a frozen frame as live. While
+ * frames arrive, a SnapshotPacer (lib/snapshot-pacer.js) drops repeats of the
+ * last one and times the requests to how often the device really has a new
+ * one (pollSnapshots).
  *
  * The fetching itself is passed in (lib/isapi.js binds it to a device), so
  * everything here runs without a device or a page.
  *
- * Depends on lib/digest-auth.js and lib/errors.js.
+ * Depends on lib/digest-auth.js, lib/errors.js and lib/snapshot-pacer.js.
  */
 
 import { AuthError } from './digest-auth.js';
 import { IsapiError, NotAnImageError, isFallbackError } from './errors.js';
+
+/** @typedef {import('./snapshot-pacer.js').SnapshotPacer} SnapshotPacer */
 
 /** @typedef {import('./channels.js').Channel} Channel */
 /** @typedef {import('./digest-auth.js').RequestOptions} RequestOptions */
@@ -30,9 +35,16 @@ import { IsapiError, NotAnImageError, isFallbackError } from './errors.js';
  */
 
 /**
+ * One frame as the device sent it: the bytes of a JPEG. Kept as bytes rather
+ * than a Blob so a feed can tell a repeat of the last frame without reading
+ * it back.
+ * @typedef {Uint8Array<ArrayBuffer>} JpegBytes
+ */
+
+/**
  * One request for one frame at one URL. Rejects with the device's answer
  * (IsapiError), NotAnImageError, or the request's own errors.
- * @typedef {(path: string, options: RequestOptions) => Promise<Blob>} FetchSnapshot
+ * @typedef {(path: string, options: RequestOptions) => Promise<JpegBytes>} FetchSnapshot
  */
 
 /** The wait after the first failed request in a row; it doubles with each further one. */
@@ -133,7 +145,7 @@ function servesNoFrames(err) {
  *
  * @example
  * const source = new SnapshotSource(snapshotPaths(channel, 'sub'), (path, options) => Isapi.fetchSnapshot(config, path, options));
- * const blob = await source.next({ signal });
+ * const jpeg = await source.next({ signal });
  */
 export class SnapshotSource {
   /**
@@ -171,15 +183,15 @@ export class SnapshotSource {
   /**
    * Fetch the channel's current frame.
    * @param {RequestOptions} [options] - e.g. the feed's abort signal
-   * @returns {Promise<Blob>} image/jpeg
+   * @returns {Promise<JpegBytes>}
    * @throws {unknown} what the request failed with. When no URL has a frame,
    *   that is the first URL's answer: it is the stream that was asked for.
    */
   async next(options = {}) {
     try {
-      const blob = this.path === null ? await this.resolve(options) : await this.fetchSnapshot(this.path, options);
+      const jpeg = this.path === null ? await this.resolve(options) : await this.fetchSnapshot(this.path, options);
       this.failures = 0;
-      return blob;
+      return jpeg;
     } catch (err) {
       // A request the caller cancelled says nothing about the channel
       if (!options.signal?.aborted) this.countFailure();
@@ -198,16 +210,16 @@ export class SnapshotSource {
    * the device answers in a way the next URL would too.
    * @private
    * @param {RequestOptions} options
-   * @returns {Promise<Blob>}
+   * @returns {Promise<JpegBytes>}
    */
   async resolve(options) {
     /** @type {unknown} */
     let firstError;
     for (const path of this.paths) {
       try {
-        const blob = await this.fetchSnapshot(path, options);
+        const jpeg = await this.fetchSnapshot(path, options);
         this.path = path;
-        return blob;
+        return jpeg;
       } catch (err) {
         if (!servesNoFrames(err)) {
           // The device answered here (503: no camera, lowPrivilege) and would
@@ -226,10 +238,13 @@ export class SnapshotSource {
 }
 
 /**
- * What a snapshot feed reports to the page.
+ * How a snapshot feed is paced, and what it reports to the page.
  * @typedef {object} SnapshotFeedHandlers
- * @property {number} intervalMs - minimum time between the starts of two requests while frames arrive
- * @property {(blob: Blob) => void} onFrame - a new frame
+ * @property {SnapshotPacer} pacer - which answers are new frames, and when to send the next
+ *   request while they arrive; one per feed (it remembers the last frame)
+ * @property {(blob: Blob) => void} onFrame - a new frame, as an image/jpeg Blob
+ * @property {() => void} [onRepeat] - the device answered with the same frame as last time,
+ *   which isn't passed on
  * @property {(err: unknown) => void} [onError] - a request failed (after onNoSignal, if it changed)
  * @property {(noSignal: boolean) => void} [onNoSignal] - the channel started or stopped having no
  *   signal (SnapshotSource.noSignal). Called at the start too when it starts without signal.
@@ -238,7 +253,9 @@ export class SnapshotSource {
 /**
  * Poll a channel's frames, one request at a time: the next request is
  * scheduled only after the previous one finishes, so a slow device never
- * builds up a queue of overlapping requests. While requests fail, the wait
+ * builds up a queue of overlapping requests. While frames arrive, the pacer
+ * drops repeats and says when to ask next (SnapshotPacer.delayMs, counted
+ * from the start of the request before). While requests fail, the wait
  * grows (SnapshotSource.retryDelayMs) and a frame resets it.
  *
  * Stopping aborts the request in flight, so a channel or stream switch
@@ -248,7 +265,7 @@ export class SnapshotSource {
  * @param {SnapshotFeedHandlers} handlers
  * @returns {() => void} stops polling
  */
-export function pollSnapshots(source, { intervalMs, onFrame, onError, onNoSignal }) {
+export function pollSnapshots(source, { pacer, onFrame, onRepeat, onError, onNoSignal }) {
   let stopped = false;
   const controller = new AbortController();
   /** @type {ReturnType<typeof setTimeout>|undefined} */
@@ -264,10 +281,12 @@ export function pollSnapshots(source, { intervalMs, onFrame, onError, onNoSignal
   const tick = async () => {
     const started = performance.now();
     try {
-      const blob = await source.next({ signal: controller.signal });
+      const jpeg = await source.next({ signal: controller.signal });
       if (stopped) return;
       reportSignal();
-      onFrame(blob);
+      // A repeat isn't decoded and drawn again, nor counted as a frame
+      if (pacer.record(jpeg, performance.now())) onFrame(new Blob([jpeg], { type: 'image/jpeg' }));
+      else onRepeat?.();
     } catch (err) {
       if (stopped) return;
       reportSignal();
@@ -277,7 +296,7 @@ export function pollSnapshots(source, { intervalMs, onFrame, onError, onNoSignal
     // A handler may have stopped the feed
     if (stopped) return;
     const sinceStart = performance.now() - started;
-    timer = setTimeout(tick, Math.max(intervalMs - sinceStart, source.retryDelayMs, 0));
+    timer = setTimeout(tick, Math.max(pacer.delayMs - sinceStart, source.retryDelayMs, 0));
   };
 
   if (noSignal) onNoSignal?.(true);

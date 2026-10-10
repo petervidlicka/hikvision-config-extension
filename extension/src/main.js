@@ -12,7 +12,7 @@ import { motionTool } from './tools/motion.js';
 import { privacyTool } from './tools/privacy.js';
 import { ToolRegistry, initToolRegistry, switchTool, toggleConfig } from './tools/registry.js';
 import { switchSection, switchToGridView, switchToLiveViewSingle, toggleMaximizeCell } from './views.js';
-import { setStreamType } from './feed.js';
+import { setStreamType, syncFeedsWithVisibility } from './feed.js';
 import { initialPlaybackState, renderTimeline, seekFromClick, setDate, setFilter, setSpeed, shiftDate, skip, togglePlay } from './playback.js';
 
 /** Wire up the page: buttons, keyboard shortcuts and window events. */
@@ -73,6 +73,9 @@ function bindAppEvents() {
   dom.passInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') connect();
   });
+
+  // No live feed asks the device for frames while nobody can see them
+  document.addEventListener('visibilitychange', syncFeedsWithVisibility);
 
   window.addEventListener('resize', () => {
     resizeCanvas();

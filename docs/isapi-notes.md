@@ -272,6 +272,33 @@ since the camera may be back. What the DS-7604NI answers for a disconnected
 camera's snapshot hasn't been verified (no camera was unplugged); the mock
 answers 503 like an empty channel.
 
+### How often the picture changes
+
+The DS-7604NI does not encode a JPEG per request. `/picture` serves a cached
+704×576 still that it refreshes about once a second (new pictures 0.65–1.16 s
+apart, mean ~1 s), the same bytes for `{id}01`, `{id}02` and StreamingProxy.
+A request takes ~190 ms, so polling every 200 ms got the same picture 4–5
+times in a row, and the old readout said "5 fps". Answers carry
+`Cache-Control: no-cache` and `Connection: close` with no ETag or
+Last-Modified, so there is no conditional GET; only comparing the bytes tells
+a repeat. No polling scheme gets more than ~1 new picture a second out of it
+(two requests in flight, or four channels in parallel, measured the same);
+smooth video needs the RTSP stream, which a browser page can't open.
+
+`lib/snapshot-pacer.js` therefore compares each answer with the feed's last
+picture (length, then every byte) and drops repeats: they aren't decoded,
+drawn or counted, and the fps readout is new pictures a second (per camera
+in the grid). Once a feed sees repeats (2 of its last 5 answers), it waits
+0.6 × the median time between new pictures (at least the feed's interval,
+200 ms single / 500 ms grid, at most 1 s) after each new picture, then asks
+every 150 ms until the picture changes (every 500 ms in a grid cell, which
+never asks more often than that). Measured on the device with the single
+view's timing: 1.1 new pictures a second from ~3 requests a second, against
+5.2 for a fixed 200 ms. Simulated with the same refresh, a grid cell asks
+~1.7 times a second instead of 2. A camera that sends a new picture every
+time never repeats, so it keeps the fixed interval. Feeds stop asking while
+the page is hidden and resume when it is shown.
+
 ## Logins and lockout
 
 The device locks a computer (by IP address) out after a few failed logins,

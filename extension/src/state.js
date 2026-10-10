@@ -24,7 +24,6 @@
  * @property {CanvasPoint|null} mousePos - last pointer position over the canvas
  * @property {(() => void)|null} stopSnapshotFeed - stops the single-view loop
  * @property {'main'|'sub'} streamType - single view: main (HD) or sub (SD) stream
- * @property {number[]} frameTimes - when recent frames arrived, for the FPS readout
  * @property {'single'|'grid'} viewMode
  * @property {((() => void)|null)[]} gridFeedStops - per-cell loop stoppers
  * @property {(string|null)[]} gridCellChannels - channel id per grid cell
@@ -78,7 +77,6 @@ export const state = /** @type {AppState} */ (/** @type {unknown} */ ({
   mousePos: null,
   stopSnapshotFeed: null,
   streamType: 'sub',
-  frameTimes: [],
   viewMode: 'single',
   gridFeedStops: [null, null, null, null],
   gridCellChannels: [null, null, null, null],

@@ -162,12 +162,17 @@ function createTriggerStore() {
   };
 }
 
-/** A small JPEG frame that changes every call. */
+let framesDrawn = 0;
+
+/** A small JPEG frame, a different one every call: its colour drifts and it shows the time and a counter. */
 async function frame() {
   const canvas = new OffscreenCanvas(320, 180);
   const g = canvas.getContext('2d');
   g.fillStyle = `hsl(${(Date.now() / 20) % 360} 60% 40%)`;
   g.fillRect(0, 0, 320, 180);
+  g.fillStyle = '#fff';
+  g.font = '14px sans-serif';
+  g.fillText(`${new Date().toISOString().slice(11, 23)} #${++framesDrawn}`, 8, 20);
   return canvas.convertToBlob({ type: 'image/jpeg' });
 }
 
@@ -212,10 +217,21 @@ function todaysPictures() {
  * (e.g. ['4']); their snapshots answer 503 serviceUnavailable, as an empty
  * channel's do on the DS-7604NI. `privacy.read(path)` shows the privacy
  * masks a channel stores, `triggers.read(channel)` its motion trigger.
+ *
+ * Live snapshots take `snapshotDelayMs` to answer (changeable later) and
+ * are a new picture every time, like a camera's, unless `snapshotRefreshMs`
+ * is set: then each channel serves the same cached still until it is
+ * refreshed, every that many ms, the same on the main and sub stream and
+ * through StreamingProxy, like the DS-7604NI (about every 1000 ms).
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
+  /** Each channel's cached still, when snapshotRefreshMs is set. @type {Map<string, {refresh: number, blob: Blob}>} */
+  const stills = new Map();
   const device = {
+    snapshotDelayMs,
+    /** 0: a new picture every request; else how often each channel's still changes */
+    snapshotRefreshMs: 0,
     requests: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
     unreachable: false, failedLogins: 0, noncesIssued: 0,
     /** @type {null | {lockStatus: 'lock'|'unlock', unlockTime: number, retryLoginTime: number}} */
@@ -234,6 +250,16 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
   };
   const xml = (body, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/xml; charset="UTF-8"' } });
   const json = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/json; charset="UTF-8"' } });
+  /** A channel's live picture as it is now. @param {string} channel */
+  const livePicture = async (channel) => {
+    if (!device.snapshotRefreshMs) return frame();
+    const refresh = Math.floor(performance.now() / device.snapshotRefreshMs);
+    const still = stills.get(channel);
+    if (still?.refresh === refresh) return still.blob;
+    const blob = await frame();
+    stills.set(channel, { refresh, blob });
+    return blob;
+  };
 
   device.fetch = async (url, opts = {}) => {
     const u = new URL(url, location.href);
@@ -332,7 +358,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         const timer = setTimeout(() => {
           settle();
           resolve();
-        }, snapshotDelayMs);
+        }, device.snapshotDelayMs);
         const onAbort = () => {
           clearTimeout(timer);
           settle();
@@ -340,7 +366,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         };
         opts.signal?.addEventListener('abort', onAbort, { once: true });
       });
-      return new Response(await frame(), { status: 200 });
+      return new Response(await livePicture(snapshot[1]), { status: 200 });
     }
     // Channel 2 is a camera that only supports the cell grid
     if (p.endsWith('/motionDetection/capabilities')) {

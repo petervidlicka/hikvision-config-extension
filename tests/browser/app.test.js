@@ -13,6 +13,21 @@ let device, chromeStub, state, dom;
 const $ = (id) => document.getElementById(id);
 const toast = () => $('toast').textContent;
 
+/**
+ * Make the page hidden or visible, as switching to another tab and back does.
+ * @param {'hidden'|'visible'} visibility
+ */
+function setPageVisibility(visibility) {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
+
+/** The fps the status bar shows, or null. */
+const readoutFps = () => {
+  const match = $('statusRight').textContent.match(/· ([\d.]+) fps/);
+  return match ? Number(match[1]) : null;
+};
+
 /** Dispatch canvas mouse events at a fraction of the canvas size. */
 function canvasPointer() {
   const canvas = $('drawCanvas');
@@ -91,8 +106,49 @@ describe('config page', () => {
     await new Promise(r => setTimeout(r, 2500));
     expect(device.maxInFlightSnapshots).toBe(1);
     expect(device.requests.filter(r => r.endsWith('/picture'))).toContain('GET /ISAPI/Streaming/channels/102/picture');
-    expect($('statusRight').textContent).toMatch(/^Channel 1 · SD · \d+ fps$/);
+    expect($('statusRight').textContent).toMatch(/^Channel 1 · SD · \d+\.\d fps$/);
   });
+
+  it('shows an NVR’s cached still once per change and reads its real rate, without slowing a camera down', async () => {
+    const picture = 'GET /ISAPI/Streaming/channels/102/picture';
+    let shown = 0;
+    const observer = new MutationObserver(records => { shown += records.length; });
+    observer.observe(dom.videoFeed, { attributeFilter: ['src'] });
+    /** Requests and pictures shown over `ms`, after letting a restarted feed settle for `settleMs`. */
+    const watch = async (settleMs, ms) => {
+      $('streamBtnSd').click(); // restarts the feed
+      await new Promise(r => setTimeout(r, settleMs));
+      const since = device.requests.length;
+      shown = 0;
+      await new Promise(r => setTimeout(r, ms));
+      return { asked: device.requests.slice(since).filter(r => r === picture).length, shown };
+    };
+    device.snapshotDelayMs = 190; // like the DS-7604NI
+    try {
+      // A camera: a new picture for every request, every 200 ms, all shown
+      const camera = await watch(400, 2000);
+      expect(camera.asked).toBeGreaterThanOrEqual(8);
+      expect(camera.shown).toBeGreaterThanOrEqual(camera.asked - 1);
+      expect(readoutFps()).toBeGreaterThan(3.5);
+
+      // The DS-7604NI: the same still for a second. Each one is shown once,
+      // though asked for several times (how many fewer than polling every
+      // 200 ms is in tests/node/snapshots.test.js, on exact timing)
+      device.snapshotRefreshMs = 1000;
+      const nvr = await watch(1500, 3000);
+      expect(nvr.shown).toBeGreaterThanOrEqual(2);
+      expect(nvr.shown).toBeLessThanOrEqual(4);
+      expect(nvr.asked).toBeGreaterThan(nvr.shown);
+      expect(nvr.asked).toBeLessThanOrEqual(3000 / 200);
+      expect(readoutFps()).toBeGreaterThan(0.6);
+      expect(readoutFps()).toBeLessThan(1.5);
+      expect(device.maxInFlightSnapshots).toBe(1);
+    } finally {
+      observer.disconnect();
+      device.snapshotRefreshMs = 0;
+      device.snapshotDelayMs = 1200;
+    }
+  }, 15_000);
 
   it('switches the single view to the HD stream and remembers it', async () => {
     $('streamBtnHd').click();
@@ -144,6 +200,38 @@ describe('config page', () => {
       expect(document.querySelectorAll('.grid-cell.no-signal')).toHaveLength(1);
     } finally {
       device.offlineChannels = [];
+      $('singleViewTab').click();
+    }
+  });
+
+  it('asks for no frames while the tab is hidden, and picks up the views on screen when it’s back', async () => {
+    const pictures = (since) => device.requests.slice(since).filter(r => r.endsWith('/picture'));
+    $('gridViewTab').click();
+    try {
+      await vi.waitFor(() => expect(document.querySelectorAll('.grid-feed.loaded')).toHaveLength(4), { timeout: 3000 });
+      // Each camera's rate (a picture every 1.2 s here), not the sum of four
+      await vi.waitFor(() => expect($('statusRight').textContent).toMatch(/^Grid · SD · [\d.]+ fps per camera$/), { timeout: 3000 });
+      expect(readoutFps()).toBeLessThan(1.5);
+      setPageVisibility('hidden');
+      let since = device.requests.length;
+      await new Promise(r => setTimeout(r, 1500));
+      expect(pictures(since)).toEqual([]);
+      // Each grid cell asks again at once
+      setPageVisibility('visible');
+      await vi.waitFor(() => expect(new Set(pictures(since))).toEqual(new Set([1, 2, 3, 4].map(ch => `GET /ISAPI/Streaming/channels/${ch}02/picture`))));
+      expect(document.querySelectorAll('.grid-cell.no-signal')).toHaveLength(0);
+
+      // A view that starts while the page is hidden (a Connect finishing in another tab) waits too
+      setPageVisibility('hidden');
+      $('singleViewTab').click();
+      since = device.requests.length;
+      await new Promise(r => setTimeout(r, 500));
+      expect(pictures(since)).toEqual([]);
+      setPageVisibility('visible');
+      await vi.waitFor(() => expect(pictures(since)).toEqual(['GET /ISAPI/Streaming/channels/101/picture'])); // HD, chosen above
+    } finally {
+      delete document.visibilityState;
+      document.dispatchEvent(new Event('visibilitychange'));
       $('singleViewTab').click();
     }
   });

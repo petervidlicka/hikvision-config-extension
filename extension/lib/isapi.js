@@ -3,7 +3,7 @@
  *
  * Extension pages with host permission aren't subject to CORS, so there's no
  * need to proxy through the service worker: responses stay binary (snapshots
- * become Blobs, not base64) and the password never travels over messaging.
+ * arrive as bytes, not base64) and the password never travels over messaging.
  *
  * Every request has a time limit (TIMEOUT_MS), and endpoint fallbacks follow
  * one policy (isFallbackError in lib/errors.js): move on only when the device
@@ -390,10 +390,11 @@ export const Isapi = {
    * @param {Pick<Channel, 'id'|'kind'>} channel
    * @param {SnapshotStream} [stream]
    * @param {RequestOptions} [options] - e.g. an abort signal
-   * @returns {Promise<Blob>}
+   * @returns {Promise<Blob>} image/jpeg
    */
   async getSnapshot(config, channel, stream = 'main', options = {}) {
-    return this.snapshotSource(config, channel, stream).next(options);
+    const jpeg = await this.snapshotSource(config, channel, stream).next(options);
+    return new Blob([jpeg], { type: 'image/jpeg' });
   },
 
   /**
@@ -422,13 +423,14 @@ export const Isapi = {
    * @param {DeviceConfig} config
    * @param {string} path - a snapshot URL, e.g. "/ISAPI/Streaming/channels/102/picture"
    * @param {RequestOptions} [options]
-   * @returns {Promise<Blob>} image/jpeg
+   * @returns {Promise<Uint8Array<ArrayBuffer>>} the JPEG's bytes, which a live feed compares
+   *   with the last frame's (see lib/snapshot-pacer.js)
    * @throws {IsapiError|NotAnImageError} besides the errors of request()
    */
   async fetchSnapshot(config, path, options = {}) {
     const resp = await this.request(config, 'GET', path, null, options);
     const bytes = typeof resp.data === 'string' ? new TextEncoder().encode(resp.data) : new Uint8Array(resp.data);
-    if (isJpeg(bytes)) return new Blob([bytes], { type: 'image/jpeg' });
+    if (isJpeg(bytes)) return bytes;
     const status = parseResponseStatus(new TextDecoder().decode(bytes.subarray(0, MAX_STATUS_BYTES)));
     if (status && status.statusCode !== STATUS_OK) {
       throw new IsapiError({ method: 'GET', path, httpStatus: resp.status, status });

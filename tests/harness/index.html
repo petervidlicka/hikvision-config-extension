@@ -22,6 +22,11 @@
   `mockDevice.writeStatus = {statusCode: 7, statusString: 'Reboot Required', subStatusCode: 'rebootRequired'}`
   for a save that needs a reboot, or add an error answer to
   `mockDevice.failures` (see tests/support/mock-nvr.js).
+  Live snapshots are a cached still that changes once a second, like the
+  DS-7604NI's (the fps readout shows about 1); set
+  `mockDevice.snapshotRefreshMs = 0` for a camera that sends a new picture
+  for every request (about 3–5 fps), and switch to another tab and back to
+  see the feeds stop and resume in `mockDevice.requests`.
   Use host 192.168.0.108 and any password to connect.
 -->
 <script type="module">
@@ -34,6 +39,7 @@
 
   window.chrome = createChromeStub().chrome;
   const device = createMockNvr({ snapshotDelayMs: 300, realFetch: window.fetch.bind(window) });
+  device.snapshotRefreshMs = 1000;
   window.fetch = device.fetch;
   window.mockDevice = device;
 

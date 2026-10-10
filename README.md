@@ -13,7 +13,7 @@ To solve this, I opted to build this lightweight Chrome extension as a straightf
 
 ## Features
 
-- **Live Camera Feeds**: View single-camera or 4-camera grid view with per-cell channel selection and full-screen maximize. Switch the single view between SD (faster) and HD; the status bar shows frames per second.
+- **Live Camera Feeds**: View single-camera or 4-camera grid view with per-cell channel selection and full-screen maximize. Switch the single view between SD (faster) and HD; the status bar shows how many new pictures a second arrive. The live view is a series of snapshots, not video: an NVR typically refreshes its snapshot about once a second, while a camera connected directly can deliver several a second. Feeds pause while the tab is in the background.
 - **Playback**: See a day's recordings on a 24-hour timeline, with event recordings highlighted (manual and command recordings get their own colours, as in iVMS), day-by-day navigation and an events-only filter. Pictures the device stores (scheduled or on motion, if enabled on the NVR) appear as yellow markers you can click to view. Where the device provides still images from recorded video, you can step through them. Browsers can't play the recorded video stream itself.
 - **Motion Detection**: Draw polygon detection regions on the live image, toggle detection on/off, adjust sensitivity, and choose person/vehicle targets. The extension follows the limits your device reports (number of regions, corners per region, sensitivity steps). Cameras that only support a detection grid get a cell editor instead.
 - **Privacy Masks**: Draw up to 4 rectangular privacy mask regions on the video feed to block sensitive areas.
