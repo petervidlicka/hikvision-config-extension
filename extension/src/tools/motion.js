@@ -49,7 +49,7 @@ export const motionTool = {
       <label>Sensitivity <span id="sensitivityVal">40</span></label>
       <input type="range" id="sensitivitySlider" min="0" max="100" step="20" value="40" />
     </div>
-    <div class="toggle-row">
+    <div class="toggle-row" id="dynamicAnalysisRow">
       <span>Dynamic Analysis</span>
       <div class="toggle" id="dynamicAnalysisToggle"></div>
     </div>
@@ -60,11 +60,16 @@ export const motionTool = {
         <label class="target-checkbox" id="detectVehicleLabel"><input type="checkbox" id="detectVehicle" /> Vehicle</label>
       </div>
     </div>
-    <div class="instructions">
+    <div class="instructions" id="motionRegionInstructions">
       <strong>Click</strong> to place vertices and draw a detection region.
       <strong>Double-click</strong> or click near the start to close the shape.
       <strong>Right-click</strong> a region to delete it.
       Up to <span id="motionMaxRegions">4</span> regions, <span id="motionPointRange">4–10</span> corners each.
+    </div>
+    <div class="instructions" id="motionGridInstructions" style="display:none">
+      This camera uses a detection grid.
+      <strong>Click or drag</strong> to mark cells; drag over marked cells to clear them.
+      <strong>Right-click</strong> clears a cell.
     </div>
     <div class="legend">
       <div class="legend-item">
@@ -89,6 +94,9 @@ export const motionTool = {
       motionRegions: [],
       drawingPoints: [],
       motionCaps: readMotionCapabilities(null), // device limits, refreshed on load
+      motionMode: 'region',
+      motionGrid: null,
+      gridPaintValue: null,
       motionEnabled: false,
       sensitivity: 40,
       dynamicAnalysis: false,
@@ -101,10 +109,15 @@ export const motionTool = {
   resetState() {
     state.motionRegions = [];
     state.drawingPoints = [];
+    state.motionGrid = null;
     state.motionDoc = null;
   },
 
   draw(ctx, canvas) {
+    if (state.motionMode === 'grid') {
+      drawGrid(ctx, canvas);
+      return;
+    }
     // Draw completed regions
     state.motionRegions.forEach((reg, i) => {
       if (reg.points.length < 3) return;
@@ -168,6 +181,16 @@ export const motionTool = {
   },
 
   onMouseDown(pos, e) {
+    if (state.motionMode === 'grid') {
+      const cell = gridCellAt(pos);
+      if (!cell || !state.motionGrid) return;
+      // Right-click always clears; otherwise toggle the first cell and paint that value while dragging
+      state.gridPaintValue = e.button === 2 ? false : !state.motionGrid.cells[cell.row][cell.col];
+      state.motionGrid.cells[cell.row][cell.col] = state.gridPaintValue;
+      state.isDrawing = true; // keeps mousemove events coming until mouseup
+      redraw();
+      return;
+    }
     if (e.button === 2) {
       // Right-click: delete region under cursor
       for (let i = state.motionRegions.length - 1; i >= 0; i--) {
@@ -209,6 +232,15 @@ export const motionTool = {
 
 
   onMouseMove(pos, e) {
+    if (state.motionMode === 'grid') {
+      const cell = gridCellAt(pos);
+      if (cell && state.motionGrid && state.gridPaintValue !== null &&
+          state.motionGrid.cells[cell.row][cell.col] !== state.gridPaintValue) {
+        state.motionGrid.cells[cell.row][cell.col] = state.gridPaintValue;
+        redraw();
+      }
+      return;
+    }
     state.mousePos = pos;
     if (state.drawingPoints.length > 0) {
       redraw();
@@ -216,7 +248,7 @@ export const motionTool = {
   },
 
   onMouseUp(pos, e) {
-    // Nothing needed
+    state.gridPaintValue = null;
   },
 
   onDblClick(pos, e) {
@@ -234,8 +266,12 @@ export const motionTool = {
       ]);
       state.motionDoc = doc;
       state.motionCaps = readMotionCapabilities(capsDoc);
-      applyCapabilities();
       const md = readMotionConfig(doc);
+      // Polygons whenever the device supports them, as Hikvision's own UI does
+      state.motionMode = state.motionCaps.regionTypes.includes('region') || !md.grid ? 'region' : 'grid';
+      state.motionGrid = md.grid ? { ...md.grid, cells: md.grid.cells.map(row => [...row]) } : null;
+      applyCapabilities();
+      byId('dynamicAnalysisRow').style.display = md.supportsDynamicAnalysis ? '' : 'none';
 
       state.motionEnabled = md.enabled;
       byId('motionToggle').classList.toggle('on', state.motionEnabled);
@@ -280,10 +316,6 @@ export const motionTool = {
       return;
     }
     const caps = state.motionCaps;
-    if (!caps.regionTypes.includes('region')) {
-      showToast('This camera only supports grid-based motion areas, which the extension cannot edit yet', 'error');
-      return;
-    }
     if (state.drawingPoints.length > 0) {
       showToast('Finish or cancel (Esc) the region you are drawing first', 'error');
       return;
@@ -303,6 +335,8 @@ export const motionTool = {
     setStatus('Saving motion detection config...');
     try {
       applyMotionConfig(doc, {
+        mode: state.motionMode,
+        grid: state.motionGrid ?? undefined,
         enabled: state.motionEnabled,
         sensitivity,
         dynamicAnalysis: state.dynamicAnalysis,
@@ -351,6 +385,7 @@ export const motionTool = {
     byId('clearMotionRegionsBtn').addEventListener('click', () => {
       state.motionRegions = [];
       state.drawingPoints = [];
+      state.motionGrid?.cells.forEach(row => row.fill(false));
       updateRegionList();
       redraw();
     });
@@ -412,4 +447,43 @@ function applyCapabilities() {
   byId('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';
   byId('detectVehicleLabel').style.display = caps.targetTypes.includes('vehicle') ? '' : 'none';
   byId('targetDetectionRow').style.display = caps.targetTypes.length ? '' : 'none';
+  const grid = state.motionMode === 'grid';
+  byId('motionRegionInstructions').style.display = grid ? 'none' : '';
+  byId('motionGridInstructions').style.display = grid ? '' : 'none';
+  byId('motionRegionList').style.display = grid ? 'none' : '';
+}
+
+/**
+ * The grid cell under a canvas position, or null outside the grid.
+ * @param {import('../state.js').CanvasPoint} pos
+ * @returns {{row: number, col: number}|null}
+ */
+function gridCellAt(pos) {
+  const grid = state.motionGrid;
+  if (!grid) return null;
+  const col = Math.floor((pos.x / dom.canvas.width) * grid.cols);
+  const row = Math.floor((pos.y / dom.canvas.height) * grid.rows);
+  return row >= 0 && row < grid.rows && col >= 0 && col < grid.cols ? { row, col } : null;
+}
+
+/**
+ * Draw grid-mode cells: marked cells filled, faint lines for the rest.
+ * @param {CanvasRenderingContext2D} ctx
+ * @param {HTMLCanvasElement} canvas
+ */
+function drawGrid(ctx, canvas) {
+  const grid = state.motionGrid;
+  if (!grid) return;
+  const w = canvas.width / grid.cols;
+  const h = canvas.height / grid.rows;
+  ctx.fillStyle = 'rgba(74, 108, 247, 0.35)';
+  grid.cells.forEach((row, r) => row.forEach((on, c) => {
+    if (on) ctx.fillRect(c * w, r * h, w, h);
+  }));
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.12)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let c = 1; c < grid.cols; c++) { ctx.moveTo(c * w, 0); ctx.lineTo(c * w, canvas.height); }
+  for (let r = 1; r < grid.rows; r++) { ctx.moveTo(0, r * h); ctx.lineTo(canvas.width, r * h); }
+  ctx.stroke();
 }

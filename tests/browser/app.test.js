@@ -60,10 +60,19 @@ describe('config page', () => {
     expect(chromeStub.store.local.password).toBeUndefined();
   });
 
-  it('streams frames as blobs without overlapping requests', async () => {
+  it('streams SD frames as blobs without overlapping requests', async () => {
     await vi.waitFor(() => expect(dom.videoFeed.src).toMatch(/^blob:/), { timeout: 3000 });
     await new Promise(r => setTimeout(r, 2500));
     expect(device.maxInFlightSnapshots).toBe(1);
+    expect(device.requests.filter(r => r.endsWith('/picture'))).toContain('GET /ISAPI/Streaming/channels/102/picture');
+    expect($('statusRight').textContent).toMatch(/^Channel 1 · SD · \d+ fps$/);
+  });
+
+  it('switches the single view to the HD stream and remembers it', async () => {
+    $('streamBtnHd').click();
+    expect(chromeStub.store.local.streamType).toBe('main');
+    await vi.waitFor(() => expect(device.requests.at(-1)).toBe('GET /ISAPI/Streaming/channels/101/picture'), { timeout: 3000 });
+    expect($('statusRight').textContent).toMatch(/^Channel 1 · HD/);
   });
 
   it('loads motion detection with the device limits', async () => {
@@ -128,6 +137,51 @@ describe('config page', () => {
     expect(path).toBe('/ISAPI/Event/triggers/VMD-1');
     expect([...body.matchAll(/<notificationMethod>(\w+)/g)].map(m => m[1])).toEqual(['IO', 'FTP', 'center']);
     expect(body).toContain('<outputIOPortID>2</outputIOPortID>');
+  });
+
+  it('edits the cell grid on a grid-only camera', async () => {
+    $('configTabs').querySelector('[data-tool="motion"]').click();
+    document.querySelectorAll('.channel-item')[1].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect(state.motionMode).toBe('grid'));
+    expect($('motionGridInstructions').style.display).toBe('');
+    expect($('motionRegionInstructions').style.display).toBe('none');
+    expect($('dynamicAnalysisRow').style.display).toBe(''); // the fixture has the field
+
+    const { click } = canvasPointer();
+    $('clearMotionRegionsBtn').click();
+    click(0.01, 0.01); // top-left cell
+    expect(state.motionGrid.cells[0][0]).toBe(true);
+
+    const puts = device.puts.length;
+    $('saveMotionBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+    const { path, body } = device.puts.at(-1);
+    expect(path).toBe('/ISAPI/ContentMgmt/InputProxy/channels/2/video/motionDetection');
+    expect(body).toContain('<regionType>grid</regionType>');
+    expect(body).toContain('<gridMap>800000' + '0'.repeat(102) + '</gridMap>');
+  });
+
+  it('shows the day’s recordings and frames in Playback', async () => {
+    $('playbackSectionTab').click();
+    await vi.waitFor(() => expect($('pbInfo').textContent).toMatch(/^2 recordings, 32 min, 1 triggered by events\./));
+    expect($('pbDateLabel').textContent).toBe('Today');
+    expect($('pbTimestamp').textContent).toBe('08:00:00');
+    expect(device.requests).toContain('GET /ISAPI/ContentMgmt/StreamingProxy/channels/201/picture');
+    await vi.waitFor(() => expect(dom.videoFeed.src).toMatch(/^blob:/));
+    expect($('toolTabs').style.display).toBe('none');
+
+    // Clicking the timeline moves the playhead
+    const wrap = $('pbTimelineWrap').getBoundingClientRect();
+    $('pbTimelineWrap').dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: wrap.left + wrap.width * (14.1 / 24), clientY: wrap.top + 5 }));
+    // Clicks land on whole pixels, a few minutes apart on a narrow timeline
+    expect($('pbTimestamp').textContent).toMatch(/^14:0\d/);
+  });
+
+  it('explains when a device has no frames from recordings', async () => {
+    device.recordedFrames = false;
+    document.querySelectorAll('.channel-item')[0].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect($('pbInfo').textContent).toContain('doesn’t provide still images'));
+    expect(state.playback.framesSupported).toBe(false);
   });
 
   it('stops everything after one failed login when the device rejects the password', async () => {
