@@ -78,20 +78,38 @@ Each address is tried on port 80 and on 8080, the usual alternative for a
 device whose web port was moved, and the card shows the port it answered on
 (an address that answers on both is listed once, on the port that confirmed
 it, else on 80). The optional host permission `http://*/*` the scan asks for
-covers both: a match pattern without a port matches every port. Both ports
-go through the one pool of 48 probes, and an address with nothing on it costs
-a whole probe timeout (1.2 s) per port. Measured with the test mock, a subnet
-with nothing on it takes 11 timeouts (about 13 s) instead of 6 (about 7 s).
+covers both: a match pattern without a port matches every port.
+
 Subnets are tried in order (the last-used host's, then 192.168.0, .1, .2,
 10.0.0, 10.0.1, then the defaults of AVM Fritz!Box 192.168.178, Asus
 192.168.50, MikroTik 192.168.88 and many ISP routers 192.168.100), and the
-scan stops after the first subnet with a device. So the extra time only falls
-on subnets without one, and a scan that finds nothing anywhere takes about
-2 minutes (before: five subnets on one port, about 36 s). The pool isn't
-grown to win the time back, since that is what kept Chrome's socket pool and
-the OS ARP queue from overflowing, which made real devices miss their timeout.
-The whole subnet is tried on port 80 before 8080, so two connections to one
-address never wait on the same ARP lookup.
+scan stops after the first subnet with a device, once that subnet is done.
+Both ports go through the one pool of 48 probes, and an address with nothing
+on it can cost a whole probe timeout (1.2 s) per port. So port 8080 adds time
+to every subnet scanned, including the one where the device is found, which
+is usually the first:
+
+| Subnet | Port 80 only | Ports 80 and 8080 |
+| --- | --- | --- |
+| Upper bound (test mock, fake timers), empty or with a device | 6 timeouts, about 7 s | 11 timeouts, about 13 s |
+| DS-7604NI's LAN, 192.168.0 with it at .108 (Node and Chrome) | 7.1 s | 7.8–13.4 s |
+| Nothing found in any of the nine subnets (upper bound) | about 1 min (five subnets before: about 36 s) | about 2 min |
+
+The real LAN costs less than the upper bound because most port-8080 probes of
+empty addresses failed at once (230 of 254 in Chrome), the system still
+remembering that the port-80 probe found nobody there. Subnets that aren't on
+the local network weren't measured, since the scan stopped at 192.168.0.
+
+The pool isn't grown to win the time back, since that is what kept Chrome's
+socket pool and the OS ARP queue from overflowing, which made real devices
+miss their timeout. Skipping 8080 for addresses whose port-80 probe got no
+answer at all would win most of it back (a live host without a port-80
+listener refuses the connection at once), but needs the probe to tell a
+timeout from a refusal, and would miss a device that silently drops port-80
+connections; not done. The whole subnet is tried on port 80 before 8080, so
+two connections to one address normally don't wait on the same ARP lookup;
+on a busy subnet whose hosts refuse port 80 at once, the 8080 probe of an
+address can still start before its port-80 probe has an answer.
 
 ## Logins and lockout
 

@@ -62,6 +62,11 @@ const answers = new Map([
   ['172.21.0.30:8080', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: activateStatus(true) }],
   ['172.21.0.31:80', { [DEVICE_INFO]: DIGEST }],
   ['172.21.0.31:8080', { [DEVICE_INFO]: DIGEST }],
+  // And one confirmed on both
+  ['172.21.0.32:80', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: activateStatus(true) }],
+  ['172.21.0.32:8080', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: activateStatus(true) }],
+  // The NVR alone on its subnet
+  ['172.22.0.108:80', { [DEVICE_INFO]: DIGEST, [ACTIVATE_STATUS]: activateStatus(true) }],
 ]);
 const hosts = new Set([...answers.keys()].map(key => key.split(':')[0]));
 
@@ -162,8 +167,9 @@ describe('scanForHikvision', () => {
     expect(found).toEqual([
       { ip: '172.21.0.30', port: 8080, confirmed: true, activated: true },
       { ip: '172.21.0.31', port: 80, confirmed: false, activated: null },
+      { ip: '172.21.0.32', port: 80, confirmed: true, activated: true },
     ]);
-    expect(onFound.mock.calls.map(([device]) => device.ip)).toEqual(['172.21.0.30', '172.21.0.31']);
+    expect(onFound.mock.calls.map(([device]) => device.ip)).toEqual(['172.21.0.30', '172.21.0.31', '172.21.0.32']);
   });
 
   it('moves on past empty subnets', async () => {
@@ -188,17 +194,22 @@ describe('scanForHikvision', () => {
   });
 
   // The cost of trying a second port: an address with nothing on it takes a whole
-  // probe timeout per port, through the same pool of 48
+  // probe timeout per port, through the same pool of 48. The subnet where the device
+  // is found pays it too, since it is scanned in full before the scan stops; on a real
+  // LAN it is an upper bound (see docs/isapi-notes.md)
   it.each([
-    { ports: [80], rounds: 6 },
-    { ports: [80, 8080], rounds: 11 },
-  ])('takes $rounds probe timeouts for an empty subnet on ports $ports', async ({ ports, rounds }) => {
+    { subnet: 'an empty subnet', subnets: ['192.168.9'], ports: [80], rounds: 6 },
+    { subnet: 'an empty subnet', subnets: ['192.168.9'], ports: [80, 8080], rounds: 11 },
+    { subnet: 'the subnet with the NVR', subnets: ['172.22.0', '192.168.9'], ports: [80], rounds: 6 },
+    { subnet: 'the subnet with the NVR', subnets: ['172.22.0', '192.168.9'], ports: [80, 8080], rounds: 11 },
+  ])('takes $rounds probe timeouts for $subnet on ports $ports', async ({ subnets, ports, rounds }) => {
     vi.useFakeTimers();
     const started = Date.now();
-    const scan = scanForHikvision({ subnets: ['192.168.9'], ports, probeTimeoutMs: 1200 });
+    const scan = scanForHikvision({ subnets, ports, probeTimeoutMs: 1200 });
     await vi.runAllTimersAsync();
-    await scan;
-    expect(Date.now() - started).toBe(rounds * 1200);
+    expect((await scan).length).toBe(subnets.length - 1);
+    // The NVR's own answers take a few ms more
+    expect(Math.floor((Date.now() - started) / 1200)).toBe(rounds);
   });
 });
 

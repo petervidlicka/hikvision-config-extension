@@ -8,17 +8,22 @@
  * queue, and real devices then miss their timeout.
  *
  * Each address is tried on HTTP port 80 and on 8080, where devices moved off
- * the default port often are. Both ports share the one pool, so an address
- * with nothing on it costs a timeout per port: a subnet with nothing on it
- * takes 11 rounds of PROBE_TIMEOUT_MS (about 13 s) instead of 6 (about
- * 7 s), and a scan that finds nothing in any of the nine subnets about 2 min.
- * Growing the pool to win that back would bring back the overflow above.
- * The cost only falls on subnets without a device, since the scan stops after
- * the first subnet with one, and the user can cancel at any time. The whole
- * subnet is tried on one port before the next, so two connections to one
- * address never wait on the same ARP lookup (some systems hold only one
- * packet per pending lookup and drop the other, which then misses its
- * timeout).
+ * the default port often are. Both ports share the one pool, and an address
+ * with nothing on it can cost a timeout per port. So every subnet scanned
+ * takes up to 11 rounds of PROBE_TIMEOUT_MS (about 13 s) instead of 6 (about
+ * 7 s): the one where a device is found too, since it is scanned in full
+ * before the scan stops, and that is usually the first. A scan that finds
+ * nothing in any of the nine subnets takes up to about 2 min. On the
+ * DS-7604NI's own LAN the subnet with it took 7.1 s on port 80 alone and
+ * 7.8–13.4 s on both: most 8080 probes of empty addresses failed at once,
+ * the system still remembering that the port-80 probe found nobody there.
+ * Growing the pool to win the time back would bring back the overflow above;
+ * the user can cancel at any time. The whole subnet is tried on one port
+ * before the next, so two connections to one address normally don't wait on
+ * the same ARP lookup (some systems hold only one packet per pending lookup
+ * and drop the other, which then misses its timeout). On a busy subnet whose
+ * hosts refuse port 80 at once, the second can still start before the first
+ * has its answer.
  *
  * A device that asks for a Digest login like ISAPI does is a candidate; one
  * that also answers /SDK/activateStatus is a confirmed Hikvision (see
