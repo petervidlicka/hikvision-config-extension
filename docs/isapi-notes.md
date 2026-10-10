@@ -53,9 +53,67 @@ creates one with no namespace, which serializes as `<targetType xmlns="">`.
 
 ## Event actions
 
-Alarm outputs use `<id>IO-{port}</id>`. IP channels use `<dynOutputIOPortID>`
-unless the device reports `bSupportIOOutputUnify`, in which case they use
-`<outputIOPortID>`.
+Motion linkage is the trigger `/ISAPI/Event/triggers/VMD-{id}` (GET and PUT,
+`motionLink` in `websdk.js`). Each `<EventTriggerNotification>` is one action.
+The web UI (`eventMotion.js`) and write tests on the DS-7604NI (V4.75.206,
+`VMD-3`) agree on these:
+
+- **Which actions a device offers.** `/ISAPI/Event/triggersCap` >
+  `MotionDetectionTriggerCap` flags them: `isSupportRecord`, `isSupportCenter`,
+  `isSupportEmail`, `isSupportBeep`, `isSupportIO`, `isSupportWhiteLightOut`,
+  `isSupportAudioOut`, plus `isSupportIOOutputUnify`. The web UI shows only the
+  flagged actions; the extension disables the others ("Not supported by this
+  device"). Without triggersCap, or without that block, every action is
+  offered as before. The per-trigger `…/VMD-1/capabilities` answers 403
+  `notSupport` on the NVR.
+- **Record is per channel**: `<id>record-{ch}</id>`, method `record`, and
+  `<dynVideoInputID>{ch}</dynVideoInputID>` for an IP channel (`videoInputID`
+  for analog; new entries follow the trigger's own `videoInputChannelID` /
+  `dynVideoInputChannelID`). A trigger can also record other channels (the web
+  UI offers every channel), so the toggle reads and writes only this channel's
+  entry and leaves other `record-N` links alone.
+- **center, email, beep**: the method name is also the `<id>`.
+- **Alarm output**: `<id>IO-{port}</id>`, method `IO`, and
+  `<outputIOPortID>` for the device's own ports (or every port when
+  `isSupportIOOutputUnify`), `<dynOutputIOPortID>` for an IP camera's port.
+  - The outputs: when `/ISAPI/System/IO/outputs/capabilities` mentions
+    `IOType`, `/ISAPI/System/IO/outputs` lists every port with its `IOType`
+    (`local`, `digitalChannel`, `analogChannel`). Otherwise the device's own
+    ports are `/ISAPI/System/IO/outputs` and its IP cameras' are
+    `/ISAPI/ContentMgmt/IOProxy/outputs`. Ports with `IOUseType` `whiteLight`
+    or `audio` stand for a camera's light or speaker and are left out, as are
+    analog ports marked `disable`. A digital port marked `disable` is still a
+    relay.
+  - The DS-7604NI has no relay of its own (`IOOutputPortNums` 0). Its relays
+    are its cameras': 301 on channel 3's camera and 401 on channel 4's, matched
+    by `IODescriptor/ipAddress` against the channel's InputProxy `ipAddress`.
+    302/303 and 402/403 are the light and speaker pseudo ports.
+  - The extension switches the channel's own camera relay, else the device's
+    first local output (cameras), else disables the toggle ("This camera has no
+    alarm output"). Turning it off removes only that port's entry.
+  - Write tests: `IO-301` with `dynOutputIOPortID` was stored. `IO-1` with
+    `outputIOPortID` 1, which older versions wrote, was accepted too, but port
+    1 doesn't exist, so it linked to nothing.
+- **White light and audio alarm on an NVR**:
+  `<id>whiteLightOut-{ch}</id><notificationMethod>whiteLightOut</notificationMethod><lightAudioOutID>{ch}</lightAudioOutID>`,
+  and the same with `audioOut`. Only for the channels listed by
+  `/ISAPI/Event/triggers/notifications/channels/whiteLightAlarm?format=json`
+  (`WhiteLightAlarmList[].channelID`) and `…/AudioAlarm?format=json`
+  (`AudioAlarmList[]`): channels 3 and 4 here. Both shapes were stored in
+  write tests. A bare `<notificationMethod>whiteLight</notificationMethod>` or
+  `audio`, which older versions wrote, fails the whole PUT with 400
+  `badXmlContent` ("Tag 16 is invalid (two root tags)"). Devices whose
+  triggersCap doesn't name the `*Out` flags still get the bare names; that is
+  unverified, since no standalone camera has been tested.
+- **`notificationRecurrence`**: the NVR accepts it on a record entry but drops
+  it, and neither the NVR, its web UI nor the SDK writes it. New entries copy
+  it only when the trigger's own entries carry it (camera firmware).
+
+triggersCap, the outputs and the light and speaker lists describe the hardware,
+so the extension reads them once per connection. A save goes to
+`/ISAPI/Event/triggers/{id of the loaded trigger}`. When the per-trigger GET
+isn't there, the trigger is picked out of `/ISAPI/Event/triggers` by
+`videoInputChannelID`, `dynVideoInputChannelID` or id `VMD-{ch}`.
 
 ## Privacy masks
 

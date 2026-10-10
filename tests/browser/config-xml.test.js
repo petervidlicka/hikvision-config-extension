@@ -4,9 +4,10 @@
 import { describe, expect, it } from 'vitest';
 import { childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import {
-  DEFAULT_PRIVACY_SCREEN, applyMotionConfig, applyNotificationMethods, canvasRectToPrivacy, decodeGridMap, encodeGridMap,
-  applyPrivacyMask, privacyRegionList, privacyRegionToCanvas, readMotionCapabilities, readMotionConfig,
-  readNotificationMethods, readPrivacyMask, triggerNotifications,
+  DEFAULT_PRIVACY_SCREEN, alarmOutputNotification, applyMotionConfig, applyNotifications, canvasRectToPrivacy, decodeGridMap,
+  encodeGridMap, applyPrivacyMask, hasNotification, lightAudioNotification, methodNotification, privacyRegionList,
+  privacyRegionToCanvas, readAlarmOutputs, readLightAudioChannels, readMotionCapabilities, readMotionConfig,
+  readMotionTriggerCap, readNotificationMethods, readPrivacyMask, recordNotification, resolveEventActions, triggerNotifications,
 } from '../../extension/lib/config-xml.js';
 import { fixtures, motionFixtures } from './fixtures.js';
 
@@ -255,41 +256,211 @@ describe('privacy mask coordinates', () => {
   });
 });
 
+/** Each notification entry as "field=value …", in document order. */
+const entriesOf = (doc) => triggerNotifications(doc).map(n =>
+  Array.from(n.children, c => `${c.localName}=${c.textContent}`).join(' '));
+
 describe('event trigger notifications', () => {
-  const MANAGED = ['record', 'center', 'email', 'beep', 'IO', 'whiteLight', 'audio'];
   const methodsOf = (doc) => [...readNotificationMethods(doc)];
 
   it('lists every method', () => {
     expect(methodsOf(parseXml(fixtures.eventTrigger))).toEqual(['record', 'IO', 'FTP']);
   });
 
-  it('keeps unmanaged methods and existing settings', () => {
+  it('keeps unmanaged methods, other ports and existing settings', () => {
     const doc = parseXml(fixtures.eventTrigger);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['IO', 'center']), channelId: '1' });
-    const byMethod = Object.fromEntries(triggerNotifications(doc).map(n => [childText(n, 'notificationMethod'), n]));
-    expect(Object.keys(byMethod).sort()).toEqual(['FTP', 'IO', 'center']);
-    expect(childText(byMethod.IO, 'outputIOPortID')).toBe('2');
-    expect(childText(byMethod.IO, 'id')).toBe('IO-2');
+    applyNotifications(doc, [
+      { spec: recordNotification(doc, '1'), enabled: false },
+      { spec: alarmOutputNotification({ port: '1', field: 'outputIOPortID' }), enabled: false },
+      { spec: methodNotification('center'), enabled: true },
+    ]);
+    // Turning port 1 off leaves port 2's entry, which the user set up elsewhere
+    expect(entriesOf(doc)).toEqual([
+      'id=IO-2 notificationMethod=IO notificationRecurrence=beginning outputIOPortID=2',
+      'id=FTP notificationMethod=FTP notificationRecurrence=beginning',
+      'id=center notificationMethod=center notificationRecurrence=beginning',
+    ]);
     expect(childText(doc.documentElement, 'dynVideoInputChannelID')).toBe('1');
+  });
+
+  it('gives new entries notificationRecurrence only where the trigger’s own entries have it', () => {
+    // Camera-style trigger: every entry has it, so new ones copy it
+    const camera = parseXml(fixtures.eventTrigger);
+    applyNotifications(camera, [{ spec: methodNotification('email'), enabled: true }]);
+    expect(entriesOf(camera).at(-1)).toBe('id=email notificationMethod=email notificationRecurrence=beginning');
+
+    // The DS-7604NI stores none (and drops it on save): new entries look like its web UI's
+    const nvr = parseXml(fixtures.eventTriggerNvrVmd3);
+    const record = recordNotification(nvr, '3');
+    applyNotifications(nvr, [{ spec: record, enabled: false }]);
+    applyNotifications(nvr, [{ spec: record, enabled: true }]);
+    expect(entriesOf(nvr)).toEqual([
+      'id=center notificationMethod=center',
+      'id=record-3 notificationMethod=record dynVideoInputID=3',
+    ]);
   });
 
   it('addresses a new record entry the way the trigger does', () => {
     const doc = parseXml(fixtures.eventTrigger);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(), channelId: '3' });
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['record']), channelId: '3' });
-    const rec = triggerNotifications(doc).find(n => childText(n, 'notificationMethod') === 'record');
+    const record = recordNotification(doc, '3');
+    applyNotifications(doc, [{ spec: record, enabled: true }]);
+    const rec = triggerNotifications(doc).find(n => childText(n, 'id') === 'record-3');
     expect([childText(rec, 'videoInputID'), childText(rec, 'dynVideoInputID')]).toEqual(['3', '3']);
-    expect(methodsOf(doc)).toEqual(['FTP', 'record']);
   });
 
-  it('uses NVR conventions for new entries', () => {
+  it('records per channel: another channel’s record link neither reads as on nor gets removed', () => {
+    const ns = 'xmlns="http://www.isapi.org/ver20/XMLSchema"';
+    const doc = parseXml(`<EventTrigger ${ns}><id>VMD-1</id><eventType>VMD</eventType>` +
+      '<dynVideoInputChannelID>1</dynVideoInputChannelID><EventTriggerNotificationList>' +
+      '<EventTriggerNotification><id>record-2</id><notificationMethod>record</notificationMethod>' +
+      '<dynVideoInputID>2</dynVideoInputID></EventTriggerNotification></EventTriggerNotificationList></EventTrigger>');
+    const own = recordNotification(doc, '1');
+    expect(hasNotification(doc, own)).toBe(false);
+
+    applyNotifications(doc, [{ spec: own, enabled: true }]);
+    expect(entriesOf(doc)).toEqual([
+      'id=record-2 notificationMethod=record dynVideoInputID=2',
+      'id=record-1 notificationMethod=record dynVideoInputID=1',
+    ]);
+    expect(hasNotification(doc, own)).toBe(true);
+
+    applyNotifications(doc, [{ spec: own, enabled: false }]);
+    expect(entriesOf(doc)).toEqual(['id=record-2 notificationMethod=record dynVideoInputID=2']);
+  });
+
+  it('switches only its own alarm output port', () => {
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3Io301);
+    const port301 = alarmOutputNotification({ port: '301', field: 'dynOutputIOPortID' });
+    const port401 = alarmOutputNotification({ port: '401', field: 'dynOutputIOPortID' });
+    expect([hasNotification(doc, port301), hasNotification(doc, port401)]).toEqual([true, false]);
+
+    applyNotifications(doc, [{ spec: port301, enabled: false }, { spec: port401, enabled: true }]);
+    expect(entriesOf(doc)).toEqual([
+      'id=record-3 notificationMethod=record dynVideoInputID=3',
+      'id=center notificationMethod=center',
+      'id=IO-401 notificationMethod=IO dynOutputIOPortID=401',
+    ]);
+  });
+
+  it('reads the NVR’s light and speaker entries per channel', () => {
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3WhiteLight); // as the NVR stored its web UI's linkage
+    expect(hasNotification(doc, lightAudioNotification('whiteLightOut', '3'))).toBe(true);
+    expect(hasNotification(doc, lightAudioNotification('whiteLightOut', '4'))).toBe(false);
+    expect(hasNotification(doc, lightAudioNotification('audioOut', '3'))).toBe(false);
+  });
+});
+
+describe('event actions a device and channel offer', () => {
+  /** What the DS-7604NI offers, from its captured answers. */
+  const nvrSupport = () => ({
+    triggerCap: readMotionTriggerCap(parseXml(fixtures.triggersCapNvr)),
+    alarmOutputs: readAlarmOutputs(parseXml(fixtures.ioOutputsNvr), null),
+    whiteLightChannels: readLightAudioChannels(JSON.parse(fixtures.whiteLightAlarmChannelsNvr), 'WhiteLightAlarmList'),
+    audioChannels: readLightAudioChannels(JSON.parse(fixtures.audioAlarmChannelsNvr), 'AudioAlarmList'),
+  });
+  const reasons = (actions) => Object.fromEntries(Object.entries(actions).map(([key, a]) => [key, a.unavailable]));
+
+  it('reads the motion flags of triggersCap, and nothing when it has none', () => {
+    expect(readMotionTriggerCap(parseXml(fixtures.triggersCapNvr))).toEqual({
+      isSupportCenter: true, isSupportRecord: true, isSupportMonitorAlarm: true, isSupportBeep: true,
+      isSupportIO: true, isSupportEmail: true, isSupportAudioOut: true, isSupportWhiteLightOut: true,
+    });
+    const otherEventsOnly = '<EventTriggersCap><IOTriggerCap><isSupportIO>true</isSupportIO></IOTriggerCap></EventTriggersCap>';
+    expect(readMotionTriggerCap(parseXml(otherEventsOnly))).toBeNull();
+    expect(readMotionTriggerCap(null)).toBeNull();
+  });
+
+  it('lists the cameras’ relays, without the light and speaker pseudo outputs', () => {
+    const relays = [
+      { id: '301', type: 'digital', ipAddress: '192.168.254.4' },
+      { id: '401', type: 'digital', ipAddress: '192.168.254.3' },
+    ];
+    expect(readAlarmOutputs(parseXml(fixtures.ioOutputsNvr), null)).toEqual(relays);
+    expect(readAlarmOutputs(parseXml(fixtures.ioProxyOutputsNvr), 'digital')).toEqual(relays);
+
+    // A camera's own relay has no IOType; a switched-off analog output is left out
+    const own = '<IOOutputPortList><IOOutputPort><id>1</id></IOOutputPort>' +
+      '<IOOutputPort><id>9</id><IOUseType>disable</IOUseType><IOType>analogChannel</IOType></IOOutputPort></IOOutputPortList>';
+    expect(readAlarmOutputs(parseXml(own), 'local')).toEqual([{ id: '1', type: 'local', ipAddress: null }]);
+  });
+
+  it('reads which channels’ cameras have a light or a speaker', () => {
+    expect([...nvrSupport().whiteLightChannels]).toEqual(['3', '4']);
+    expect([...nvrSupport().audioChannels]).toEqual(['3', '4']);
+    expect(readLightAudioChannels(null, 'AudioAlarmList').size).toBe(0);
+    expect(readLightAudioChannels({ AudioAlarmList: 'none' }, 'AudioAlarmList').size).toBe(0);
+  });
+
+  it('points the NVR’s channel 3 at its own camera’s relay, light and speaker', () => {
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3);
+    const actions = resolveEventActions(doc, nvrSupport(), { id: '3', ipAddress: '192.168.254.4' });
+    expect(Object.values(reasons(actions)).every(r => r === null)).toBe(true);
+
+    applyNotifications(doc, Object.values(actions).map(a => ({ spec: a.spec, enabled: true })));
+    // Exactly the shapes the NVR's web UI writes and the device accepted
+    expect(entriesOf(doc)).toEqual([
+      'id=record-3 notificationMethod=record dynVideoInputID=3',
+      'id=center notificationMethod=center',
+      'id=email notificationMethod=email',
+      'id=beep notificationMethod=beep',
+      'id=IO-301 notificationMethod=IO dynOutputIOPortID=301',
+      'id=whiteLightOut-3 notificationMethod=whiteLightOut lightAudioOutID=3',
+      'id=audioOut-3 notificationMethod=audioOut lightAudioOutID=3',
+    ]);
+    expect(serializeXml(doc)).not.toMatch(/<notificationMethod>(whiteLight|audio)</);
+  });
+
+  it('disables the relay, light and speaker on a channel whose camera has none', () => {
+    const actions = resolveEventActions(parseXml(fixtures.eventTriggerNvr), nvrSupport(), { id: '1', ipAddress: '192.168.254.2' });
+    expect(reasons(actions)).toEqual({
+      record: null, center: null, email: null, beep: null,
+      IO: 'noAlarmOutput', whiteLight: 'noWhiteLight', audio: 'noSpeaker',
+    });
+    expect([actions.IO.spec, actions.whiteLight.spec, actions.audio.spec]).toEqual([null, null, null]);
+  });
+
+  it('offers only what triggersCap flags true for motion', () => {
+    const support = {
+      ...nvrSupport(),
+      triggerCap: { isSupportRecord: true, isSupportCenter: false, isSupportIO: true, isSupportWhiteLightOut: false },
+    };
+    const actions = resolveEventActions(parseXml(fixtures.eventTriggerNvrVmd3), support, { id: '3', ipAddress: '192.168.254.4' });
+    expect(reasons(actions)).toEqual({
+      record: null, center: 'notSupported', email: 'notSupported', beep: 'notSupported', IO: null,
+      whiteLight: 'notSupported',
+      audio: null, // the flag isn't named at all: the bare method, as before
+    });
+    // An unsupported action still knows its entry, so its toggle can show the state
+    expect(actions.center.spec?.method).toBe('center');
+    expect(actions.audio.spec?.method).toBe('audio');
+  });
+
+  it('keeps the old behaviour on a device without triggersCap', () => {
+    const support = {
+      triggerCap: null, alarmOutputs: [{ id: '1', type: 'local', ipAddress: null }],
+      whiteLightChannels: new Set(), audioChannels: new Set(),
+    };
+    const doc = parseXml(fixtures.eventTrigger);
+    const actions = resolveEventActions(doc, support, { id: '1' });
+    expect(Object.values(reasons(actions)).every(r => r === null)).toBe(true);
+    expect([actions.IO.spec?.id, actions.whiteLight.spec?.method, actions.audio.spec?.method]).toEqual(['IO-1', 'whiteLight', 'audio']);
+
+    applyNotifications(doc, [{ spec: actions.IO.spec, enabled: true }]);
+    expect(entriesOf(doc).at(-1)).toBe('id=IO-1 notificationMethod=IO notificationRecurrence=beginning outputIOPortID=1');
+  });
+
+  it('falls back to the device’s own relay, and addresses every port by outputIOPortID when ports are unified', () => {
+    const alarmOutputs = [
+      { id: '301', type: 'digital', ipAddress: '192.168.254.4' },
+      { id: '1', type: 'local', ipAddress: null },
+    ];
     const doc = parseXml(fixtures.eventTriggerNvr);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['center']), channelId: '1' });
-    expect(methodsOf(doc)).toEqual(['center']);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['center', 'record', 'IO']), channelId: '1' });
-    const find = (m) => triggerNotifications(doc).find(n => childText(n, 'notificationMethod') === m);
-    expect([childText(find('record'), 'id'), childText(find('record'), 'dynVideoInputID'), childText(find('record'), 'videoInputID')])
-      .toEqual(['record-1', '1', null]);
-    expect(childText(find('IO'), 'id')).toBe('IO-1');
+    const support = { ...nvrSupport(), alarmOutputs };
+    expect(resolveEventActions(doc, support, { id: '1', ipAddress: '192.168.254.2' }).IO.spec)
+      .toMatchObject({ id: 'IO-1', writeFields: ['outputIOPortID'] });
+
+    const unified = { ...support, triggerCap: { ...support.triggerCap, isSupportIOOutputUnify: true } };
+    expect(resolveEventActions(doc, unified, { id: '3', ipAddress: '192.168.254.4' }).IO.spec)
+      .toMatchObject({ id: 'IO-301', writeFields: ['outputIOPortID'] });
   });
 });

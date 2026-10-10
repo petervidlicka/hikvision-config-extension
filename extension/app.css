@@ -800,6 +800,9 @@ input[type="range"]::-webkit-slider-thumb {
   line-height: 1.5;
   margin-bottom: 12px;
 }
+/* An action this device or camera can't do; the row's title says why */
+.toggle-row.unavailable { opacity: 0.45; }
+.toggle-row.unavailable .toggle { cursor: not-allowed; }
 
 
 /* ── Playback ── */

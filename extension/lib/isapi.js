@@ -12,7 +12,7 @@
  * Depends on lib/config-xml.js, lib/digest-auth.js, lib/errors.js and lib/xml.js.
  */
 
-import { applyPrivacyMask } from './config-xml.js';
+import { applyPrivacyMask, readAlarmOutputs, readLightAudioChannels, readMotionTriggerCap } from './config-xml.js';
 import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
 import {
   IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError, parseResponseStatus,
@@ -20,9 +20,11 @@ import {
 import {
   SEARCH_PAGE_SIZE, buildCalendarXml, buildSearchXml, parseCalendar, parsePictureResult, parseSearchResult, toDeviceTime,
 } from './playback.js';
-import { childElements, childText, cloneXml, parseXml, serializeXml } from './xml.js';
+import { childElement, childElements, childText, cloneXml, findDescendant, parseXml, serializeXml } from './xml.js';
 
+/** @typedef {import('./config-xml.js').AlarmOutput} AlarmOutput */
 /** @typedef {import('./config-xml.js').DeviceRect} DeviceRect */
+/** @typedef {import('./config-xml.js').EventActionSupport} EventActionSupport */
 /** @typedef {import('./config-xml.js').UnusedPrivacySlots} UnusedPrivacySlots */
 /** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
 /** @typedef {import('./digest-auth.js').DigestResponse} DigestResponse */
@@ -111,7 +113,9 @@ function cannotDelete(err) {
 /**
  * A camera channel. `kind` says which URL family configures it: "analog"
  * for cameras wired to the device, "digital" for IP cameras behind an NVR.
- * @typedef {{id: string, name: string, kind: 'analog'|'digital'}} Channel
+ * `ipAddress` is an IP camera's own address, when the NVR lists it: it ties
+ * the channel to that camera's alarm output (see resolveEventActions).
+ * @typedef {{id: string, name: string, kind: 'analog'|'digital', ipAddress?: string}} Channel
  */
 
 /**
@@ -222,11 +226,16 @@ export const Isapi = {
     for (const ep of CHANNEL_ENDPOINTS) {
       try {
         const root = (await this.getXml(config, ep.path)).documentElement;
-        let channels = childElements(root, ep.tag).map(el => ({
-          id: childText(el, 'id') ?? '',
-          name: childText(el, 'name') || childText(el, 'channelName') || '',
-          kind: ep.kind,
-        }));
+        /** @type {Channel[]} */
+        let channels = childElements(root, ep.tag).map(el => {
+          const ipAddress = childText(childElement(el, 'sourceInputPortDescriptor'), 'ipAddress');
+          return {
+            id: childText(el, 'id') ?? '',
+            name: childText(el, 'name') || childText(el, 'channelName') || '',
+            kind: ep.kind,
+            ...(ipAddress ? { ipAddress } : {}),
+          };
+        });
 
         if (ep.tag === 'StreamingChannel') {
           // IDs 101/102 are camera 1 main/sub stream, 201/202 camera 2, ...
@@ -558,6 +567,19 @@ export const Isapi = {
   },
 
   /**
+   * Where to save a loaded trigger: the resource its own <id> names, so a
+   * trigger picked out of the full list goes back to the trigger it is, even
+   * if its id isn't VMD-{channel}. Normally the same as eventTriggerPath.
+   * @param {XMLDocument} doc - the trigger as loaded
+   * @param {string} channelId - for a document without an <id>
+   * @returns {string}
+   */
+  eventTriggerSavePath(doc, channelId) {
+    const id = childText(doc.documentElement, 'id');
+    return id ? `/ISAPI/Event/triggers/${encodeURIComponent(id)}` : this.eventTriggerPath(channelId);
+  },
+
+  /**
    * Load the motion-detection (VMD) event trigger for a channel. If the
    * per-trigger endpoint isn't available, pick it out of the full trigger
    * list into a document of its own, so a save only ever sends this trigger.
@@ -574,10 +596,12 @@ export const Isapi = {
 
     try {
       const list = (await this.getXml(config, '/ISAPI/Event/triggers')).documentElement;
+      const id = String(channelId);
       const trigger = childElements(list, 'EventTrigger').find(t =>
         childText(t, 'eventType') === 'VMD' &&
-        (childText(t, 'videoInputChannelID') === String(channelId) ||
-          childText(t, 'id') === `VMD-${channelId}`));
+        (childText(t, 'videoInputChannelID') === id ||
+          childText(t, 'dynVideoInputChannelID') === id ||
+          childText(t, 'id') === `VMD-${id}`));
       if (trigger) {
         const doc = document.implementation.createDocument(trigger.namespaceURI, null, null);
         doc.appendChild(doc.importNode(trigger, true));
@@ -589,4 +613,145 @@ export const Isapi = {
 
     throw new Error('Event triggers not supported on this device or firmware');
   },
+
+  /**
+   * What the device offers for motion-event actions: which actions its
+   * triggersCap flags for motion, its alarm outputs, and which channels'
+   * cameras have a white light or speaker it can switch. These describe the
+   * hardware, not settings, so they're read once per device and kept until
+   * clearDeviceCache() (on disconnect).
+   *
+   * Each is optional: a device without the resource just offers less (see
+   * resolveEventActions). A failed load, or one where the device answered
+   * an error other than "not here" (e.g. busy), isn't kept, so the next
+   * load asks again.
+   * @param {DeviceConfig} config
+   * @returns {Promise<EventActionSupport>}
+   * @throws {NetworkError|AuthError} when the device didn't answer or rejected the login
+   */
+  getEventActionSupport(config) {
+    const key = deviceKey(config);
+    const cached = eventActionSupport.get(key);
+    if (cached) return cached.then(entry => entry.support);
+
+    const loading = loadEventActionSupport(config);
+    eventActionSupport.set(key, loading);
+    /** Forget a load that shouldn't be reused; the caller still sees its outcome */
+    const forget = () => {
+      if (eventActionSupport.get(key) === loading) eventActionSupport.delete(key);
+    };
+    loading.then(entry => { if (entry.provisional) forget(); }, forget);
+    return loading.then(entry => entry.support);
+  },
+
+  /**
+   * Forget everything read about devices' hardware (getEventActionSupport),
+   * e.g. on disconnect, so reconnecting reads it afresh.
+   */
+  clearDeviceCache() {
+    eventActionSupport.clear();
+  },
 };
+
+/**
+ * getEventActionSupport results per device, with whether one is only good
+ * for the load that read it.
+ * @type {Map<string, Promise<{support: EventActionSupport, provisional: boolean}>>}
+ */
+const eventActionSupport = new Map();
+
+/**
+ * A device and user, for per-device caches.
+ * @param {DeviceConfig} config
+ */
+function deviceKey(config) {
+  return `${config.host}:${config.port}|${config.username}`;
+}
+
+/**
+ * Read what getEventActionSupport returns. `provisional` is set when the
+ * device answered one of the requests with an error other than "not here":
+ * it was treated as absent for this load only.
+ * @param {DeviceConfig} config
+ * @returns {Promise<{support: EventActionSupport, provisional: boolean}>}
+ */
+async function loadEventActionSupport(config) {
+  let provisional = false;
+  /**
+   * GET a resource the actions can do without: its body, or null when the
+   * device answered with an error. No answer at all still throws.
+   * @param {string} path
+   * @returns {Promise<string|null>}
+   */
+  const optional = async (path) => {
+    try {
+      return String((await Isapi.request(config, 'GET', path)).data);
+    } catch (err) {
+      if (!(err instanceof IsapiError)) throw err;
+      if (!isFallbackError(err)) provisional = true;
+      return null;
+    }
+  };
+  /** @param {string} path */
+  const optionalXml = async (path) => {
+    const body = await optional(path);
+    return body === null ? null : parseXml(body);
+  };
+
+  const triggerCap = readMotionTriggerCap(await optionalXml('/ISAPI/Event/triggersCap'));
+  /**
+   * Channels an NVR lists for its cameras' lights or speakers.
+   * @param {string} resource - "whiteLightAlarm" or "AudioAlarm"
+   * @param {'WhiteLightAlarmList'|'AudioAlarmList'} listName
+   */
+  const lightAudioChannels = async (resource, listName) => {
+    const body = await optional(`/ISAPI/Event/triggers/notifications/channels/${resource}?format=json`);
+    return readLightAudioChannels(body === null ? null : jsonOrNull(body), listName);
+  };
+  /** @type {Promise<Set<string>>} */
+  const none = Promise.resolve(new Set());
+
+  const [alarmOutputs, whiteLightChannels, audioChannels] = await Promise.all([
+    triggerCap === null || triggerCap.isSupportIO ? readAlarmOutputList(optionalXml) : Promise.resolve([]),
+    triggerCap?.isSupportWhiteLightOut ? lightAudioChannels('whiteLightAlarm', 'WhiteLightAlarmList') : none,
+    triggerCap?.isSupportAudioOut ? lightAudioChannels('AudioAlarm', 'AudioAlarmList') : none,
+  ]);
+  return { support: { triggerCap, alarmOutputs, whiteLightChannels, audioChannels }, provisional };
+}
+
+/**
+ * The alarm outputs an event can switch, read the way Hikvision's web UI
+ * reads them: one merged list when outputs/capabilities mentions IOType
+ * (each port then says whether it's the device's own or an IP camera's, as
+ * on the DS-7604NI); otherwise the device's own outputs plus its IP
+ * cameras' (IOProxy).
+ * @param {(path: string) => Promise<XMLDocument|null>} optionalXml
+ * @returns {Promise<AlarmOutput[]>}
+ */
+async function readAlarmOutputList(optionalXml) {
+  const caps = await optionalXml('/ISAPI/System/IO/outputs/capabilities');
+  const merged = findDescendant(caps?.documentElement, 'IOType') !== null;
+  const [own, proxied] = await Promise.all([
+    optionalXml('/ISAPI/System/IO/outputs'),
+    merged ? null : optionalXml('/ISAPI/ContentMgmt/IOProxy/outputs'),
+  ]);
+  return [
+    ...(own ? readAlarmOutputs(own, merged ? null : 'local') : []),
+    ...(proxied ? readAlarmOutputs(proxied, 'digital') : []),
+  ];
+}
+
+/**
+ * Parse a JSON answer, or null when it isn't JSON: firmware that doesn't
+ * know ?format=json may answer in XML, which holds no list we can use.
+ * @param {string} text
+ * @returns {unknown}
+ */
+function jsonOrNull(text) {
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    if (err instanceof SyntaxError) return null;
+    throw err;
+  }
+}

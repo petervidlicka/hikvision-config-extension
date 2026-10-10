@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<IOOutputPortList version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>301</id>
+<IODescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<userName>admin</userName>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.4</ipAddress>
+<managePortNo>8000</managePortNo>
+<innerIOPortID>1</innerIOPortID>
+</IODescriptor>
+<PowerOnState>
+<defaultState>low</defaultState>
+<outputState>pulse</outputState>
+<pulseDuration>5000</pulseDuration>
+</PowerOnState>
+<name></name>
+<IOUseType>disable</IOUseType>
+<enabled>true</enabled>
+<IOType>digitalChannel</IOType>
+</IOOutputPort>
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>302</id>
+<PowerOnState>
+<defaultState/>
+<outputState/>
+<pulseDuration/>
+</PowerOnState>
+<IOUseType>whiteLight</IOUseType>
+<enabled>true</enabled>
+<IOType>digitalChannel</IOType>
+</IOOutputPort>
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>303</id>
+<PowerOnState>
+<defaultState/>
+<outputState/>
+<pulseDuration/>
+</PowerOnState>
+<IOUseType>audio</IOUseType>
+<enabled>true</enabled>
+<IOType>digitalChannel</IOType>
+</IOOutputPort>
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>401</id>
+<IODescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<userName>admin</userName>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.3</ipAddress>
+<managePortNo>8000</managePortNo>
+<innerIOPortID>1</innerIOPortID>
+</IODescriptor>
+<PowerOnState>
+<defaultState>low</defaultState>
+<outputState>pulse</outputState>
+<pulseDuration>5000</pulseDuration>
+</PowerOnState>
+<name></name>
+<IOUseType>disable</IOUseType>
+<enabled>true</enabled>
+<IOType>digitalChannel</IOType>
+</IOOutputPort>
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>402</id>
+<PowerOnState>
+<defaultState/>
+<outputState/>
+<pulseDuration/>
+</PowerOnState>
+<IOUseType>whiteLight</IOUseType>
+<enabled>true</enabled>
+<IOType>digitalChannel</IOType>
+</IOOutputPort>
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>403</id>
+<PowerOnState>
+<defaultState/>
+<outputState/>
+<pulseDuration/>
+</PowerOnState>
+<IOUseType>audio</IOUseType>
+<enabled>true</enabled>
+<IOType>digitalChannel</IOType>
+</IOOutputPort>
+</IOOutputPortList>

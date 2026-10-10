@@ -8,6 +8,11 @@
  * the privacy mask helpers also map them to and from canvas pixels, because
  * that mapping (Y from the bottom) is easy to get wrong in the UI.
  *
+ * For event actions this module also reads what a device offers (triggersCap,
+ * alarm outputs, cameras with lights or speakers) and resolves which
+ * notification entry each toggle stands for on a channel. Fetching those
+ * documents is up to lib/isapi.js; everything here is pure.
+ *
  * Depends on lib/xml.js.
  */
 
@@ -569,51 +574,327 @@ export function readNotificationMethods(doc) {
 }
 
 /**
- * Turn the given notification methods on or off on an EventTrigger document.
- * Methods not listed in `managed` (FTP, extra alarm outputs, ...) are left
- * as they are, and existing entries keep their settings (which channel to
- * record, which output port to trigger). New entries follow the device's
- * conventions: NVRs address channels with dyn* fields and ids like "record-1".
+ * One notification entry the UI switches on or off. Untargeted methods
+ * (center, email, beep) have one entry per trigger. Targeted ones have one
+ * entry per target — record channel 3, switch output 301, flash channel 3's
+ * light — and a trigger may hold several (the web UI can link motion on one
+ * camera to another camera's recording or relay), so a toggle must touch
+ * only the entry for its own target.
+ * @typedef {object} NotificationSpec
+ * @property {string} method - <notificationMethod>, e.g. "record", "IO", "whiteLightOut"
+ * @property {string} id - <id> of a new entry, e.g. "record-3", "IO-301", "center"
+ * @property {string|null} target - the channel or port the entry points at; null for untargeted methods
+ * @property {string[]} matchFields - where an existing entry may name the target (any of them counts)
+ * @property {string[]} writeFields - where a new entry names the target
+ */
+
+/**
+ * An untargeted method, written as Hikvision's web UI and SDK write it:
+ * the method name is also the entry's id.
+ * @param {string} method - e.g. "center"
+ * @returns {NotificationSpec}
+ */
+export function methodNotification(method) {
+  return { method, id: method, target: null, matchFields: [], writeFields: [] };
+}
+
+/**
+ * Recording of one channel. Any entry recording that channel counts,
+ * whether it names it by videoInputID or dynVideoInputID; a new entry names
+ * it the way the trigger names its own channel (dyn* for IP channels behind
+ * an NVR, as the web UI and SDK do).
+ * @param {XMLDocument} doc - the trigger
+ * @param {string} channelId
+ * @returns {NotificationSpec}
+ */
+export function recordNotification(doc, channelId) {
+  const root = doc.documentElement;
+  /** @type {string[]} */
+  const writeFields = [];
+  if (childElement(root, 'videoInputChannelID')) writeFields.push('videoInputID');
+  if (childElement(root, 'dynVideoInputChannelID')) writeFields.push('dynVideoInputID');
+  if (writeFields.length === 0) writeFields.push('videoInputID');
+  return {
+    method: 'record', id: `record-${channelId}`, target: channelId,
+    matchFields: ['videoInputID', 'dynVideoInputID'], writeFields,
+  };
+}
+
+/**
+ * An alarm output port, and the field that addresses it in a notification.
+ * @typedef {{port: string, field: 'outputIOPortID'|'dynOutputIOPortID'}} AlarmOutputTarget
+ */
+
+/**
+ * Switching one alarm output, e.g. <id>IO-301</id> with
+ * <dynOutputIOPortID>301</dynOutputIOPortID>. An existing entry for the port
+ * counts whichever field names it.
+ * @param {AlarmOutputTarget} output
+ * @returns {NotificationSpec}
+ */
+export function alarmOutputNotification({ port, field }) {
+  return {
+    method: 'IO', id: `IO-${port}`, target: port,
+    matchFields: ['outputIOPortID', 'dynOutputIOPortID'], writeFields: [field],
+  };
+}
+
+/**
+ * Flashing the white light, or sounding the speaker, of the camera on an NVR
+ * channel: <id>whiteLightOut-3</id>, <notificationMethod>whiteLightOut</…>,
+ * <lightAudioOutID>3</…> (audioOut likewise). This is what the DS-7604NI's
+ * web UI writes and the device accepted in write tests.
+ * @param {'whiteLightOut'|'audioOut'} method
+ * @param {string} channelId
+ * @returns {NotificationSpec}
+ */
+export function lightAudioNotification(method, channelId) {
+  return {
+    method, id: `${method}-${channelId}`, target: channelId,
+    matchFields: ['lightAudioOutID'], writeFields: ['lightAudioOutID'],
+  };
+}
+
+/**
+ * The trigger's entries a spec stands for: same method, and for a targeted
+ * spec, naming the same target.
+ * @param {XMLDocument} doc
+ * @param {NotificationSpec} spec
+ * @returns {Element[]}
+ */
+function matchingNotifications(doc, spec) {
+  return triggerNotifications(doc).filter(n =>
+    childText(n, 'notificationMethod') === spec.method &&
+    (spec.target === null || spec.matchFields.some(field => childText(n, field) === spec.target)));
+}
+
+/**
+ * Whether the trigger has the entry a spec stands for, i.e. whether its
+ * toggle is on.
+ * @param {XMLDocument} doc
+ * @param {NotificationSpec} spec
+ * @returns {boolean}
+ */
+export function hasNotification(doc, spec) {
+  return matchingNotifications(doc, spec).length > 0;
+}
+
+/**
+ * Switch notification entries on or off on an EventTrigger document. Only
+ * the entries the specs stand for change: other methods (FTP, monitorAlarm,
+ * ...), other targets of the same method (another channel's recording,
+ * another output) and existing entries' own fields are sent back as
+ * received.
+ *
+ * New entries follow the trigger's own convention for
+ * <notificationRecurrence>: camera firmware puts it on every entry, so new
+ * ones copy the first existing value; the DS-7604NI, its web UI and the SDK
+ * never use it (the NVR drops it on save), so there new ones get none.
  *
  * @param {XMLDocument} doc - edited in place
- * @param {object} options
- * @param {string[]} options.managed - methods the UI controls
- * @param {Set<string>} options.enabled - which of those should be on
- * @param {string} options.channelId - for new "record" entries
+ * @param {{spec: NotificationSpec, enabled: boolean}[]} changes
+ * @example
+ * applyNotifications(doc, [{spec: alarmOutputNotification({port: '301', field: 'dynOutputIOPortID'}), enabled: true}])
  */
-export function applyNotificationMethods(doc, { managed, enabled, channelId }) {
+export function applyNotifications(doc, changes) {
   const root = doc.documentElement;
-  // Address the channel the same way(s) the trigger itself does
-  /** @type {string[]} */
-  const channelFields = [];
-  if (childElement(root, 'videoInputChannelID')) channelFields.push('videoInputID');
-  if (childElement(root, 'dynVideoInputChannelID')) channelFields.push('dynVideoInputID');
-  if (channelFields.length === 0) channelFields.push('videoInputID');
-  let list = childElement(root, 'EventTriggerNotificationList');
-  if (!list) list = appendElement(root, 'EventTriggerNotificationList');
+  const list = childElement(root, 'EventTriggerNotificationList') ?? appendElement(root, 'EventTriggerNotificationList');
+  const recurrence = triggerNotifications(doc)
+    .map(n => childText(n, 'notificationRecurrence'))
+    .find(value => value !== null) ?? null;
 
-  for (const method of managed) {
-    const existing = triggerNotifications(doc).filter(n => childText(n, 'notificationMethod') === method);
-
-    if (!enabled.has(method)) {
+  for (const { spec, enabled } of changes) {
+    const existing = matchingNotifications(doc, spec);
+    if (!enabled) {
       existing.forEach(n => n.remove());
-      continue;
-    }
-    if (existing.length > 0) continue;
-
-    const n = appendElement(list, 'EventTriggerNotification');
-    if (method === 'record') {
-      appendElement(n, 'id', `record-${channelId}`);
-      appendElement(n, 'notificationMethod', method);
-      appendElement(n, 'notificationRecurrence', 'beginning');
-      channelFields.forEach(field => appendElement(n, field, channelId));
-    } else if (method === 'IO') {
-      appendElement(n, 'id', 'IO-1');
-      appendElement(n, 'notificationMethod', method);
-      appendElement(n, 'outputIOPortID', 1);
-    } else {
-      appendElement(n, 'id', method);
-      appendElement(n, 'notificationMethod', method);
+    } else if (existing.length === 0) {
+      const n = appendElement(list, 'EventTriggerNotification');
+      appendElement(n, 'id', spec.id);
+      appendElement(n, 'notificationMethod', spec.method);
+      if (recurrence !== null) appendElement(n, 'notificationRecurrence', recurrence);
+      if (spec.target !== null) spec.writeFields.forEach(field => appendElement(n, field, /** @type {string} */ (spec.target)));
     }
   }
+}
+
+/* ── Event actions a device and channel offer ───────────────────────────── */
+
+/**
+ * Motion-event action flags from /ISAPI/Event/triggersCap: the
+ * MotionDetectionTriggerCap block's children by name, e.g.
+ * {isSupportRecord: true, isSupportWhiteLightOut: true}. Hikvision's web UI
+ * offers only the actions flagged true. Null when the document has no such
+ * block, which means "unknown", not "nothing supported".
+ * @param {XMLDocument|null} doc
+ * @returns {Record<string, boolean>|null}
+ */
+export function readMotionTriggerCap(doc) {
+  const block = findDescendant(doc?.documentElement, 'MotionDetectionTriggerCap');
+  if (!block) return null;
+  return Object.fromEntries(Array.from(block.children, el => [el.localName, (el.textContent ?? '').trim() === 'true']));
+}
+
+/**
+ * A relay an event can switch.
+ * @typedef {object} AlarmOutput
+ * @property {string} id - port id, e.g. "1" for a device's own relay, "301" for an IP camera's behind an NVR
+ * @property {'local'|'digital'|'analog'} type - on the device itself, on an IP camera, or on an analog channel
+ * @property {string|null} ipAddress - the IP camera a digital output belongs to
+ */
+
+/** @type {Record<string, AlarmOutput['type']>} */
+const IO_TYPES = { local: 'local', digitalChannel: 'digital', analogChannel: 'analog' };
+
+/**
+ * Alarm outputs listed by /ISAPI/System/IO/outputs or
+ * /ISAPI/ContentMgmt/IOProxy/outputs. Like Hikvision's web UI, leaves out
+ * the pseudo outputs that stand for a camera's white light or speaker
+ * (IOUseType whiteLight / audio, e.g. 302 and 303 on the DS-7604NI) and
+ * analog outputs that are switched off (IOUseType disable). A digital output
+ * marked "disable" is still a working relay: the DS-7604NI reports its
+ * cameras' relays 301 and 401 that way.
+ * @param {XMLDocument} doc - IOOutputPortList or IOProxyOutputPortList
+ * @param {AlarmOutput['type']|null} untyped - the type of ports without a known <IOType>; null leaves them out
+ * @returns {AlarmOutput[]}
+ */
+export function readAlarmOutputs(doc, untyped) {
+  return Array.from(doc.documentElement.children).flatMap(port => {
+    if (port.localName !== 'IOOutputPort' && port.localName !== 'IOProxyOutputPort') return [];
+    const id = childText(port, 'id');
+    const type = IO_TYPES[childText(port, 'IOType') ?? ''] ?? untyped;
+    const use = childText(port, 'IOUseType');
+    if (!id || !type || use === 'whiteLight' || use === 'audio' || (type === 'analog' && use === 'disable')) return [];
+    return [{ id, type, ipAddress: childText(childElement(port, 'IODescriptor'), 'ipAddress') || null }];
+  });
+}
+
+/**
+ * Channels whose camera has a white light or a speaker the NVR can switch,
+ * from GET /ISAPI/Event/triggers/notifications/channels/whiteLightAlarm (or
+ * AudioAlarm) ?format=json, e.g. {"WhiteLightAlarmList": [{"channelID": 3,
+ * …}]}. Hikvision's web UI offers those actions for exactly these channels.
+ * @param {unknown} json
+ * @param {'WhiteLightAlarmList'|'AudioAlarmList'} listName
+ * @returns {Set<string>} channel ids
+ */
+export function readLightAudioChannels(json, listName) {
+  const list = json !== null && typeof json === 'object' ? /** @type {Record<string, unknown>} */ (json)[listName] : null;
+  /** @type {Set<string>} */
+  const channels = new Set();
+  for (const entry of Array.isArray(list) ? list : []) {
+    const id = entry !== null && typeof entry === 'object' ? /** @type {{channelID?: unknown}} */ (entry).channelID : null;
+    if (typeof id === 'number' || typeof id === 'string') channels.add(String(id));
+  }
+  return channels;
+}
+
+/**
+ * What a device offers for motion-event actions, read once per connection
+ * (Isapi.getEventActionSupport).
+ * @typedef {object} EventActionSupport
+ * @property {Record<string, boolean>|null} triggerCap - readMotionTriggerCap; null when unknown
+ * @property {AlarmOutput[]} alarmOutputs - relays an event can switch
+ * @property {Set<string>} whiteLightChannels - channels whose camera has a light the NVR can switch
+ * @property {Set<string>} audioChannels - channels whose camera has a speaker the NVR can sound
+ */
+
+/** @typedef {'record'|'center'|'email'|'beep'|'IO'|'whiteLight'|'audio'} EventActionKey */
+
+/**
+ * Why an action can't be used on a channel: the device doesn't offer it for
+ * motion events (notSupported), or it does but this channel's camera has no
+ * relay, light or speaker to point it at.
+ * @typedef {'notSupported'|'noAlarmOutput'|'noWhiteLight'|'noSpeaker'} EventActionUnavailable
+ */
+
+/**
+ * An action resolved for one channel: the entry its toggle reads and writes
+ * (null when there is nothing to point it at), and why it can't be used, if
+ * it can't. An unavailable action with a spec still shows its state.
+ * @typedef {{spec: NotificationSpec|null, unavailable: EventActionUnavailable|null}} EventActionTarget
+ */
+
+/**
+ * Resolve each motion-event action for one channel: which notification entry
+ * its toggle stands for, or why it's unavailable.
+ *
+ * - With triggersCap, an action is offered only when its MotionDetectionTriggerCap
+ *   flag is true, as in Hikvision's web UI. Without it, everything is offered,
+ *   as this extension always did.
+ * - Record records this channel.
+ * - Alarm Output switches the channel's own camera relay (an output on the
+ *   camera's IP address, e.g. DS-7604NI channel 3 → 301), else the device's
+ *   first local output, else nothing.
+ * - White Light and Audio Alarm, on a device whose triggersCap has
+ *   isSupportWhiteLightOut / isSupportAudioOut (NVRs), switch the channel's
+ *   own camera, if the NVR lists it. A device that doesn't name those flags
+ *   keeps the bare "whiteLight" / "audio" methods this extension always wrote.
+ *   Those are unverified: the DS-7604NI rejects them (badXmlContent), and no
+ *   standalone camera has been tested.
+ *
+ * @param {XMLDocument} doc - the channel's trigger, for how it names channels
+ * @param {EventActionSupport} support
+ * @param {{id: string, ipAddress?: string}} channel
+ * @returns {Record<EventActionKey, EventActionTarget>}
+ */
+export function resolveEventActions(doc, support, channel) {
+  const cap = support.triggerCap;
+  /**
+   * @param {NotificationSpec|null} spec
+   * @param {string} flag
+   * @param {EventActionUnavailable} [missing] - why, when there's no spec
+   * @returns {EventActionTarget}
+   */
+  const gate = (spec, flag, missing = 'notSupported') => ({
+    spec,
+    unavailable: cap !== null && cap[flag] !== true ? 'notSupported' : spec ? null : missing,
+  });
+  const output = alarmOutputFor(support.alarmOutputs, channel.ipAddress, cap?.isSupportIOOutputUnify === true);
+
+  return {
+    record: gate(recordNotification(doc, channel.id), 'isSupportRecord'),
+    center: gate(methodNotification('center'), 'isSupportCenter'),
+    email: gate(methodNotification('email'), 'isSupportEmail'),
+    beep: gate(methodNotification('beep'), 'isSupportBeep'),
+    IO: gate(output && alarmOutputNotification(output), 'isSupportIO', 'noAlarmOutput'),
+    whiteLight: lightAudioAction(cap?.isSupportWhiteLightOut, 'whiteLight', 'whiteLightOut',
+      support.whiteLightChannels, channel.id, 'noWhiteLight'),
+    audio: lightAudioAction(cap?.isSupportAudioOut, 'audio', 'audioOut',
+      support.audioChannels, channel.id, 'noSpeaker'),
+  };
+}
+
+/**
+ * The alarm output motion on a channel switches by default, in the order
+ * resolveEventActions describes, and how to address it: <outputIOPortID>
+ * for the device's own ports, or for every port when the device unifies
+ * them (isSupportIOOutputUnify); <dynOutputIOPortID> for IP cameras' ports.
+ * @param {AlarmOutput[]} outputs
+ * @param {string|undefined} ipAddress - the channel's camera, for IP channels
+ * @param {boolean} unify
+ * @returns {AlarmOutputTarget|null}
+ */
+function alarmOutputFor(outputs, ipAddress, unify) {
+  const own = ipAddress ? outputs.find(o => o.type === 'digital' && o.ipAddress === ipAddress) : undefined;
+  const output = own ?? outputs.find(o => o.type === 'local');
+  if (!output) return null;
+  return { port: output.id, field: output.type === 'digital' && !unify ? 'dynOutputIOPortID' : 'outputIOPortID' };
+}
+
+/**
+ * White Light or Audio Alarm for one channel (see resolveEventActions).
+ * @param {boolean|undefined} flag - the device's isSupport…Out flag; undefined when it doesn't name it
+ * @param {string} bareMethod - what devices without the flag get
+ * @param {'whiteLightOut'|'audioOut'} outMethod
+ * @param {Set<string>} channels - channels the NVR lists for this action
+ * @param {string} channelId
+ * @param {EventActionUnavailable} missing
+ * @returns {EventActionTarget}
+ */
+function lightAudioAction(flag, bareMethod, outMethod, channels, channelId, missing) {
+  if (flag === undefined) return { spec: methodNotification(bareMethod), unavailable: null };
+  if (!flag) return { spec: null, unavailable: 'notSupported' };
+  return channels.has(channelId)
+    ? { spec: lightAudioNotification(outMethod, channelId), unavailable: null }
+    : { spec: null, unavailable: missing };
 }

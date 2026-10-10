@@ -135,8 +135,9 @@ export function disconnect() {
   state.activeSection = 'liveview';
   state.gridExpandedCell = null;
 
-  // Reset tool state
+  // Reset tool state, and what was read about this device's hardware
   ToolRegistry.getAll().forEach(t => t.resetState());
+  Isapi.clearDeviceCache();
 
   // Collapse config section
   state.configExpanded = false;

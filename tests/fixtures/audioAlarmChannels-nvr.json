@@ -1,0 +1,137 @@
+{
+	"AudioAlarmList":	[{
+			"channelID":	3,
+			"audioID":	1,
+			"audioClass":	"alertAudio",
+			"alertAudioID":	1,
+			"audioVolume":	100,
+			"alarmTimes":	5,
+			"TimeRangeList":	[{
+					"week":	1,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	2,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	3,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	4,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	5,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	6,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	7,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}],
+			"HolidayBlockList":	{
+				"TimeRange":	[{
+						"id":	1,
+						"beginTime":	"00:00",
+						"endTime":	"24:00"
+					}]
+			},
+			"addressingFormatType":	"ipaddress",
+			"ipAddress":	"192.168.254.4",
+			"managePortNo":	8000
+		}, {
+			"channelID":	4,
+			"audioID":	1,
+			"audioClass":	"alertAudio",
+			"alertAudioID":	1,
+			"audioVolume":	100,
+			"alarmTimes":	5,
+			"TimeRangeList":	[{
+					"week":	1,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	2,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	3,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	4,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	5,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	6,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}, {
+					"week":	7,
+					"TimeRange":	[{
+							"id":	1,
+							"beginTime":	"00:00",
+							"endTime":	"24:00"
+						}]
+				}],
+			"HolidayBlockList":	{
+				"TimeRange":	[{
+						"id":	1,
+						"beginTime":	"00:00",
+						"endTime":	"24:00"
+					}]
+			},
+			"addressingFormatType":	"ipaddress",
+			"ipAddress":	"192.168.254.3",
+			"managePortNo":	8000
+		}]
+}

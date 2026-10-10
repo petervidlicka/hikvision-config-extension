@@ -1,10 +1,11 @@
 /**
  * A fake Hikvision NVR behind fetch(), plus stubbed chrome.* APIs, for
  * running the real config page outside the extension. Mirrors the NVR this
- * extension was developed against: IP cameras only (analog channel list
+ * extension was developed against: four IP cameras (analog channel list
  * returns 403 notSupport), configs via InputProxy, polygon motion regions,
- * privacy masks stored the way the NVR stores them, and errors and write
- * results as <ResponseStatus> bodies.
+ * privacy masks and event triggers stored the way the NVR stores them, the
+ * cameras on channels 3 and 4 with a relay, white light and speaker, and
+ * errors and write results as <ResponseStatus> bodies.
  *
  * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
  */
@@ -12,6 +13,12 @@ import motionDetection from '../fixtures/motionDetection.xml?raw';
 import motionCapabilities from '../fixtures/motionCapabilities-nvr.xml?raw';
 import privacyMaskRegions from '../fixtures/privacyMask-nvr-regions.xml?raw';
 import eventTrigger from '../fixtures/eventTrigger.xml?raw';
+import eventTriggerNvr from '../fixtures/eventTrigger-nvr.xml?raw';
+import triggersCap from '../fixtures/triggersCap-nvr.xml?raw';
+import ioOutputs from '../fixtures/ioOutputs-nvr.xml?raw';
+import ioOutputsCapabilities from '../fixtures/ioOutputsCapabilities-nvr.xml?raw';
+import whiteLightAlarmChannels from '../fixtures/whiteLightAlarmChannels-nvr.json?raw';
+import audioAlarmChannels from '../fixtures/audioAlarmChannels-nvr.json?raw';
 
 export const NVR_HOST = '192.168.0.108';
 
@@ -103,6 +110,33 @@ function createPrivacyStore() {
   };
 }
 
+/**
+ * Motion (VMD) triggers per channel; a PUT replaces what a GET returns.
+ * Channel 1 starts camera-style (eventTrigger.xml: notificationRecurrence on
+ * every entry, a local relay IO-2), the others the way the DS-7604NI stores
+ * an IP channel's (record-N and center). Like the DS-7604NI, a PUT with a
+ * bare "whiteLight" or "audio" method fails as a whole (400 badXmlContent).
+ */
+function createTriggerStore() {
+  /** @type {Map<string, string>} */
+  const docs = new Map();
+  /** @param {string} channel */
+  const initial = (channel) => (channel === '1'
+    ? eventTrigger
+    : eventTriggerNvr.replace(/>(VMD-|record-)?1</g, `>$1${channel}<`));
+  return {
+    /** @param {string} channel */
+    read: (channel) => docs.get(channel) ?? initial(channel),
+    /**
+     * @param {string} body - a PUT of a trigger
+     * @returns {boolean} whether the device would accept it
+     */
+    accepts: (body) => !/<notificationMethod>(whiteLight|audio)<\/notificationMethod>/.test(body),
+    /** @param {string} channel @param {string} body */
+    write: (channel, body) => { docs.set(channel, body); },
+  };
+}
+
 /** A small JPEG frame that changes every call. */
 async function frame() {
   const canvas = new OffscreenCanvas(320, 180);
@@ -144,7 +178,8 @@ function todaysPictures() {
  * wrong IP address, `failures` answers "METHOD /path" with an error status
  * (only the first `times` requests, when set), and `writeStatus` changes
  * what a successful PUT or DELETE reports (e.g. statusCode 7, reboot
- * required). `privacy.read(path)` shows the privacy masks a channel stores.
+ * required). `privacy.read(path)` shows the privacy masks a channel stores,
+ * `triggers.read(channel)` its motion trigger.
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
@@ -155,10 +190,12 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     failures: {},
     writeStatus: STATUS.ok,
     privacy: createPrivacyStore(),
+    triggers: createTriggerStore(),
     /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
     recordedFrames: /** @type {'real'|'ignoresTime'|'none'} */ ('real'),
   };
   const xml = (body, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/xml; charset="UTF-8"' } });
+  const json = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/json; charset="UTF-8"' } });
 
   device.fetch = async (url, opts = {}) => {
     const u = new URL(url, location.href);
@@ -180,6 +217,14 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (method === 'PUT') {
       device.puts.push({ path: p, body: opts.body });
       if (stores && p.endsWith('/privacyMask')) device.privacy.put(p, String(opts.body));
+      const trigger = p.match(/^\/ISAPI\/Event\/triggers\/VMD-(\d+)$/);
+      if (trigger && !device.triggers.accepts(String(opts.body))) {
+        return xml(responseStatusXml(p, {
+          statusCode: 6, statusString: 'Invalid XML Content', subStatusCode: 'badXmlContent',
+          subStatusString: 'Tag 16 is invalid (two root tags)',
+        }), 400);
+      }
+      if (stores && trigger) device.triggers.write(trigger[1], String(opts.body));
       return xml(responseStatusXml(p, device.writeStatus));
     }
     if (method === 'DELETE') {
@@ -202,9 +247,14 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
     if (p === '/ISAPI/System/Video/inputs/channels') return xml(responseStatusXml(p, STATUS.notSupport), 403);
     if (p === '/ISAPI/ContentMgmt/InputProxy/channels') {
+      // The DS-7604NI's camera addresses: channels 3 and 4 own outputs 301 and 401
+      const channel = (id, name, ip) => `<InputProxyChannel><id>${id}</id><name>${name}</name>` +
+        `<sourceInputPortDescriptor><ipAddress>${ip}</ipAddress></sourceInputPortDescriptor></InputProxyChannel>`;
       return xml('<InputProxyChannelList>' +
-        '<InputProxyChannel><id>1</id><name>Front &amp; Gate</name></InputProxyChannel>' +
-        '<InputProxyChannel><id>2</id><name>&lt;img src=x onerror=alert(1)&gt;</name></InputProxyChannel>' +
+        channel(1, 'Front &amp; Gate', '192.168.254.2') +
+        channel(2, '&lt;img src=x onerror=alert(1)&gt;', '192.168.254.9') +
+        channel(3, 'Garage', '192.168.254.4') +
+        channel(4, 'Slide', '192.168.254.3') +
         '</InputProxyChannelList>');
     }
     if (/^\/ISAPI\/Streaming\/channels\/\d+0[12]\/picture$/.test(p)) {
@@ -230,7 +280,13 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     }
     if (p.endsWith('/motionDetection')) return xml(motionDetection);
     if (p.endsWith('/privacyMask')) return xml(device.privacy.read(p));
-    if (/\/Event\/triggers\/VMD-\d+$/.test(p)) return xml(eventTrigger);
+    const trigger = p.match(/^\/ISAPI\/Event\/triggers\/VMD-(\d+)$/);
+    if (trigger) return xml(device.triggers.read(trigger[1]));
+    if (p === '/ISAPI/Event/triggersCap') return xml(triggersCap);
+    if (p === '/ISAPI/System/IO/outputs/capabilities') return xml(ioOutputsCapabilities);
+    if (p === '/ISAPI/System/IO/outputs') return xml(ioOutputs);
+    if (p === '/ISAPI/Event/triggers/notifications/channels/whiteLightAlarm') return json(whiteLightAlarmChannels);
+    if (p === '/ISAPI/Event/triggers/notifications/channels/AudioAlarm') return json(audioAlarmChannels);
     // The DS-7604NI answers any path it doesn't have like this, not with 404
     return xml(responseStatusXml(p, STATUS.notSupport), 403);
   };

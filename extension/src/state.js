@@ -59,6 +59,8 @@
  * Event actions tool
  * @property {Record<string, boolean>} eventActions - enabled actions by key
  * @property {XMLDocument|null} eventTriggerDoc
+ * @property {Record<import('../lib/config-xml.js').EventActionKey, import('../lib/config-xml.js').EventActionTarget>|null} eventActionTargets
+ *   - per action, the entry its toggle stands for on the loaded channel, or why it's unavailable
  */
 
 // Tool fields are added by initToolRegistry() before anything reads them,

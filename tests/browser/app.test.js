@@ -70,11 +70,11 @@ describe('config page', () => {
     $('hostInput').value = NVR_HOST;
     $('passInput').value = 'test-pass';
     $('connectBtn').click();
-    await vi.waitFor(() => expect(state.channels).toHaveLength(2));
+    await vi.waitFor(() => expect(state.channels).toHaveLength(4));
 
     expect($('deviceInfo').textContent).toBe('Mock NVR • FW V4.0');
     const names = [...document.querySelectorAll('.channel-item span')].map(s => s.textContent);
-    expect(names).toEqual(['Front & Gate', '<img src=x onerror=alert(1)>']);
+    expect(names).toEqual(['Front & Gate', '<img src=x onerror=alert(1)>', 'Garage', 'Slide']);
     expect(document.querySelector('.channel-item img')).toBeNull();
     expect(chromeStub.store.session.password).toBe('test-pass');
     expect(chromeStub.store.local.password).toBeUndefined();
@@ -182,6 +182,46 @@ describe('config page', () => {
     } finally {
       device.writeStatus = STATUS.ok;
     }
+  });
+
+  it('disables the actions channel 1’s camera can’t do, saying why', () => {
+    const hints = [
+      ['IO', 'This camera has no alarm output'],
+      ['whiteLight', 'This camera has no white light'],
+      ['audio', 'This camera has no speaker'],
+    ];
+    for (const [key, hint] of hints) {
+      expect($(`eventRow_${key}`).classList.contains('unavailable')).toBe(true);
+      expect($(`eventRow_${key}`).title).toBe(hint);
+    }
+    expect($('eventRow_center').classList.contains('unavailable')).toBe(false);
+    $('eventToggle_whiteLight').click();
+    expect($('eventToggle_whiteLight').classList.contains('on')).toBe(false);
+  });
+
+  it('links channel 3 to its own camera’s relay, light and speaker', async () => {
+    document.querySelectorAll('.channel-item')[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await vi.waitFor(() => expect(state.eventActionTargets).not.toBeNull());
+    expect(document.querySelectorAll('#configPanels .toggle-row.unavailable')).toHaveLength(0);
+    expect($('eventToggle_record').classList.contains('on')).toBe(true);
+
+    for (const key of ['IO', 'whiteLight', 'audio']) $(`eventToggle_${key}`).click();
+    const puts = device.puts.length;
+    $('saveEventsBtn').click();
+    await vi.waitFor(() => expect(toast()).toBe('Event actions saved successfully!'));
+    expect(device.puts).toHaveLength(puts + 1);
+
+    // The entries the NVR's own web UI writes, which the bare whiteLight/audio methods were not
+    const { path, body } = device.puts.at(-1);
+    expect(path).toBe('/ISAPI/Event/triggers/VMD-3');
+    expect(body).toContain('<EventTriggerNotification><id>IO-301</id><notificationMethod>IO</notificationMethod>' +
+      '<dynOutputIOPortID>301</dynOutputIOPortID></EventTriggerNotification>');
+    expect(body).toContain('<id>whiteLightOut-3</id><notificationMethod>whiteLightOut</notificationMethod><lightAudioOutID>3</lightAudioOutID>');
+    expect(body).toContain('<id>audioOut-3</id><notificationMethod>audioOut</notificationMethod><lightAudioOutID>3</lightAudioOutID>');
+    expect(body).not.toContain('notificationRecurrence');
+
+    // What the device offers was read once, not per channel
+    expect(device.requests.filter(r => r === 'GET /ISAPI/Event/triggersCap')).toHaveLength(1);
   });
 
   it('edits the cell grid on a grid-only camera', async () => {

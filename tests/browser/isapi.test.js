@@ -9,19 +9,20 @@ import { readPrivacyMask } from '../../extension/lib/config-xml.js';
 import { Isapi, TIMEOUT_MS, defaultTimeoutMs } from '../../extension/lib/isapi.js';
 import { childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import { NVR_HOST, STATUS, createMockNvr, responseStatusXml } from '../support/mock-nvr.js';
+import { fixtures } from './fixtures.js';
 
 /**
- * Replace fetch with a router keyed by path, or by "METHOD path" for one
- * method; unknown paths return 404. A route with `hang` never answers until
- * the request's signal aborts it, like a stalled device; one with
- * `unreachable` fails like a wrong IP address.
- * @returns {string[]} the requested paths, in order
+ * Replace fetch with a router keyed by path (without the query), or by
+ * "METHOD path" for one method; unknown paths return 404. A route with
+ * `hang` never answers until the request's signal aborts it, like a stalled
+ * device; one with `unreachable` fails like a wrong IP address.
+ * @returns {string[]} the requested paths with their queries, in order
  */
 function mockDevice(routes) {
   const calls = [];
   vi.stubGlobal('fetch', async (url, opts = {}) => {
-    const path = new URL(url).pathname;
-    calls.push(path);
+    const { pathname: path, search } = new URL(url);
+    calls.push(path + search);
     const r = routes[`${opts.method ?? 'GET'} ${path}`] ?? routes[path];
     if (!r) return new Response('', { status: 404 });
     if (r.unreachable) throw new TypeError('Failed to fetch');
@@ -45,6 +46,7 @@ const testConfig = () => ({ host: '10.9.9.9', port: 80, username: `user${++confi
 afterEach(() => {
   vi.unstubAllGlobals();
   Isapi.onAuthFailure = null;
+  Isapi.clearDeviceCache();
 });
 
 describe('Isapi', () => {
@@ -359,5 +361,103 @@ describe('saving privacy masks', () => {
     const { doc } = await Isapi.savePrivacyMask(testConfig(), regionsPath, original, { enabled: true, rects: [top, top] });
     expect(calls).toEqual([regionsPath]);
     expect(readPrivacyMask(doc)).toMatchObject({ enabled: true, regions: [expect.any(Array), expect.any(Array)] });
+  });
+});
+
+describe('event actions', () => {
+  /** The DS-7604NI's answers about its motion actions, outputs, lights and speakers. */
+  const nvrRoutes = () => ({
+    '/ISAPI/Event/triggersCap': { body: fixtures.triggersCapNvr },
+    '/ISAPI/System/IO/outputs/capabilities': { body: fixtures.ioOutputsCapabilitiesNvr },
+    '/ISAPI/System/IO/outputs': { body: fixtures.ioOutputsNvr },
+    '/ISAPI/Event/triggers/notifications/channels/whiteLightAlarm': { body: fixtures.whiteLightAlarmChannelsNvr },
+    '/ISAPI/Event/triggers/notifications/channels/AudioAlarm': { body: fixtures.audioAlarmChannelsNvr },
+  });
+  const nvrRequests = new Set([
+    '/ISAPI/Event/triggersCap',
+    '/ISAPI/System/IO/outputs/capabilities',
+    '/ISAPI/System/IO/outputs',
+    '/ISAPI/Event/triggers/notifications/channels/whiteLightAlarm?format=json',
+    '/ISAPI/Event/triggers/notifications/channels/AudioAlarm?format=json',
+  ]);
+
+  it('reads what the NVR offers once per device, until the cache is cleared', async () => {
+    const calls = mockDevice(nvrRoutes());
+    const config = testConfig();
+    const support = await Isapi.getEventActionSupport(config);
+    expect(support.triggerCap).toMatchObject({ isSupportIO: true, isSupportWhiteLightOut: true, isSupportAudioOut: true });
+    expect(support.alarmOutputs.map(o => o.id)).toEqual(['301', '401']);
+    expect([[...support.whiteLightChannels], [...support.audioChannels]]).toEqual([['3', '4'], ['3', '4']]);
+    // outputs/capabilities mentions IOType, so the merged list is all it reads (no IOProxy)
+    expect(calls[0]).toBe('/ISAPI/Event/triggersCap');
+    expect(new Set(calls)).toEqual(nvrRequests);
+    expect(calls).toHaveLength(nvrRequests.size);
+
+    calls.length = 0;
+    expect(await Isapi.getEventActionSupport(config)).toBe(support);
+    expect(calls).toEqual([]);
+
+    Isapi.clearDeviceCache();
+    await Isapi.getEventActionSupport(config);
+    expect(new Set(calls)).toEqual(nvrRequests);
+  });
+
+  it('reads own and IP cameras’ outputs separately when they carry no IOType', async () => {
+    const calls = mockDevice({
+      '/ISAPI/System/IO/outputs': { body: '<IOOutputPortList><IOOutputPort><id>1</id></IOOutputPort></IOOutputPortList>' },
+      '/ISAPI/ContentMgmt/IOProxy/outputs': { body: fixtures.ioProxyOutputsNvr },
+    });
+    const support = await Isapi.getEventActionSupport(testConfig());
+    expect(support.triggerCap).toBeNull(); // no triggersCap: every action offered, as before
+    expect(support.alarmOutputs).toEqual([
+      { id: '1', type: 'local', ipAddress: null },
+      { id: '301', type: 'digital', ipAddress: '192.168.254.4' },
+      { id: '401', type: 'digital', ipAddress: '192.168.254.3' },
+    ]);
+    // Without the *Out flags there are no NVR light or speaker lists to read
+    expect(calls.filter(c => c.includes('/notifications/channels/'))).toEqual([]);
+  });
+
+  it('asks again after a busy answer, and fails when the device doesn’t answer', async () => {
+    const config = testConfig();
+    mockDevice({ ...nvrRoutes(), '/ISAPI/Event/triggersCap': statusRoute(503, 2, 'deviceBusy') });
+    expect((await Isapi.getEventActionSupport(config)).triggerCap).toBeNull();
+    let calls = mockDevice(nvrRoutes());
+    expect((await Isapi.getEventActionSupport(config)).triggerCap).not.toBeNull();
+    expect(new Set(calls)).toEqual(nvrRequests);
+
+    const offline = testConfig();
+    mockDevice({ ...nvrRoutes(), '/ISAPI/Event/triggersCap': { unreachable: true } });
+    await expect(Isapi.getEventActionSupport(offline)).rejects.toBeInstanceOf(NetworkError);
+    calls = mockDevice(nvrRoutes());
+    await Isapi.getEventActionSupport(offline);
+    expect(new Set(calls)).toEqual(nvrRequests);
+  });
+
+  it('reads IP cameras’ addresses from the NVR’s channel list', async () => {
+    mockDevice({
+      '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'notSupport'),
+      '/ISAPI/ContentMgmt/InputProxy/channels': { body: fixtures.inputProxyChannelsNvr },
+    });
+    expect((await Isapi.getChannels(testConfig())).map(ch => [ch.id, ch.kind, ch.ipAddress])).toEqual([
+      ['1', 'digital', '192.168.254.2'], ['2', 'digital', '192.168.254.9'],
+      ['3', 'digital', '192.168.254.4'], ['4', 'digital', '192.168.254.3'],
+    ]);
+  });
+
+  it('finds an NVR trigger in the full list by its dyn channel, and saves it to its own id', async () => {
+    const ns = 'xmlns="http://www.isapi.org/ver20/XMLSchema"';
+    mockDevice({
+      '/ISAPI/Event/triggers': { body: `<EventTriggerList ${ns}>` +
+        '<EventTrigger><id>VMD-1</id><eventType>VMD</eventType><dynVideoInputChannelID>1</dynVideoInputChannelID></EventTrigger>' +
+        '<EventTrigger><id>motion 3</id><eventType>VMD</eventType><dynVideoInputChannelID>3</dynVideoInputChannelID></EventTrigger>' +
+        '</EventTriggerList>' },
+    });
+    const doc = await Isapi.getEventTrigger(testConfig(), '3');
+    expect(childText(doc.documentElement, 'id')).toBe('motion 3');
+    expect(Isapi.eventTriggerSavePath(doc, '3')).toBe('/ISAPI/Event/triggers/motion%203');
+
+    expect(Isapi.eventTriggerSavePath(parseXml(fixtures.eventTriggerNvrVmd3), '3')).toBe('/ISAPI/Event/triggers/VMD-3');
+    expect(Isapi.eventTriggerSavePath(parseXml('<EventTrigger/>'), '3')).toBe('/ISAPI/Event/triggers/VMD-3');
   });
 });
