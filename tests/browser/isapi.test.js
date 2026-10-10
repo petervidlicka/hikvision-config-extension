@@ -82,6 +82,13 @@ describe('Isapi', () => {
     expect(calls).toEqual(['/ISAPI/System/Video/inputs/channels', '/ISAPI/System/Video/inputs/channels']);
   });
 
+  it('falls back to the main stream when a camera has no sub-stream', async () => {
+    const calls = mockDevice({ '/ISAPI/Streaming/channels/301/picture': { body: new Uint8Array([0xff, 0xd8]) } });
+    const blob = await Isapi.getSnapshot(testConfig(), '3', 'sub');
+    expect(blob.size).toBe(2);
+    expect(calls).toEqual(['/ISAPI/Streaming/channels/302/picture', '/ISAPI/Streaming/channels/301/picture']);
+  });
+
   it('returns snapshots as JPEG blobs', async () => {
     mockDevice({ '/ISAPI/Streaming/channels/101/picture': { body: new Uint8Array([0xff, 0xd8, 0xff]) } });
     const blob = await Isapi.getSnapshot(testConfig(), '1');

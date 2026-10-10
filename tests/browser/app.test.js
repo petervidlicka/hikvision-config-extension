@@ -60,10 +60,19 @@ describe('config page', () => {
     expect(chromeStub.store.local.password).toBeUndefined();
   });
 
-  it('streams frames as blobs without overlapping requests', async () => {
+  it('streams SD frames as blobs without overlapping requests', async () => {
     await vi.waitFor(() => expect(dom.videoFeed.src).toMatch(/^blob:/), { timeout: 3000 });
     await new Promise(r => setTimeout(r, 2500));
     expect(device.maxInFlightSnapshots).toBe(1);
+    expect(device.requests.filter(r => r.endsWith('/picture'))).toContain('GET /ISAPI/Streaming/channels/102/picture');
+    expect($('statusRight').textContent).toMatch(/^Channel 1 · SD · \d+ fps$/);
+  });
+
+  it('switches the single view to the HD stream and remembers it', async () => {
+    $('streamBtnHd').click();
+    expect(chromeStub.store.local.streamType).toBe('main');
+    await vi.waitFor(() => expect(device.requests.at(-1)).toBe('GET /ISAPI/Streaming/channels/101/picture'), { timeout: 3000 });
+    expect($('statusRight').textContent).toMatch(/^Channel 1 · HD/);
   });
 
   it('loads motion detection with the device limits', async () => {

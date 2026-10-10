@@ -120,9 +120,13 @@
 
     <!-- Context-dependent sub-tabs -->
     <div class="tool-tabs" id="toolTabs" style="display:none">
-      <div id="liveViewTabs" style="display:flex;gap:2px;width:100%">
+      <div id="liveViewTabs" style="display:flex;gap:2px;width:100%;align-items:center">
         <button class="tool-tab active" id="singleViewTab">1-Cam View</button>
         <button class="tool-tab" id="gridViewTab">4-Cam View</button>
+        <div class="stream-toggle" id="streamToggle" title="Image quality of the single view (the grid always uses SD)">
+          <button class="stream-btn active" id="streamBtnSd" title="Sub-stream: faster, lower resolution">SD</button>
+          <button class="stream-btn" id="streamBtnHd" title="Main stream: higher resolution, slower">HD</button>
+        </div>
       </div>
       <!-- Config sub-tabs are generated dynamically by ToolRegistry -->
       <div id="configTabs" style="display:none;gap:2px;width:100%"></div>

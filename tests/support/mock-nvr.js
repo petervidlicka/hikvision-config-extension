@@ -76,7 +76,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         '<InputProxyChannel><id>2</id><name>&lt;img src=x onerror=alert(1)&gt;</name></InputProxyChannel>' +
         '</InputProxyChannelList>');
     }
-    if (/^\/ISAPI\/Streaming\/channels\/\d+01\/picture$/.test(p)) {
+    if (/^\/ISAPI\/Streaming\/channels\/\d+0[12]\/picture$/.test(p)) {
       device.inFlightSnapshots++;
       device.maxInFlightSnapshots = Math.max(device.maxInFlightSnapshots, device.inFlightSnapshots);
       await new Promise(r => setTimeout(r, snapshotDelayMs));

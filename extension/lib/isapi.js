@@ -153,21 +153,29 @@ export const Isapi = {
   },
 
   /**
-   * Fetch one JPEG frame from the channel's main stream.
+   * Fetch one JPEG frame. Stream IDs are channel × 100 + 1 for the main
+   * (HD) stream and + 2 for the sub (SD) stream, which is smaller and faster.
+   * Falls back to the main stream when a camera has no sub-stream, and to
+   * the bare channel ID for firmware that uses that.
    * @param {DeviceConfig} config
    * @param {string} channelId
+   * @param {'main'|'sub'} [stream]
    * @returns {Promise<Blob>}
    */
-  async getSnapshot(config, channelId) {
-    let resp;
-    try {
-      resp = await this.request(config, 'GET', `/ISAPI/Streaming/channels/${channelId}01/picture`);
-    } catch (err) {
-      rethrowAuthError(err);
-      // Some firmware uses the bare channel ID
-      resp = await this.request(config, 'GET', `/ISAPI/Streaming/channels/${channelId}/picture`);
+  async getSnapshot(config, channelId, stream = 'main') {
+    const ids = stream === 'sub' ? [`${channelId}02`, `${channelId}01`] : [`${channelId}01`];
+    ids.push(channelId);
+    let lastError;
+    for (const id of ids) {
+      try {
+        const resp = await this.request(config, 'GET', `/ISAPI/Streaming/channels/${id}/picture`);
+        return new Blob([resp.data], { type: 'image/jpeg' });
+      } catch (err) {
+        rethrowAuthError(err);
+        lastError = err;
+      }
     }
-    return new Blob([resp.data], { type: 'image/jpeg' });
+    throw lastError;
   },
 
   /**

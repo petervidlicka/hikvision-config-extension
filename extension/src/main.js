@@ -12,10 +12,10 @@ import { motionTool } from './tools/motion.js';
 import { privacyTool } from './tools/privacy.js';
 import { ToolRegistry, initToolRegistry, switchTool, toggleConfig } from './tools/registry.js';
 import { switchSection, switchToGridView, switchToLiveViewSingle, toggleMaximizeCell } from './views.js';
+import { setStreamType } from './feed.js';
 
 /** Wire up the page: buttons, keyboard shortcuts and window events. */
 function bindAppEvents() {
-
   // Section tabs
   byId('liveViewSectionTab').addEventListener('click', () => switchSection('liveview'));
   byId('configSectionTab').addEventListener('click', () => switchSection('config'));
@@ -26,6 +26,8 @@ function bindAppEvents() {
     switchToLiveViewSingle();
   });
   byId('gridViewTab').addEventListener('click', switchToGridView);
+  byId('streamBtnSd').addEventListener('click', () => setStreamType('sub'));
+  byId('streamBtnHd').addEventListener('click', () => setStreamType('main'));
 
   // Config section collapse toggle
   byId('configToggleBtn').addEventListener('click', toggleConfig);
@@ -80,8 +82,6 @@ function bindAppEvents() {
       }
     }
   });
-
-
 }
 
 ToolRegistry.register(motionTool);
@@ -92,3 +92,6 @@ bindCanvasEvents();
 bindAppEvents();
 Isapi.onAuthFailure = handleAuthFailure;
 loadSavedCredentials();
+chrome.storage.local.get('streamType', ({ streamType }) => {
+  if (streamType === 'main' || streamType === 'sub') setStreamType(streamType);
+});

@@ -214,6 +214,34 @@ input::placeholder { color: #555568; }
 .tool-tab:hover { color: var(--text); background: var(--bg-card); }
 .tool-tab.active { color: var(--accent); background: var(--bg-card); }
 
+/* ── Stream Quality Toggle ── */
+.stream-toggle {
+  display: flex;
+  gap: 1px;
+  margin-left: auto;
+  flex-shrink: 0;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.stream-btn {
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  border: none;
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0.03em;
+}
+.stream-btn:hover { color: var(--text); }
+.stream-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* ── Video Canvas Area ── */
 .canvas-container {
   flex: 1;
