@@ -99,6 +99,33 @@
       <div class="channel-list" id="channelList"></div>
     </div>
 
+    <!-- Playback Section (only visible in Playback mode) -->
+    <div class="section" id="playbackSection" style="display:none">
+      <div class="section-title">Playback</div>
+      <div class="playback-date-nav">
+        <button class="btn btn-sm" id="pbDatePrev" title="Previous day">&lt;</button>
+        <span class="playback-date-label" id="pbDateLabel" title="Pick a date">Today</span>
+        <button class="btn btn-sm" id="pbDateNext" title="Next day">&gt;</button>
+        <input type="date" id="pbDateInput" class="visually-hidden" tabindex="-1" aria-label="Date" />
+      </div>
+      <div class="form-group" style="margin-top:10px">
+        <label for="pbFilter">Show</label>
+        <select id="pbFilter">
+          <option value="all">All recordings</option>
+          <option value="events">Events only</option>
+        </select>
+      </div>
+      <div class="form-group" style="margin-top:8px">
+        <label>Speed</label>
+        <div class="playback-speed-group">
+          <button class="btn btn-sm pb-speed active" data-speed="1">1X</button>
+          <button class="btn btn-sm pb-speed" data-speed="2">2X</button>
+          <button class="btn btn-sm pb-speed" data-speed="4">4X</button>
+        </div>
+      </div>
+      <p class="scan-description playback-info" id="pbInfo"></p>
+    </div>
+
     <!-- Tool Config Section (only visible in Configuration mode) -->
     <div class="section" id="toolConfigSection" style="display:none">
       <div class="section-title section-toggle" id="configToggleBtn">
@@ -115,14 +142,19 @@
     <!-- Primary section tabs: Live View vs Configuration -->
     <div class="section-tabs" id="sectionTabs" style="display:none">
       <button class="section-tab active" id="liveViewSectionTab">Live View</button>
+      <button class="section-tab" id="playbackSectionTab">Playback</button>
       <button class="section-tab" id="configSectionTab">Configuration</button>
     </div>
 
     <!-- Context-dependent sub-tabs -->
     <div class="tool-tabs" id="toolTabs" style="display:none">
-      <div id="liveViewTabs" style="display:flex;gap:2px;width:100%">
+      <div id="liveViewTabs" style="display:flex;gap:2px;width:100%;align-items:center">
         <button class="tool-tab active" id="singleViewTab">1-Cam View</button>
         <button class="tool-tab" id="gridViewTab">4-Cam View</button>
+        <div class="stream-toggle" id="streamToggle" title="Image quality of the single view (the grid always uses SD)">
+          <button class="stream-btn active" id="streamBtnSd" title="Sub-stream: faster, lower resolution">SD</button>
+          <button class="stream-btn" id="streamBtnHd" title="Main stream: higher resolution, slower">HD</button>
+        </div>
       </div>
       <!-- Config sub-tabs are generated dynamically by ToolRegistry -->
       <div id="configTabs" style="display:none;gap:2px;width:100%"></div>
@@ -195,6 +227,22 @@
         <img id="videoFeed" />
         <canvas id="drawCanvas"></canvas>
       </div>
+    </div>
+
+    <!-- Playback timeline (Playback mode) -->
+    <div class="playback-bar" id="playbackBar" style="display:none">
+      <div class="pb-controls-row">
+        <button class="btn btn-sm" id="pbSkipBackBtn" title="Back 10 seconds">-10s</button>
+        <button class="btn btn-sm" id="pbPlayPauseBtn" title="Play/Pause">▶</button>
+        <span class="pb-timestamp" id="pbTimestamp">--:--:--</span>
+        <button class="btn btn-sm" id="pbSkipFwdBtn" title="Forward 10 seconds">+10s</button>
+        <button class="btn btn-sm" id="pbLiveBtn" title="Back to Live View">Live</button>
+      </div>
+      <div class="pb-timeline-wrap" id="pbTimelineWrap">
+        <canvas class="pb-timeline" id="pbTimeline"></canvas>
+        <div class="pb-playhead" id="pbPlayhead" style="display:none"></div>
+      </div>
+      <div class="pb-timeline-labels" id="pbTimelineLabels"></div>
     </div>
 
     <div class="status-bar" id="statusBar">

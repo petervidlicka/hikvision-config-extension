@@ -214,6 +214,34 @@ input::placeholder { color: #555568; }
 .tool-tab:hover { color: var(--text); background: var(--bg-card); }
 .tool-tab.active { color: var(--accent); background: var(--bg-card); }
 
+/* ── Stream Quality Toggle ── */
+.stream-toggle {
+  display: flex;
+  gap: 1px;
+  margin-left: auto;
+  flex-shrink: 0;
+  background: var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.stream-btn {
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  border: none;
+  background: var(--bg);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+  letter-spacing: 0.03em;
+}
+.stream-btn:hover { color: var(--text); }
+.stream-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
+
 /* ── Video Canvas Area ── */
 .canvas-container {
   flex: 1;
@@ -771,4 +799,125 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--text-dim);
   line-height: 1.5;
   margin-bottom: 12px;
+}
+
+
+/* ── Playback ── */
+
+/* Date navigation row */
+.playback-date-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.playback-date-label {
+  flex: 1;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 4px 0;
+  border-radius: 4px;
+  transition: background 0.15s;
+}
+.playback-date-label:hover { background: var(--bg-card-hover); }
+
+/* Speed selector */
+.playback-speed-group {
+  display: flex;
+  gap: 4px;
+}
+.playback-speed-group .btn.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* Playback bottom bar (timeline + controls) */
+.playback-bar {
+  background: var(--bg-card);
+  border-top: 1px solid var(--border);
+  padding: 8px 12px 6px;
+}
+
+/* Controls row above timeline */
+.pb-controls-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.pb-timestamp {
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 70px;
+  text-align: center;
+  color: var(--text);
+}
+
+/* Timeline canvas wrapper */
+.pb-timeline-wrap {
+  position: relative;
+  height: 36px;
+  background: var(--bg);
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.pb-timeline {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Playhead line */
+.pb-playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  background: var(--danger);
+  pointer-events: none;
+  z-index: 2;
+  box-shadow: 0 0 4px rgba(239, 68, 68, 0.5);
+}
+.pb-playhead::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+
+/* Timeline hour labels */
+.pb-timeline-labels {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0 0;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+.playback-info {
+  margin-top: 12px;
+  white-space: pre-line;
+}
+
+/* Present for showPicker() but not visible */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }

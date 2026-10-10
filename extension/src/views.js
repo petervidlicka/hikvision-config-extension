@@ -7,6 +7,8 @@ import { startGridCellFeed, startSnapshotFeed, stopAllGridFeeds, stopSnapshotFee
 import { byId, dom, query, queryAll, state } from './state.js';
 import { ToolRegistry, expandConfig, loadTool } from './tools/registry.js';
 import { channelLabel, setStatus, showToast } from './ui.js';
+import { enterPlayback, leavePlayback, onPlaybackChannelChange } from './playback.js';
+import { redraw } from './canvas.js';
 
 /**
  * Select a channel: highlight it, start its feed, and load the active
@@ -16,7 +18,7 @@ import { channelLabel, setStatus, showToast } from './ui.js';
  */
 export async function selectChannel(channelId, element) {
   // If in grid view, switch back to single camera mode
-  if (state.viewMode === 'grid') {
+  if (state.viewMode === 'grid' && state.activeSection === 'liveview') {
     switchToSingleView();
   }
 
@@ -27,6 +29,11 @@ export async function selectChannel(channelId, element) {
 
   // Reset tool state for the new channel
   ToolRegistry.getAll().forEach(t => t.resetState());
+
+  if (state.activeSection === 'playback') {
+    onPlaybackChannelChange();
+    return;
+  }
 
   // Start the feed
   startSnapshotFeed(channelId);
@@ -42,19 +49,32 @@ export async function selectChannel(channelId, element) {
 // ─── Section Navigation ──────────────────────────────────────────────────────
 
 /**
- * Switch between the Live View and Configuration sections.
- * @param {'liveview'|'config'} section
+ * Switch between the Live View, Playback and Configuration sections.
+ * @param {'liveview'|'playback'|'config'} section
  */
 export function switchSection(section) {
+  const previous = state.activeSection;
   state.activeSection = section;
 
   byId('liveViewSectionTab').classList.toggle('active', section === 'liveview');
+  byId('playbackSectionTab').classList.toggle('active', section === 'playback');
   byId('configSectionTab').classList.toggle('active', section === 'config');
 
+  dom.toolTabs.style.display = section === 'playback' ? 'none' : 'flex';
   dom.liveViewTabs.style.display = section === 'liveview' ? 'flex' : 'none';
   dom.configTabs.style.display = section === 'config' ? 'flex' : 'none';
 
-  if (section === 'liveview') {
+  if (previous === 'playback' && section !== 'playback') leavePlayback();
+
+  if (section === 'playback') {
+    dom.toolConfigSection.style.display = 'none';
+    stopSnapshotFeed();
+    stopAllGridFeeds();
+    dom.canvasContainer.style.display = '';
+    dom.gridView.style.display = 'none';
+    redraw(); // clears tool overlays
+    if (state.activeChannel) enterPlayback();
+  } else if (section === 'liveview') {
     dom.toolConfigSection.style.display = 'none';
     dom.canvas.style.cursor = 'default';
 

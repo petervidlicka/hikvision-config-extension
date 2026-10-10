@@ -94,6 +94,9 @@ export function readMotionCapabilities(doc) {
  * @property {boolean} enabled
  * @property {number|null} sensitivity
  * @property {boolean} dynamicAnalysis
+ * @property {boolean} supportsDynamicAnalysis - the device has the field at all
+ * @property {string|null} regionType - "region" (polygons) or "grid" (cells)
+ * @property {MotionGrid|null} grid - the cell grid, when the device sends one
  * @property {string[]} targetTypes - enabled detection targets, e.g. ["human"]
  * @property {boolean} detectHuman
  * @property {boolean} detectVehicle
@@ -122,6 +125,52 @@ export function readCoordinates(el) {
 }
 
 /**
+ * Grid-mode detection area: which cells of a rows × cols grid are active,
+ * row 0 at the top of the image.
+ * @typedef {{rows: number, cols: number, cells: boolean[][]}} MotionGrid
+ */
+
+/** Hex digits per grid row: each row is padded to whole bytes. @param {number} cols */
+function hexDigitsPerRow(cols) {
+  return Math.ceil(cols / 8) * 2;
+}
+
+/**
+ * Decode a gridMap: one row after another, each row's cells as bits, most
+ * significant bit first (column 0), padded to whole bytes.
+ * @param {string} hex
+ * @param {number} rows
+ * @param {number} cols
+ * @returns {boolean[][]}
+ */
+export function decodeGridMap(hex, rows, cols) {
+  const perRow = hexDigitsPerRow(cols);
+  return Array.from({ length: rows }, (_, r) => {
+    const rowHex = hex.slice(r * perRow, (r + 1) * perRow).padEnd(perRow, '0');
+    return Array.from({ length: cols }, (_cell, c) => ((parseInt(rowHex[c >> 2], 16) >> (3 - (c & 3))) & 1) === 1);
+  });
+}
+
+/**
+ * Encode cells back into a gridMap (inverse of decodeGridMap).
+ * @param {boolean[][]} cells
+ * @param {number} cols
+ * @returns {string} lowercase hex
+ */
+export function encodeGridMap(cells, cols) {
+  const perRow = hexDigitsPerRow(cols);
+  return cells.map(row => {
+    let rowHex = '';
+    for (let d = 0; d < perRow; d++) {
+      let digit = 0;
+      for (let b = 0; b < 4; b++) if (row[d * 4 + b]) digit |= 8 >> b;
+      rowHex += digit.toString(16);
+    }
+    return rowHex;
+  }).join('');
+}
+
+/**
  * Read a MotionDetection document.
  * @param {XMLDocument} doc
  * @returns {MotionConfig}
@@ -145,11 +194,22 @@ export function readMotionConfig(doc) {
     if (type.trim()) targets[type.trim()] = true;
   }
 
+  const gridEl = childElement(root, 'Grid');
+  const rows = intText(gridEl, 'rowGranularity');
+  const cols = intText(gridEl, 'columnGranularity');
+  const gridMap = findDescendant(root, 'gridMap')?.textContent?.trim();
+  const dynamic = findDescendant(root, 'enableDynamicAnalysis');
+
   return {
     enabled: childText(root, 'enabled') === 'true',
     sensitivity: Number.isNaN(sensitivity) ? null : sensitivity,
     targetTypes: Object.keys(targets).filter(t => targets[t]),
-    dynamicAnalysis: findDescendant(root, 'enableDynamicAnalysis')?.textContent?.trim() === 'true',
+    dynamicAnalysis: dynamic?.textContent?.trim() === 'true',
+    supportsDynamicAnalysis: dynamic !== null,
+    regionType: findDescendant(root, 'regionType')?.textContent?.trim() || null,
+    grid: rows > 0 && cols > 0 && gridMap !== undefined
+      ? { rows, cols, cells: decodeGridMap(gridMap, rows, cols) }
+      : null,
     detectHuman: targets.human ?? false,
     detectVehicle: targets.vehicle ?? false,
     regions: childElements(xmlPath(layout, 'layout', 'RegionList'), 'Region')
@@ -165,13 +225,16 @@ export function readMotionConfig(doc) {
  * "region" (the device ignores RegionList in grid mode), gridMap zeroed, and
  * each <Region> in an empty namespace (`<Region xmlns="">`).
  *
+ * In grid mode (`mode: "grid"`, for cameras without polygon support) only
+ * gridMap changes and the region list is left alone.
+ *
  * Detection targets go in the layout's <targetType> as a comma-separated
  * list ("human,vehicle", or empty for none), created in an empty namespace
  * when missing — again as the Hikvision client does. Pass `targetTypes`
  * only when the device supports targets.
  *
  * @param {XMLDocument} doc - edited in place
- * @param {{enabled: boolean, sensitivity: number, dynamicAnalysis: boolean, regions: DevicePoint[][], targetTypes?: string[]}} config
+ * @param {{enabled: boolean, sensitivity: number, dynamicAnalysis: boolean, regions: DevicePoint[][], targetTypes?: string[], mode?: 'region'|'grid', grid?: MotionGrid}} config
  */
 export function applyMotionConfig(doc, config) {
   const root = doc.documentElement;
@@ -181,6 +244,19 @@ export function applyMotionConfig(doc, config) {
   if (!setChildText(layout, 'sensitivityLevel', config.sensitivity)) {
     const sens = findDescendant(root, 'sensitivityLevel');
     if (sens) sens.textContent = String(config.sensitivity);
+  }
+  writeTargetTypes(layout, config.targetTypes);
+
+  if (config.mode === 'grid') {
+    const grid = config.grid;
+    const gridMap = findDescendant(root, 'gridMap');
+    if (!grid || !gridMap) throw new Error('This device did not return a motion grid, so the grid cannot be saved');
+    gridMap.textContent = encodeGridMap(grid.cells, grid.cols);
+    const regionType = findDescendant(root, 'regionType');
+    if (regionType) regionType.textContent = 'grid';
+    const dynamicField = findDescendant(root, 'enableDynamicAnalysis');
+    if (dynamicField) dynamicField.textContent = String(config.dynamicAnalysis);
+    return;
   }
 
   const regionType = findDescendant(root, 'regionType');
@@ -204,10 +280,6 @@ export function applyMotionConfig(doc, config) {
   regionList.replaceChildren();
   regionList.setAttribute('size', String(config.regions.length));
 
-  if (config.targetTypes && layout) {
-    const targetType = childElement(layout, 'targetType') ?? appendElement(layout, 'targetType', undefined, null);
-    targetType.textContent = config.targetTypes.join(',');
-  }
 
   config.regions.forEach((points, i) => {
     const region = appendElement(regionList, 'Region', undefined, null);
@@ -219,6 +291,19 @@ export function applyMotionConfig(doc, config) {
       appendElement(coord, 'positionY', Math.round(p.y), null);
     }
   });
+}
+
+/**
+ * Write the detection targets as the Hikvision client does: a comma-separated
+ * list in the layout's <targetType>, created in an empty namespace if missing.
+ * Leaves the document alone when `targetTypes` is undefined (unsupported).
+ * @param {Element|null} layout
+ * @param {string[]|undefined} targetTypes
+ */
+function writeTargetTypes(layout, targetTypes) {
+  if (!targetTypes || !layout) return;
+  const targetType = childElement(layout, 'targetType') ?? appendElement(layout, 'targetType', undefined, null);
+  targetType.textContent = targetTypes.join(',');
 }
 
 /* ── Privacy mask ───────────────────────────────────────────────────────── */

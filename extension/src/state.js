@@ -23,10 +23,13 @@
  * @property {CanvasPoint|null} drawCurrent
  * @property {CanvasPoint|null} mousePos - last pointer position over the canvas
  * @property {(() => void)|null} stopSnapshotFeed - stops the single-view loop
+ * @property {'main'|'sub'} streamType - single view: main (HD) or sub (SD) stream
+ * @property {number[]} frameTimes - when recent frames arrived, for the FPS readout
  * @property {'single'|'grid'} viewMode
  * @property {((() => void)|null)[]} gridFeedStops - per-cell loop stoppers
  * @property {(string|null)[]} gridCellChannels - channel id per grid cell
- * @property {'liveview'|'config'} activeSection
+ * @property {'liveview'|'playback'|'config'} activeSection
+ * @property {import('./playback.js').PlaybackState} playback - Playback section state
  * @property {number|null} gridExpandedCell - maximized grid cell
  * @property {boolean} configExpanded
  * @property {AbortController|null} scanAbort - cancels a running network scan
@@ -35,6 +38,9 @@
  * @property {{points: CanvasPoint[]}[]} motionRegions
  * @property {CanvasPoint[]} drawingPoints - corners of the polygon being drawn
  * @property {MotionCapabilities} motionCaps - device limits, refreshed on load
+ * @property {'region'|'grid'} motionMode - polygons, or cells for grid-only cameras
+ * @property {import('../lib/config-xml.js').MotionGrid|null} motionGrid - cells in grid mode
+ * @property {boolean|null} gridPaintValue - while dragging in grid mode: painting (true) or erasing
  * @property {boolean} motionEnabled
  * @property {number} sensitivity
  * @property {boolean} dynamicAnalysis
@@ -69,6 +75,8 @@ export const state = /** @type {AppState} */ (/** @type {unknown} */ ({
   drawCurrent: null,
   mousePos: null,
   stopSnapshotFeed: null,
+  streamType: 'sub',
+  frameTimes: [],
   viewMode: 'single',
   gridFeedStops: [null, null, null, null],
   gridCellChannels: [null, null, null, null],

@@ -5,7 +5,7 @@
 import { AuthError } from '../lib/digest-auth.js';
 import { Isapi } from '../lib/isapi.js';
 import { redraw, resizeCanvas } from './canvas.js';
-import { dom, query, queryAll, state } from './state.js';
+import { byId, dom, query, queryAll, state } from './state.js';
 import { errorMessage, setStatus } from './ui.js';
 
 /** Stop all 4-cam grid snapshot loops. */
@@ -22,8 +22,10 @@ export function stopSnapshotFeed() {
 
 // ─── Video Feed ─────────────────────────────────────────────────────────────
 
-/** Minimum time between snapshot requests for one feed. */
-export const SNAPSHOT_INTERVAL_MS = 1000;
+/** Minimum time between snapshot requests: up to 5 fps in the single view. */
+export const SINGLE_FEED_INTERVAL_MS = 200;
+/** Up to 2 fps per grid cell, so four cameras don't overload the NVR. */
+export const GRID_FEED_INTERVAL_MS = 500;
 
 /**
  * Poll snapshots for a channel, one request at a time: the next request is
@@ -34,9 +36,11 @@ export const SNAPSHOT_INTERVAL_MS = 1000;
  * @param {object} handlers
  * @param {(blob: Blob) => void} handlers.onFrame
  * @param {(err: unknown) => void} [handlers.onError]
+ * @param {'main'|'sub'} [handlers.stream]
+ * @param {number} [handlers.intervalMs] - minimum time between requests
  * @returns {() => void} stops the loop
  */
-export function createSnapshotLoop(channelId, { onFrame, onError }) {
+export function createSnapshotLoop(channelId, { onFrame, onError, stream = 'main', intervalMs = SINGLE_FEED_INTERVAL_MS }) {
   const config = state.config;
   if (!config) return () => {};
   let stopped = false;
@@ -46,8 +50,11 @@ export function createSnapshotLoop(channelId, { onFrame, onError }) {
   const tick = async () => {
     const started = performance.now();
     try {
-      const blob = await Isapi.getSnapshot(config, channelId);
-      if (!stopped) onFrame(blob);
+      const blob = await Isapi.getSnapshot(config, channelId, stream);
+      if (!stopped) {
+        onFrame(blob);
+        recordFrame();
+      }
     } catch (err) {
       if (stopped) return;
       onError?.(err);
@@ -55,7 +62,7 @@ export function createSnapshotLoop(channelId, { onFrame, onError }) {
       if (err instanceof AuthError) return;
     }
     if (!stopped) {
-      timer = setTimeout(tick, Math.max(0, SNAPSHOT_INTERVAL_MS - (performance.now() - started)));
+      timer = setTimeout(tick, Math.max(0, intervalMs - (performance.now() - started)));
     }
   };
 
@@ -64,6 +71,37 @@ export function createSnapshotLoop(channelId, { onFrame, onError }) {
     stopped = true;
     clearTimeout(timer);
   };
+}
+
+/** Count a displayed frame and refresh the FPS readout. */
+function recordFrame() {
+  const now = performance.now();
+  state.frameTimes.push(now);
+  while (state.frameTimes.length && now - state.frameTimes[0] > 1000) state.frameTimes.shift();
+  updateFeedStatus();
+}
+
+/** Right side of the status bar: what's streaming, frames per second, quality. */
+export function updateFeedStatus() {
+  const fps = state.frameTimes.length;
+  const quality = state.viewMode === 'grid' && state.activeSection === 'liveview'
+    ? 'Grid · SD'
+    : `Channel ${state.activeChannel} · ${state.streamType === 'main' ? 'HD' : 'SD'}`;
+  dom.statusRight.textContent = fps > 0 ? `${quality} · ${fps} fps` : quality;
+}
+
+/**
+ * Switch the single view between the main (HD) and sub (SD) stream, and
+ * remember the choice.
+ * @param {'main'|'sub'} type
+ */
+export function setStreamType(type) {
+  state.streamType = type;
+  byId('streamBtnSd').classList.toggle('active', type === 'sub');
+  byId('streamBtnHd').classList.toggle('active', type === 'main');
+  chrome.storage.local.set({ streamType: type });
+  if (state.stopSnapshotFeed && state.activeChannel) startSnapshotFeed(state.activeChannel);
+  updateFeedStatus();
 }
 
 /**
@@ -107,13 +145,16 @@ export function startSnapshotFeed(channelId) {
     frameCount++;
   };
 
+  state.frameTimes = [];
   state.stopSnapshotFeed = createSnapshotLoop(channelId, {
+    stream: state.streamType,
     onFrame: blob => showFrame(dom.videoFeed, blob),
     onError: err => {
       if (frameCount === 0) setStatus('Failed to get video feed: ' + errorMessage(err));
     },
   });
-  setStatus('Streaming snapshots', `Channel ${channelId}`);
+  setStatus('Live view');
+  updateFeedStatus();
 }
 
 
@@ -153,6 +194,8 @@ export function startGridCellFeed(cellIdx, channelId) {
   };
   // On errors, keep showing the loading state until the next successful frame
   state.gridFeedStops[cellIdx] = createSnapshotLoop(channelId, {
+    stream: 'sub',
+    intervalMs: GRID_FEED_INTERVAL_MS,
     onFrame: blob => showFrame(img, blob),
   });
 }

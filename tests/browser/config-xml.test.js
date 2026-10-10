@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import {
-  applyMotionConfig, applyNotificationMethods, applyPrivacyMask, privacyRegionList, readMotionCapabilities,
+  applyMotionConfig, applyNotificationMethods, decodeGridMap, encodeGridMap, applyPrivacyMask, privacyRegionList, readMotionCapabilities,
   readMotionConfig, readNotificationMethods, readPrivacyMask, triggerNotifications,
 } from '../../extension/lib/config-xml.js';
 import { fixtures, motionFixtures } from './fixtures.js';
@@ -107,6 +107,42 @@ describe('motion detection', () => {
       targetTypes: ['human', 'vehicle'],
     });
     expect(readMotionCapabilities(null).maxRegions).toBe(4);
+  });
+});
+
+describe('motion grid (grid-only cameras)', () => {
+  // The device's own map from channel 1 (see docs/isapi-notes.md): 18 rows × 22 columns
+  const deviceMap = '0000000000000000000000000000000003c00003e00007f80007f80007f80003f80001f80001f00000f0000070000020000000000000';
+
+  it('decodes rows top-first and columns most-significant-bit first', () => {
+    const cells = decodeGridMap(deviceMap, 18, 22);
+    expect(cells).toHaveLength(18);
+    expect(cells[5].map(Number).join('')).toBe('0000000000000011110000'); // 03c000
+    expect(cells[15][18]).toBe(true); // 000020 → column 18
+    expect(cells.flat().filter(Boolean)).toHaveLength(59);
+  });
+
+  it('encodes back to the same map', () => {
+    expect(encodeGridMap(decodeGridMap(deviceMap, 18, 22), 22)).toBe(deviceMap);
+  });
+
+  it('reads the grid and dynamic-analysis support from the config', () => {
+    const md = readMotionConfig(parseXml(fixtures.motionDetection));
+    expect([md.regionType, md.grid?.rows, md.grid?.cols, md.supportsDynamicAnalysis]).toEqual(['grid', 18, 22, true]);
+    const nvr = readMotionConfig(parseXml(fixtures.motionDetection.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, '')));
+    expect(nvr.supportsDynamicAnalysis).toBe(false);
+  });
+
+  it('saves only the grid in grid mode', () => {
+    const doc = parseXml(fixtures.motionDetection);
+    const before = readMotionConfig(doc);
+    const cells = before.grid.cells.map(row => row.map(() => false));
+    cells[0][0] = true;
+    applyMotionConfig(doc, { mode: 'grid', grid: { ...before.grid, cells }, enabled: true, sensitivity: 40, dynamicAnalysis: false, regions: [] });
+    const after = readMotionConfig(doc);
+    expect(serializeXml(doc)).toContain('<gridMap>800000' + '0'.repeat(102) + '</gridMap>');
+    expect(after.regionType).toBe('grid');
+    expect(after.regions).toEqual(before.regions); // region list untouched
   });
 });
 

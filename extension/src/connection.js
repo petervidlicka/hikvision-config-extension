@@ -10,6 +10,7 @@ import { dom, state } from './state.js';
 import { ToolRegistry } from './tools/registry.js';
 import { channelLabel, errorMessage, setStatus, showToast } from './ui.js';
 import { selectChannel, switchSection } from './views.js';
+import { resetPlayback } from './playback.js';
 
 /**
  * The device rejected our credentials mid-session (password changed, device
@@ -103,6 +104,7 @@ export function saveConnectionDetails(host, port, username, password) {
 
 export function disconnect() {
   // Stop all feeds
+  resetPlayback();
   stopSnapshotFeed();
   stopAllGridFeeds();
   clearFrame(dom.videoFeed);

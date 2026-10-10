@@ -44,6 +44,19 @@ async function frame() {
   return canvas.convertToBlob({ type: 'image/jpeg' });
 }
 
+/** Today's recordings: continuous 08:00–08:30 and a motion event at 14:05. */
+function todaysRecordings() {
+  const d = new Date();
+  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  /** @param {string} start @param {string} end @param {string} type */
+  const item = (start, end, type) => `<searchMatchItem><trackID>101</trackID>
+    <timeSpan><startTime>${day}T${start}Z</startTime><endTime>${day}T${end}Z</endTime></timeSpan>
+    <mediaSegmentDescriptor><playbackURI>rtsp://${NVR_HOST}/Streaming/tracks/101/?name=${start}</playbackURI></mediaSegmentDescriptor>
+    <metadataMatches><metadataDescriptor>recordType.meta.std-cgi.com/${type}</metadataDescriptor></metadataMatches></searchMatchItem>`;
+  return `<CMSearchResult><responseStatusStrg>OK</responseStatusStrg><numOfMatches>2</numOfMatches><matchList>
+    ${item('08:00:00', '08:30:00', 'CMR')}${item('14:05:10', '14:06:40', 'VideoMotion')}</matchList></CMSearchResult>`;
+}
+
 /**
  * Create the fake device. Returns its observable state and a fetch
  * replacement; requests to other hosts go to `realFetch`.
@@ -52,6 +65,7 @@ async function frame() {
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
   const device = {
     requests: [], puts: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
+    recordedFrames: true, // whether picture?starttime= returns images
   };
   const xml = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/xml' } });
 
@@ -68,6 +82,13 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       device.puts.push({ path: p, body: opts.body });
       return xml('<ResponseStatus><statusCode>1</statusCode></ResponseStatus>');
     }
+    if (method === 'POST' && p === '/ISAPI/ContentMgmt/search') return xml(todaysRecordings());
+    if (method === 'POST' && p.endsWith('/dailyDistribution')) {
+      return xml(`<trackDailyDistribution><dayList><day><dayOfMonth>${new Date().getDate()}</dayOfMonth><record>true</record></day></dayList></trackDailyDistribution>`);
+    }
+    if (u.searchParams.has('starttime') && p.endsWith('/picture')) {
+      return device.recordedFrames ? new Response(await frame(), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
+    }
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
     if (p === '/ISAPI/System/Video/inputs/channels') return new Response('', { status: 403 });
     if (p === '/ISAPI/ContentMgmt/InputProxy/channels') {
@@ -76,14 +97,17 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         '<InputProxyChannel><id>2</id><name>&lt;img src=x onerror=alert(1)&gt;</name></InputProxyChannel>' +
         '</InputProxyChannelList>');
     }
-    if (/^\/ISAPI\/Streaming\/channels\/\d+01\/picture$/.test(p)) {
+    if (/^\/ISAPI\/Streaming\/channels\/\d+0[12]\/picture$/.test(p)) {
       device.inFlightSnapshots++;
       device.maxInFlightSnapshots = Math.max(device.maxInFlightSnapshots, device.inFlightSnapshots);
       await new Promise(r => setTimeout(r, snapshotDelayMs));
       device.inFlightSnapshots--;
       return new Response(await frame(), { status: 200 });
     }
-    if (p.endsWith('/motionDetection/capabilities')) return xml(motionCapabilities);
+    // Channel 2 is a camera that only supports the cell grid
+    if (p.endsWith('/motionDetection/capabilities')) {
+      return xml(p.includes('/channels/2/') ? motionCapabilities.replace('opt="grid,region"', 'opt="grid"') : motionCapabilities);
+    }
     if (p.endsWith('/motionDetection')) return xml(motionDetection);
     if (p.endsWith('/privacyMask')) return xml(privacyMask);
     if (/\/Event\/triggers\/VMD-\d+$/.test(p)) return xml(eventTrigger);
