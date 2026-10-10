@@ -104,6 +104,9 @@ describe('config page', () => {
     expect($('motionMaxRegions').textContent).toBe('4');
     expect($('motionPointRange').textContent).toBe('4–10');
     expect($('detectHuman').checked).toBe(true);
+    // Dynamic Analysis is the NVR's <enableHighlight>true</enableHighlight>
+    expect($('dynamicAnalysisRow').style.display).toBe('');
+    expect($('dynamicAnalysisToggle').classList.contains('on')).toBe(true);
   });
 
   it('enforces corner and region limits while drawing', () => {
@@ -132,6 +135,7 @@ describe('config page', () => {
     slider.value = 50;
     slider.dispatchEvent(new Event('input'));
     $('detectVehicle').click();
+    $('dynamicAnalysisToggle').click();
     $('saveMotionBtn').click();
     await vi.waitFor(() => expect(device.puts).toHaveLength(1));
 
@@ -139,6 +143,8 @@ describe('config page', () => {
     expect(path).toBe('/ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection');
     expect(body).toMatch(/<sensitivityLevel>60<\/sensitivityLevel>/);
     expect(body).toMatch(/<targetType[^>]*>human,vehicle<\/targetType>/);
+    expect(body).toContain('<enableHighlight>false</enableHighlight>');
+    expect(body).not.toContain('enableDynamicAnalysis');
     expect(body.match(/<Region xmlns="">/g)).toHaveLength(4);
     const coords = [...body.matchAll(/<position[XY]>(\d+)</g)].map(m => +m[1]);
     expect(Math.min(...coords)).toBeGreaterThanOrEqual(0);
@@ -230,7 +236,7 @@ describe('config page', () => {
     await vi.waitFor(() => expect(state.motionMode).toBe('grid'));
     expect($('motionGridInstructions').style.display).toBe('');
     expect($('motionRegionInstructions').style.display).toBe('none');
-    expect($('dynamicAnalysisRow').style.display).toBe(''); // the fixture has the field
+    expect($('dynamicAnalysisRow').style.display).toBe(''); // the document has enableHighlight
 
     const { click } = canvasPointer();
     $('clearMotionRegionsBtn').click();
@@ -244,6 +250,7 @@ describe('config page', () => {
     expect(path).toBe('/ISAPI/ContentMgmt/InputProxy/channels/2/video/motionDetection');
     expect(body).toContain('<regionType>grid</regionType>');
     expect(body).toContain('<gridMap>800000' + '0'.repeat(102) + '</gridMap>');
+    expect(body).toContain('<enableHighlight>true</enableHighlight>');
   });
 
   it('shows stored privacy masks the right way up and saves exactly the drawn ones', async () => {

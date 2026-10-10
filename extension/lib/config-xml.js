@@ -99,8 +99,8 @@ export function readMotionCapabilities(doc) {
  * @typedef {object} MotionConfig
  * @property {boolean} enabled
  * @property {number|null} sensitivity
- * @property {boolean} dynamicAnalysis
- * @property {boolean} supportsDynamicAnalysis - the device has the field at all
+ * @property {boolean} dynamicAnalysis - "Dynamic Analysis for Motion": the root <enableHighlight>
+ * @property {boolean} supportsDynamicAnalysis - the device sends <enableHighlight> at all
  * @property {string|null} regionType - "region" (polygons) or "grid" (cells)
  * @property {MotionGrid|null} grid - the cell grid, when the device sends one
  * @property {string[]} targetTypes - enabled detection targets, e.g. ["human"]
@@ -178,6 +178,15 @@ export function encodeGridMap(cells, cols) {
 
 /**
  * Read a MotionDetection document.
+ *
+ * The Dynamic Analysis toggle is the root <enableHighlight>, which the web UI
+ * labels "Dynamic Analysis for Motion" (it marks moving objects in live
+ * view). The similarly named enableDynamicAnalysis is the face-detection
+ * setting and doesn't belong to motion documents.
+ *
+ * Detection targets are only the layout's comma-separated <targetType>, the
+ * one shape applyMotionConfig writes and the one devices were seen sending.
+ *
  * @param {XMLDocument} doc
  * @returns {MotionConfig}
  */
@@ -185,39 +194,26 @@ export function readMotionConfig(doc) {
   const root = doc.documentElement;
   const layout = childElement(root, 'MotionDetectionLayout');
   const sensitivity = intText(layout, 'sensitivityLevel');
-
-  // Firmware stores the detection target either as TargetDetection blocks
-  // (top level or under the layout) or as a layout <targetType>, e.g. "human"
-  /** @type {Record<string, boolean>} */
-  const targets = {};
-  for (const parent of [root, layout]) {
-    for (const t of childElements(childElement(parent, 'TargetDetection'), 'detectionTarget')) {
-      const type = childText(t, 'targetType');
-      if (type) targets[type] = childText(t, 'enabled') === 'true';
-    }
-  }
-  for (const type of (childText(layout, 'targetType') || '').split(',')) {
-    if (type.trim()) targets[type.trim()] = true;
-  }
+  const targetTypes = [...new Set((childText(layout, 'targetType') || '').split(',').map(t => t.trim()).filter(Boolean))];
 
   const gridEl = childElement(root, 'Grid');
   const rows = intText(gridEl, 'rowGranularity');
   const cols = intText(gridEl, 'columnGranularity');
   const gridMap = findDescendant(root, 'gridMap')?.textContent?.trim();
-  const dynamic = findDescendant(root, 'enableDynamicAnalysis');
+  const highlight = childText(root, 'enableHighlight');
 
   return {
     enabled: childText(root, 'enabled') === 'true',
     sensitivity: Number.isNaN(sensitivity) ? null : sensitivity,
-    targetTypes: Object.keys(targets).filter(t => targets[t]),
-    dynamicAnalysis: dynamic?.textContent?.trim() === 'true',
-    supportsDynamicAnalysis: dynamic !== null,
+    targetTypes,
+    dynamicAnalysis: highlight === 'true',
+    supportsDynamicAnalysis: highlight !== null,
     regionType: findDescendant(root, 'regionType')?.textContent?.trim() || null,
     grid: rows > 0 && cols > 0 && gridMap !== undefined
       ? { rows, cols, cells: decodeGridMap(gridMap, rows, cols) }
       : null,
-    detectHuman: targets.human ?? false,
-    detectVehicle: targets.vehicle ?? false,
+    detectHuman: targetTypes.includes('human'),
+    detectVehicle: targetTypes.includes('vehicle'),
     regions: childElements(xmlPath(layout, 'layout', 'RegionList'), 'Region')
       .map(readCoordinates)
       .filter(points => points.length >= 3),
@@ -239,6 +235,9 @@ export function readMotionConfig(doc) {
  * when missing — again as the Hikvision client does. Pass `targetTypes`
  * only when the device supports targets.
  *
+ * `dynamicAnalysis` goes in the root <enableHighlight> in both modes, and
+ * only when the device sent that field (the web UI shows the toggle only then).
+ *
  * @param {XMLDocument} doc - edited in place
  * @param {{enabled: boolean, sensitivity: number, dynamicAnalysis: boolean, regions: DevicePoint[][], targetTypes?: string[], mode?: 'region'|'grid', grid?: MotionGrid}} config
  */
@@ -252,6 +251,7 @@ export function applyMotionConfig(doc, config) {
     if (sens) sens.textContent = String(config.sensitivity);
   }
   writeTargetTypes(layout, config.targetTypes);
+  setChildText(root, 'enableHighlight', config.dynamicAnalysis);
 
   if (config.mode === 'grid') {
     const grid = config.grid;
@@ -260,8 +260,6 @@ export function applyMotionConfig(doc, config) {
     gridMap.textContent = encodeGridMap(grid.cells, grid.cols);
     const regionType = findDescendant(root, 'regionType');
     if (regionType) regionType.textContent = 'grid';
-    const dynamicField = findDescendant(root, 'enableDynamicAnalysis');
-    if (dynamicField) dynamicField.textContent = String(config.dynamicAnalysis);
     return;
   }
 
@@ -270,10 +268,6 @@ export function applyMotionConfig(doc, config) {
 
   const gridMap = findDescendant(root, 'gridMap');
   if (gridMap) gridMap.textContent = '0'.repeat(gridMap.textContent.length);
-
-  // Only touch the field if this firmware has it
-  const dynamic = findDescendant(root, 'enableDynamicAnalysis');
-  if (dynamic) dynamic.textContent = String(config.dynamicAnalysis);
 
   let regionList = findDescendant(root, 'RegionList');
   if (!regionList) {

@@ -51,6 +51,22 @@ enabled types, e.g. `human`, `human,vehicle`, or empty. The allowed values are
 in `targetType@opt` in the capabilities. If the element is missing, the UI
 creates one with no namespace, which serializes as `<targetType xmlns="">`.
 
+No device was seen sending `TargetDetection`/`detectionTarget` blocks in a
+motion document (the web UI uses `detectionTarget` only as a label), so the
+extension reads and writes only the layout's `targetType`.
+
+## Dynamic analysis
+
+"Dynamic Analysis for Motion" (the web UI's `enableHighLight` label; iVMS
+calls it "Enable Motion Dynamic Analysis") is the root `<enableHighlight>`
+of the motion document. It marks moving objects in live view. The capabilities
+offer it as `<enableHighlight opt="true,false">`. `eventMotion.js` shows the
+checkbox only when the document has the field and saves it in place; the
+DS-7604NI sends it on every channel and keeps a written value.
+
+`enableDynamicAnalysis` is a different setting ("Enable Dynamic Analysis for
+Face Detection") and isn't part of motion documents.
+
 ## Event actions
 
 Motion linkage is the trigger `/ISAPI/Event/triggers/VMD-{id}` (GET and PUT,

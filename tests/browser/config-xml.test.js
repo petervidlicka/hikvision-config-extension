@@ -13,7 +13,10 @@ import { fixtures, motionFixtures } from './fixtures.js';
 
 /**
  * The regex-based motion save from v1.5.0. Its output was verified against
- * a real NVR, so the DOM-based save must produce the same document.
+ * a real NVR, so the DOM-based save must produce the same document — except
+ * that Dynamic Analysis now goes in <enableHighlight>, the motion field the
+ * NVR's web UI writes (v1.5.0 wrote enableDynamicAnalysis, which is face
+ * detection's and absent from motion documents).
  */
 function legacyMotionSave(rawXml, { enabled, sensitivity, dynamicAnalysis, regions }) {
   let regionListXml = `<RegionList size="${regions.length}">`;
@@ -32,9 +35,7 @@ function legacyMotionSave(rawXml, { enabled, sensitivity, dynamicAnalysis, regio
   xml = xml.replace(/<regionType>[^<]*<\/regionType>/, '<regionType>region</regionType>');
   xml = xml.replace(/<gridMap>([^<]*)<\/gridMap>/, (_, hex) => `<gridMap>${'0'.repeat(hex.length)}</gridMap>`);
   xml = xml.replace(/<RegionList[^>]*>[\s\S]*?<\/RegionList>/, regionListXml);
-  if (xml.includes('<enableDynamicAnalysis>')) {
-    xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${dynamicAnalysis}</enableDynamicAnalysis>`);
-  }
+  xml = xml.replace(/<enableHighlight>[^<]*<\/enableHighlight>/, `<enableHighlight>${dynamicAnalysis}</enableHighlight>`);
   return xml;
 }
 
@@ -45,9 +46,38 @@ const regionListMarkup = (xml) => /<RegionList[\s\S]*?<\/RegionList>/.exec(xml)[
 describe('motion detection', () => {
   it('reads the device document', () => {
     const md = readMotionConfig(parseXml(fixtures.motionDetection));
-    expect([md.enabled, md.sensitivity, md.dynamicAnalysis, md.detectHuman, md.detectVehicle])
-      .toEqual([true, 60, false, true, false]);
+    expect([md.enabled, md.sensitivity, md.dynamicAnalysis, md.supportsDynamicAnalysis, md.targetTypes])
+      .toEqual([true, 60, false, true, []]);
     expect(md.regions).toEqual([[{ x: 100, y: 900 }, { x: 600, y: 900 }, { x: 600, y: 300 }, { x: 100, y: 300 }]]);
+  });
+
+  it('reads the NVR’s document, Dynamic Analysis from enableHighlight', () => {
+    const md = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    expect([md.enabled, md.sensitivity, md.dynamicAnalysis, md.supportsDynamicAnalysis]).toEqual([true, 40, true, true]);
+    expect([md.targetTypes, md.detectHuman, md.detectVehicle]).toEqual([['human'], true, false]);
+    expect(md.regions).toEqual([[{ x: 651, y: 684 }, { x: 751, y: 701 }, { x: 952, y: 544 }, { x: 850, y: 147 }, { x: 616, y: 486 }]]);
+  });
+
+  it('shows Dynamic Analysis only when the document has enableHighlight', () => {
+    const without = fixtures.motionDetectionNvr.replace(/<enableHighlight>[^<]*<\/enableHighlight>\n/, '');
+    expect(readMotionConfig(parseXml(without)).supportsDynamicAnalysis).toBe(false);
+    // The face-detection field of a similar name is not the motion setting
+    const faceField = fixtures.motionDetectionNvr.replace(/enableHighlight/g, 'enableDynamicAnalysis');
+    expect(readMotionConfig(parseXml(faceField))).toMatchObject({ dynamicAnalysis: false, supportsDynamicAnalysis: false });
+  });
+
+  it('writes Dynamic Analysis to enableHighlight in either mode, never adding it', () => {
+    const base = { enabled: true, sensitivity: 40, regions: [] };
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    applyMotionConfig(doc, { ...base, dynamicAnalysis: false });
+    expect(serializeXml(doc)).toContain('<enableHighlight>false</enableHighlight>');
+    const grid = readMotionConfig(doc).grid;
+    applyMotionConfig(doc, { ...base, dynamicAnalysis: true, mode: 'grid', grid });
+    expect(serializeXml(doc)).toContain('<enableHighlight>true</enableHighlight>');
+
+    const without = parseXml(fixtures.motionDetectionNvr.replace(/<enableHighlight>[^<]*<\/enableHighlight>/, ''));
+    applyMotionConfig(without, { ...base, dynamicAnalysis: true });
+    expect(serializeXml(without)).not.toMatch(/enableHighlight|enableDynamicAnalysis/);
   });
 
   it('reads the target from layout targetType', () => {
@@ -128,11 +158,10 @@ describe('motion grid (grid-only cameras)', () => {
     expect(encodeGridMap(decodeGridMap(deviceMap, 18, 22), 22)).toBe(deviceMap);
   });
 
-  it('reads the grid and dynamic-analysis support from the config', () => {
-    const md = readMotionConfig(parseXml(fixtures.motionDetection));
-    expect([md.regionType, md.grid?.rows, md.grid?.cols, md.supportsDynamicAnalysis]).toEqual(['grid', 18, 22, true]);
-    const nvr = readMotionConfig(parseXml(fixtures.motionDetection.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, '')));
-    expect(nvr.supportsDynamicAnalysis).toBe(false);
+  it('reads the grid from the config', () => {
+    const md = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    expect([md.regionType, md.grid?.rows, md.grid?.cols]).toEqual(['grid', 18, 22]);
+    expect(encodeGridMap(md.grid.cells, 22)).toBe(deviceMap);
   });
 
   it('saves only the grid in grid mode', () => {

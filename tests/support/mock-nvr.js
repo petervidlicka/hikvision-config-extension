@@ -9,7 +9,7 @@
  *
  * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
  */
-import motionDetection from '../fixtures/motionDetection.xml?raw';
+import motionDetection from '../fixtures/motionDetection-nvr.xml?raw';
 import motionCapabilities from '../fixtures/motionCapabilities-nvr.xml?raw';
 import privacyMaskRegions from '../fixtures/privacyMask-nvr-regions.xml?raw';
 import eventTrigger from '../fixtures/eventTrigger.xml?raw';

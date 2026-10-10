@@ -28,9 +28,4 @@
 </layout>
 <targetType xmlns=""></targetType>
 </MotionDetectionLayout>
-<enableDynamicAnalysis>false</enableDynamicAnalysis>
-<TargetDetection>
-<detectionTarget><targetType>human</targetType><enabled>true</enabled></detectionTarget>
-<detectionTarget><targetType>vehicle</targetType><enabled>false</enabled></detectionTarget>
-</TargetDetection>
 </MotionDetection>
