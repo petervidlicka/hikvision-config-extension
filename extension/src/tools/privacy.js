@@ -7,7 +7,7 @@ import { Isapi } from '../../lib/isapi.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
 import { loadTool } from './registry.js';
-import { activeChannelInfo, errorMessage, setStatus, showToast } from '../ui.js';
+import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
 import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -203,10 +203,9 @@ export const privacyTool = {
           y2: ((reg.y + reg.h) / dom.canvas.height) * normH,
         })),
       });
-      await Isapi.putXml(state.config, /** @type {string} */ (state.privacyPath), doc);
+      const result = await Isapi.putXml(state.config, /** @type {string} */ (state.privacyPath), doc);
       state.privacyDoc = doc;
-      showToast('Privacy mask saved successfully!', 'success');
-      setStatus('Config saved', `Channel ${state.activeChannel}`);
+      reportSaved('Privacy mask', result);
     } catch (err) {
       showToast('Failed to save: ' + errorMessage(err), 'error');
       setStatus('Save failed');

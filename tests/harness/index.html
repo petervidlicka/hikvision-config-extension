@@ -12,7 +12,11 @@
   clicking through UI changes without a device. Run `npm run harness`.
 
   In the console, `mockDevice` exposes requests and saved XML; set
-  `mockDevice.rejectAuth = true` to simulate a password change on the device.
+  `mockDevice.rejectAuth = true` to simulate a password change on the device,
+  `mockDevice.unreachable = true` for a wrong IP address,
+  `mockDevice.writeStatus = {statusCode: 7, statusString: 'Reboot Required', subStatusCode: 'rebootRequired'}`
+  for a save that needs a reboot, or add an error answer to
+  `mockDevice.failures` (see tests/support/mock-nvr.js).
   Use host 192.168.0.108 and any password to connect.
 -->
 <script type="module">

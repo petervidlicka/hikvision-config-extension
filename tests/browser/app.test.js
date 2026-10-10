@@ -5,7 +5,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import appHtml from '../../extension/app.html?raw';
 import '../../extension/app.css';
-import { NVR_HOST, createChromeStub, createMockNvr } from '../support/mock-nvr.js';
+import { NVR_HOST, STATUS, createChromeStub, createMockNvr } from '../support/mock-nvr.js';
 
 let device, chromeStub, state, dom;
 const $ = (id) => document.getElementById(id);
@@ -45,6 +45,21 @@ beforeAll(async () => {
 });
 
 describe('config page', () => {
+  it('says which address didn’t answer when nothing is there', async () => {
+    $('manualEntryBtn').click();
+    $('hostInput').value = NVR_HOST;
+    $('passInput').value = 'test-pass';
+    device.unreachable = true;
+    try {
+      $('connectBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe(`Connection failed: No response from ${NVR_HOST}:80 — check the IP address and port`));
+      expect(state.connected).toBe(false);
+    } finally {
+      device.unreachable = false;
+    }
+    await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+  });
+
   it('connects and lists channels as text', async () => {
     $('manualEntryBtn').click();
     $('hostInput').value = NVR_HOST;
@@ -73,6 +88,8 @@ describe('config page', () => {
     expect(chromeStub.store.local.streamType).toBe('main');
     await vi.waitFor(() => expect(device.requests.at(-1)).toBe('GET /ISAPI/Streaming/channels/101/picture'), { timeout: 3000 });
     expect($('statusRight').textContent).toMatch(/^Channel 1 · HD/);
+    // The SD frame in flight was cancelled, not left running next to the HD one
+    expect(device.maxInFlightSnapshots).toBe(1);
   });
 
   it('loads motion detection with the device limits', async () => {
@@ -137,6 +154,29 @@ describe('config page', () => {
     expect(path).toBe('/ISAPI/Event/triggers/VMD-1');
     expect([...body.matchAll(/<notificationMethod>(\w+)/g)].map(m => m[1])).toEqual(['IO', 'FTP', 'center']);
     expect(body).toContain('<outputIOPortID>2</outputIOPortID>');
+  });
+
+  it('explains a refused save with the device’s reason', async () => {
+    const key = 'PUT /ISAPI/Event/triggers/VMD-1';
+    device.failures[key] = { httpStatus: 403, statusCode: 4, statusString: 'Invalid Operation', subStatusCode: 'lowPrivilege' };
+    try {
+      $('saveEventsBtn').click();
+      await vi.waitFor(() => expect(toast()).toMatch(/^Failed to save event actions: This user account doesn’t have permission/));
+      expect($('statusText').textContent).toBe('Save failed');
+    } finally {
+      delete device.failures[key];
+    }
+  });
+
+  it('tells the user when a save needs a reboot to take effect', async () => {
+    device.writeStatus = { statusCode: 7, statusString: 'Reboot Required', subStatusCode: 'rebootRequired' };
+    try {
+      $('saveEventsBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('Event actions saved — reboot the device for this to take effect'));
+      expect($('statusText').textContent).toBe('Config saved — reboot required');
+    } finally {
+      device.writeStatus = STATUS.ok;
+    }
   });
 
   it('edits the cell grid on a grid-only camera', async () => {

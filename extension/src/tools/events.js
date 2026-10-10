@@ -6,7 +6,7 @@ import { applyNotificationMethods, readNotificationMethods } from '../../lib/con
 import { Isapi } from '../../lib/isapi.js';
 import { byId, state } from '../state.js';
 import { loadTool } from './registry.js';
-import { errorMessage, setStatus, showToast } from '../ui.js';
+import { errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
 import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -119,10 +119,9 @@ export const eventsTool = {
 
     setStatus('Saving event actions...');
     try {
-      await Isapi.putXml(state.config, Isapi.eventTriggerPath(state.activeChannel), doc);
+      const result = await Isapi.putXml(state.config, Isapi.eventTriggerPath(state.activeChannel), doc);
       state.eventTriggerDoc = doc;
-      showToast('Event actions saved successfully!', 'success');
-      setStatus('Config saved', `Channel ${state.activeChannel}`);
+      reportSaved('Event actions', result);
     } catch (err) {
       showToast('Failed to save event actions: ' + errorMessage(err), 'error');
       setStatus('Save failed');

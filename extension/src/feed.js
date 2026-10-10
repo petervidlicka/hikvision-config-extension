@@ -32,6 +32,11 @@ export const GRID_FEED_INTERVAL_MS = 500;
  * scheduled only after the previous one finishes, so a slow device never
  * builds up a queue of overlapping requests.
  *
+ * Each request has a time limit (TIMEOUT_MS.picture in lib/isapi.js), so a
+ * stalled response costs one frame instead of freezing the feed. Stopping
+ * aborts the request in flight, so a channel or stream switch doesn't leave
+ * the device serving a frame nobody will show.
+ *
  * @param {string} channelId
  * @param {object} handlers
  * @param {(blob: Blob) => void} handlers.onFrame
@@ -44,13 +49,14 @@ export function createSnapshotLoop(channelId, { onFrame, onError, stream = 'main
   const config = state.config;
   if (!config) return () => {};
   let stopped = false;
+  const controller = new AbortController();
   /** @type {ReturnType<typeof setTimeout>|undefined} */
   let timer;
 
   const tick = async () => {
     const started = performance.now();
     try {
-      const blob = await Isapi.getSnapshot(config, channelId, stream);
+      const blob = await Isapi.getSnapshot(config, channelId, stream, { signal: controller.signal });
       if (!stopped) {
         onFrame(blob);
         recordFrame();
@@ -70,6 +76,7 @@ export function createSnapshotLoop(channelId, { onFrame, onError, stream = 'main
   return () => {
     stopped = true;
     clearTimeout(timer);
+    controller.abort();
   };
 }
 

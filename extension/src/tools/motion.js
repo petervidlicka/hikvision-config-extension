@@ -7,7 +7,7 @@ import { Isapi } from '../../lib/isapi.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
 import { loadTool } from './registry.js';
-import { activeChannelInfo, errorMessage, setStatus, showToast } from '../ui.js';
+import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
 import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -350,10 +350,9 @@ export const motionTool = {
           : undefined,
       });
 
-      await Isapi.putXml(state.config, Isapi.motionDetectionPath(activeChannelInfo()), doc);
+      const result = await Isapi.putXml(state.config, Isapi.motionDetectionPath(activeChannelInfo()), doc);
       state.motionDoc = doc;
-      showToast('Motion detection saved successfully!', 'success');
-      setStatus('Config saved', `Channel ${state.activeChannel}`);
+      reportSaved('Motion detection', result);
     } catch (err) {
       showToast('Failed to save: ' + errorMessage(err), 'error');
       setStatus('Save failed');

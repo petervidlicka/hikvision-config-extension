@@ -5,6 +5,7 @@
 import { dom, state } from './state.js';
 
 /** @typedef {import('../lib/isapi.js').Channel} Channel */
+/** @typedef {import('../lib/isapi.js').WriteResult} WriteResult */
 
 /**
  * The active channel with its kind, which decides the ISAPI URL family.
@@ -41,6 +42,24 @@ export function showToast(msg, type = 'info') {
   dom.toast.textContent = msg;
   dom.toast.className = `toast ${type} show`;
   setTimeout(() => dom.toast.classList.remove('show'), 3000);
+}
+
+/**
+ * Confirm a save in a toast and the status bar. When the device stored the
+ * change but applies it only after a reboot, say so — otherwise the save
+ * looks like it did nothing.
+ * @param {string} subject - what was saved, e.g. "Motion detection"
+ * @param {WriteResult} result - what Isapi.putXml returned
+ */
+export function reportSaved(subject, result) {
+  const channel = `Channel ${state.activeChannel}`;
+  if (result.rebootRequired) {
+    showToast(`${subject} saved — reboot the device for this to take effect`, 'success');
+    setStatus('Config saved — reboot required', channel);
+  } else {
+    showToast(`${subject} saved successfully!`, 'success');
+    setStatus('Config saved', channel);
+  }
 }
 
 /**

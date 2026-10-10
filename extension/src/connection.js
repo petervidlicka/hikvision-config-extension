@@ -3,6 +3,7 @@
  * connection details.
  */
 
+import { NetworkError } from '../lib/errors.js';
 import { Isapi } from '../lib/isapi.js';
 import { clearFrame, stopAllGridFeeds, stopSnapshotFeed } from './feed.js';
 import { showConnectionForm, showScanIntro } from './scan.js';
@@ -74,13 +75,28 @@ export async function connect() {
 
     await loadChannels();
   } catch (err) {
-    showToast('Connection failed: ' + errorMessage(err), 'error');
+    showToast('Connection failed: ' + connectFailureMessage(err, host, port), 'error');
     setStatus('Connection failed');
     dom.statusDot.classList.remove('connected');
   } finally {
     dom.connectBtn.disabled = false;
     if (dom.connectBtn.querySelector('.loading')) dom.connectBtn.textContent = 'Connect';
   }
+}
+
+/**
+ * Why Connect failed, in words the user can act on. When nothing answers at
+ * all (refused, unreachable or timed out), the address is almost always
+ * wrong, so say which address was tried.
+ * @param {unknown} err
+ * @param {string} host
+ * @param {string} port
+ * @returns {string}
+ */
+function connectFailureMessage(err, host, port) {
+  return err instanceof NetworkError
+    ? `No response from ${host}:${port} — check the IP address and port`
+    : errorMessage(err);
 }
 
 /**
