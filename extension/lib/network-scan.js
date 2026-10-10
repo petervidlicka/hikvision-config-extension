@@ -17,6 +17,10 @@ export const PROBE_TIMEOUT_MS = 1200;
 /**
  * Probe one address. Hikvision ISAPI answers unauthenticated requests with
  * 401 and a Digest challenge; anything else isn't a candidate.
+ * @param {string} ip
+ * @param {AbortSignal} [signal]
+ * @param {number} [timeoutMs]
+ * @returns {Promise<boolean>}
  */
 export async function probeHikvision(ip, signal, timeoutMs = PROBE_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -49,7 +53,7 @@ export async function probeHikvision(ip, signal, timeoutMs = PROBE_TIMEOUT_MS) {
 export function candidateSubnets(knownHosts = []) {
   const known = knownHosts
     .map(h => /^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$/.exec(h || '')?.[1])
-    .filter(Boolean);
+    .filter(/** @returns {s is string} */ s => Boolean(s));
   return [...new Set([...known, ...COMMON_SUBNETS])];
 }
 
@@ -68,6 +72,7 @@ export function candidateSubnets(knownHosts = []) {
  * @returns {Promise<{ip: string, port: number}[]>}
  */
 export async function scanForHikvision({ subnets, signal, onFound, onProgress, probeTimeoutMs = PROBE_TIMEOUT_MS }) {
+  /** @type {{ip: string, port: number}[]} */
   const found = [];
 
   for (const subnet of subnets) {
@@ -75,7 +80,7 @@ export async function scanForHikvision({ subnets, signal, onFound, onProgress, p
     const queue = Array.from({ length: 254 }, (_, i) => `${subnet}.${i + 1}`);
     const worker = async () => {
       while (queue.length > 0 && !signal?.aborted) {
-        const ip = queue.shift();
+        const ip = /** @type {string} */ (queue.shift());
         if (await probeHikvision(ip, signal, probeTimeoutMs)) {
           found.push({ ip, port: 80 });
           onFound?.(ip);

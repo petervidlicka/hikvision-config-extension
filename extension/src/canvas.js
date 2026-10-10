@@ -5,6 +5,11 @@
 import { ctx, dom, state } from './state.js';
 import { ToolRegistry } from './tools/registry.js';
 
+/**
+ * Pointer position in canvas pixels (the canvas is scaled to fit the page).
+ * @param {MouseEvent} e
+ * @returns {import('./state.js').CanvasPoint}
+ */
 export function getCanvasPos(e) {
   const rect = dom.canvas.getBoundingClientRect();
   const scaleX = dom.canvas.width / rect.width;

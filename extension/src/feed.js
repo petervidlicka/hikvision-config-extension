@@ -5,8 +5,8 @@
 import { AuthError } from '../lib/digest-auth.js';
 import { Isapi } from '../lib/isapi.js';
 import { redraw, resizeCanvas } from './canvas.js';
-import { dom, state } from './state.js';
-import { setStatus } from './ui.js';
+import { dom, query, queryAll, state } from './state.js';
+import { errorMessage, setStatus } from './ui.js';
 
 /** Stop all 4-cam grid snapshot loops. */
 export function stopAllGridFeeds() {
@@ -33,17 +33,20 @@ export const SNAPSHOT_INTERVAL_MS = 1000;
  * @param {string} channelId
  * @param {object} handlers
  * @param {(blob: Blob) => void} handlers.onFrame
- * @param {(err: Error) => void} [handlers.onError]
+ * @param {(err: unknown) => void} [handlers.onError]
  * @returns {() => void} stops the loop
  */
 export function createSnapshotLoop(channelId, { onFrame, onError }) {
+  const config = state.config;
+  if (!config) return () => {};
   let stopped = false;
-  let timer = null;
+  /** @type {ReturnType<typeof setTimeout>|undefined} */
+  let timer;
 
   const tick = async () => {
     const started = performance.now();
     try {
-      const blob = await Isapi.getSnapshot(state.config, channelId);
+      const blob = await Isapi.getSnapshot(config, channelId);
       if (!stopped) onFrame(blob);
     } catch (err) {
       if (stopped) return;
@@ -66,6 +69,8 @@ export function createSnapshotLoop(channelId, { onFrame, onError }) {
 /**
  * Show a JPEG blob in an <img>, releasing the previous frame's object URL.
  * Object URLs avoid re-encoding every frame as a base64 data URL.
+ * @param {HTMLImageElement} img
+ * @param {Blob} blob
  */
 export function showFrame(img, blob) {
   const previous = img.dataset.objectUrl;
@@ -75,13 +80,20 @@ export function showFrame(img, blob) {
   if (previous) URL.revokeObjectURL(previous);
 }
 
-/** Clear an <img> that was showing frames from showFrame(). */
+/**
+ * Clear an <img> that was showing frames from showFrame().
+ * @param {HTMLImageElement} img
+ */
 export function clearFrame(img) {
   if (img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
   delete img.dataset.objectUrl;
   img.removeAttribute('src');
 }
 
+/**
+ * Show a live feed of one channel in the single view (and under the config canvas).
+ * @param {string} channelId
+ */
 export function startSnapshotFeed(channelId) {
   stopSnapshotFeed();
 
@@ -98,7 +110,7 @@ export function startSnapshotFeed(channelId) {
   state.stopSnapshotFeed = createSnapshotLoop(channelId, {
     onFrame: blob => showFrame(dom.videoFeed, blob),
     onError: err => {
-      if (frameCount === 0) setStatus('Failed to get video feed: ' + err.message);
+      if (frameCount === 0) setStatus('Failed to get video feed: ' + errorMessage(err));
     },
   });
   setStatus('Streaming snapshots', `Channel ${channelId}`);
@@ -107,15 +119,20 @@ export function startSnapshotFeed(channelId) {
 
 // ─── 4-Camera Grid View ──────────────────────────────────────────────────────
 
+/**
+ * Start (or clear, when `channelId` is null) the feed in one grid cell.
+ * @param {number} cellIdx - 0–3
+ * @param {string|null} channelId
+ */
 export function startGridCellFeed(cellIdx, channelId) {
   state.gridFeedStops[cellIdx]?.();
   state.gridFeedStops[cellIdx] = null;
 
-  const cell = document.querySelectorAll('.grid-cell')[cellIdx];
+  const cell = queryAll(document, '.grid-cell')[cellIdx];
   if (!cell) return;
 
-  const img = cell.querySelector('.grid-feed');
-  const noFeed = cell.querySelector('.grid-no-feed');
+  const img = query(cell, '.grid-feed', HTMLImageElement);
+  const noFeed = query(cell, '.grid-no-feed');
 
   img.classList.remove('loaded');
   clearFrame(img);

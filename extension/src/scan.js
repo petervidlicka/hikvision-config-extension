@@ -4,7 +4,7 @@
 
 import { candidateSubnets, scanForHikvision } from '../lib/network-scan.js';
 import { dom, state } from './state.js';
-import { showToast } from './ui.js';
+import { errorMessage, showToast } from './ui.js';
 
 // ─── Network Scanner ─────────────────────────────────────────────────────────
 
@@ -32,7 +32,7 @@ export async function startScan() {
   try {
     granted = await chrome.permissions.request({ origins: [SCAN_ORIGINS] });
   } catch (err) {
-    showToast('Could not request network access: ' + err.message, 'error');
+    showToast('Could not request network access: ' + errorMessage(err), 'error');
     return;
   }
   if (!granted) {
@@ -67,7 +67,7 @@ export async function startScan() {
     });
     if (!abort.signal.aborted) showScanResults(devices);
   } catch (err) {
-    showToast('Scan error: ' + err.message, 'error');
+    showToast('Scan error: ' + errorMessage(err), 'error');
     showScanResults([]);
   } finally {
     if (state.scanAbort === abort) state.scanAbort = null;
@@ -80,6 +80,10 @@ export function cancelScan() {
   showScanIntro();
 }
 
+/**
+ * Show the devices a scan found, as cards that fill in the connection form.
+ * @param {{ip: string, port: number}[]} devices
+ */
 export function showScanResults(devices) {
   dom.scanProgress.style.display = 'none';
   dom.scanResults.style.display = 'block';
@@ -89,19 +93,23 @@ export function showScanResults(devices) {
     dom.scanDeviceList.innerHTML = '';
   } else {
     dom.scanResultsText.textContent = `Found ${devices.length} Hikvision device${devices.length > 1 ? 's' : ''}. Click one to connect:`;
-    dom.scanDeviceList.innerHTML = devices.map(d => `
-      <div class="scan-device-card" data-ip="${d.ip}" data-port="${d.port || 80}">
-        <div class="scan-device-ip">${d.ip}</div>
-        <div class="scan-device-label">Hikvision NVR / Camera &bull; Port ${d.port || 80}</div>
-      </div>
-    `).join('');
-
-    dom.scanDeviceList.querySelectorAll('.scan-device-card').forEach(card => {
+    dom.scanDeviceList.replaceChildren(...devices.map(d => {
+      const port = d.port || 80;
+      const card = document.createElement('div');
+      card.className = 'scan-device-card';
+      const ip = document.createElement('div');
+      ip.className = 'scan-device-ip';
+      ip.textContent = d.ip;
+      const label = document.createElement('div');
+      label.className = 'scan-device-label';
+      label.textContent = `Hikvision NVR / Camera • Port ${port}`;
+      card.append(ip, label);
       card.addEventListener('click', () => {
-        dom.hostInput.value = card.dataset.ip;
-        dom.portInput.value = card.dataset.port;
+        dom.hostInput.value = d.ip;
+        dom.portInput.value = String(port);
         showConnectionForm();
       });
-    });
+      return card;
+    }));
   }
 }

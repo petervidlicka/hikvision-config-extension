@@ -4,45 +4,55 @@
  */
 
 import { redraw } from '../canvas.js';
-import { dom, state } from '../state.js';
+import { dom, queryAll, state } from '../state.js';
 
 // ─── Tool Registry ──────────────────────────────────────────────────────────
+/** @typedef {import('../state.js').AppState} AppState */
+/** @typedef {import('../state.js').CanvasPoint} CanvasPoint */
+
 /**
- * Central registry for configuration tools.
- * Each tool registers itself with a definition object containing UI, canvas
- * handlers, and ISAPI operations. The registry drives tab generation, sidebar
- * panel rendering, canvas event delegation, and keyboard shortcuts.
- *
- * Tool definition shape:
- * {
- *   id: string,              // unique key, e.g. 'motion'
- *   label: string,           // display name, e.g. 'Motion Detection'
- *   panelHTML: string,       // sidebar panel inner HTML
- *   cursor: string,          // CSS cursor for canvas (default: 'crosshair')
- *   initState: () => object, // returns initial tool-specific state keys
- *   resetState: () => void,  // called on channel switch / disconnect
- *   draw: (ctx, canvas) => void,
- *   onMouseDown: (pos, e) => void,
- *   onMouseMove: (pos, e) => void,
- *   onMouseUp: (pos, e) => void,
- *   load: () => Promise,     // load config from device
- *   save: () => Promise,     // save config to device
- *   bindPanel: () => void,   // bind DOM events after panel HTML is injected
- *   onActivate: () => void,  // called when tool becomes the active tool
- * }
+ * A configuration tool. Each tool owns a sidebar panel, draws on the canvas
+ * over the live feed, and loads/saves one ISAPI resource.
+ * @typedef {object} Tool
+ * @property {string} id - unique key, e.g. "motion"
+ * @property {string} label - display name, e.g. "Motion Detection"
+ * @property {string} panelHTML - sidebar panel markup (static; no device data)
+ * @property {string} [cursor] - CSS cursor over the canvas (default "crosshair")
+ * @property {() => Partial<AppState>} initState - initial values of the tool's state fields
+ * @property {() => void} resetState - called on channel switch
+ * @property {(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => void} draw
+ * @property {(pos: CanvasPoint, e: MouseEvent) => void} onMouseDown
+ * @property {(pos: CanvasPoint, e: MouseEvent) => void} onMouseMove
+ * @property {(pos: CanvasPoint, e: MouseEvent) => void} onMouseUp
+ * @property {(pos: CanvasPoint, e: MouseEvent) => void} [onDblClick]
+ * @property {() => Promise<void>} load - read config from the device
+ * @property {() => Promise<void>} save - write config to the device
+ * @property {() => void} bindPanel - attach listeners once the panel is in the DOM
+ * @property {() => void} [onActivate] - called when the tool becomes active
+ */
+
+/**
+ * Central registry for configuration tools. It drives tab generation,
+ * sidebar panels, canvas event delegation and keyboard shortcuts, so a new
+ * tool only needs a definition and a register() call in main.js.
  */
 export const ToolRegistry = {
+  /** @type {Map<string, Tool>} */
   _tools: new Map(),
+  /** @type {string[]} */
   _order: [],
 
+  /** @param {Tool} def */
   register(def) {
     this._tools.set(def.id, def);
     this._order.push(def.id);
   },
 
-  get(id) { return this._tools.get(id); },
-  getAll() { return this._order.map(id => this._tools.get(id)); },
-  first() { return this._tools.get(this._order[0]); },
+  /** @param {string|null} id */
+  get(id) { return id === null ? undefined : this._tools.get(id); },
+
+  /** @returns {Tool[]} in registration order */
+  getAll() { return this._order.map(id => /** @type {Tool} */ (this._tools.get(id))); },
 };
 
 // ─── Initialize Tool Registry ───────────────────────────────────────────────
@@ -61,8 +71,8 @@ export function initToolRegistry() {
   ).join('');
 
   // Bind tab click handlers
-  dom.configTabs.querySelectorAll('.tool-tab').forEach(tab => {
-    tab.addEventListener('click', () => switchTool(tab.dataset.tool));
+  queryAll(dom.configTabs, '.tool-tab').forEach(tab => {
+    tab.addEventListener('click', () => switchTool(tab.dataset.tool ?? ''));
   });
 
   // Merge initial state from each tool
@@ -75,25 +85,28 @@ export function initToolRegistry() {
 
   // Set default active tool
   state.activeTool = tools[0]?.id || null;
-  if (state.activeTool) {
-    dom.configToggleLabel.textContent = ToolRegistry.get(state.activeTool).label;
-  }
+  dom.configToggleLabel.textContent = ToolRegistry.get(state.activeTool)?.label ?? '';
 }
 
 // ─── Tool Switching ─────────────────────────────────────────────────────────
 
+/**
+ * Make a tool active: tabs, panel, cursor; loads its settings when in
+ * the Configuration section.
+ * @param {string} toolId
+ */
 export function switchTool(toolId) {
   const tool = ToolRegistry.get(toolId);
   if (!tool) return;
   state.activeTool = toolId;
 
   // Update config sub-tab active states
-  dom.configTabs.querySelectorAll('.tool-tab').forEach(tab => {
+  queryAll(dom.configTabs, '.tool-tab').forEach(tab => {
     tab.classList.toggle('active', tab.dataset.tool === toolId);
   });
 
   // Update sidebar tool panels
-  dom.configPanels.querySelectorAll('.tool-panel').forEach(panel => {
+  queryAll(dom.configPanels, '.tool-panel').forEach(panel => {
     panel.classList.toggle('active', panel.dataset.toolPanel === toolId);
   });
 
@@ -108,13 +121,25 @@ export function switchTool(toolId) {
   redraw();
 
   // Auto-load settings from device when switching tools in config mode
-  if (state.activeSection === 'config' && state.activeChannel && tool.load) {
-    setToolPanelLoading(toolId, true);
-    tool.load().then(() => {
-      setToolPanelLoading(toolId, false);
-    }).catch(() => {
-      setToolPanelLoading(toolId, false);
-    });
+  if (state.activeSection === 'config' && state.activeChannel) {
+    loadTool(toolId);
+  }
+}
+
+/**
+ * Load a tool's settings from the device, dimming its panel meanwhile so
+ * nobody edits settings that are about to be replaced. Tools report their
+ * own load errors, so this never rejects for an expected failure.
+ * @param {string|null} toolId
+ */
+export async function loadTool(toolId) {
+  const tool = ToolRegistry.get(toolId);
+  if (!tool || toolId === null) return;
+  setToolPanelLoading(toolId, true);
+  try {
+    await tool.load();
+  } finally {
+    setToolPanelLoading(toolId, false);
   }
 }
 
@@ -123,13 +148,15 @@ export function switchTool(toolId) {
  * When loading, all interactive elements (inputs, buttons, toggles) are
  * disabled and the panel is visually dimmed so users know the settings
  * haven't been loaded yet.
+ * @param {string} toolId
+ * @param {boolean} isLoading
  */
 export function setToolPanelLoading(toolId, isLoading) {
   const panel = dom.configPanels.querySelector(`[data-tool-panel="${toolId}"]`);
   if (!panel) return;
   panel.classList.toggle('tool-loading', isLoading);
   // Disable/enable all interactive children
-  panel.querySelectorAll('input, button, select, .toggle').forEach(el => {
+  queryAll(panel, 'input, button, select, .toggle').forEach(el => {
     if (isLoading) {
       el.dataset.wasDisabled = el.hasAttribute('disabled') ? 'true' : 'false';
       el.setAttribute('disabled', '');

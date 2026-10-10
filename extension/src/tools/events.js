@@ -4,9 +4,10 @@
 
 import { applyNotificationMethods, readNotificationMethods } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
-import { state } from '../state.js';
-import { setToolPanelLoading } from './registry.js';
-import { setStatus, showToast } from '../ui.js';
+import { byId, state } from '../state.js';
+import { loadTool } from './registry.js';
+import { errorMessage, setStatus, showToast } from '../ui.js';
+import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL: Event Actions (motion detection linkage methods)
@@ -26,6 +27,9 @@ export const EVENT_ACTIONS = [
   { key: 'audio',      method: 'audio',      label: 'Audio Alarm',        description: 'Play warning from camera speaker' },
 ];
 
+/** @typedef {import('./registry.js').Tool} Tool */
+
+/** @satisfies {Tool} */
 export const eventsTool = {
   id: 'events',
   label: 'Event Actions',
@@ -50,6 +54,7 @@ export const eventsTool = {
   `,
 
   initState() {
+    /** @type {Record<string, boolean>} */
     const eventActions = {};
     EVENT_ACTIONS.forEach(a => { eventActions[a.key] = false; });
     return {
@@ -93,7 +98,7 @@ export const eventsTool = {
       showToast('Event actions loaded', 'success');
       setStatus('Config loaded', `Channel ${state.activeChannel}`);
     } catch (err) {
-      showToast('Failed to load event actions: ' + err.message, 'error');
+      showToast('Failed to load event actions: ' + errorMessage(err), 'error');
       setStatus('Failed to load config');
     }
   },
@@ -105,7 +110,7 @@ export const eventsTool = {
       return;
     }
 
-    const doc = state.eventTriggerDoc.cloneNode(true);
+    const doc = cloneXml(state.eventTriggerDoc);
     applyNotificationMethods(doc, {
       managed: EVENT_ACTIONS.map(a => a.method),
       enabled: new Set(EVENT_ACTIONS.filter(a => state.eventActions[a.key]).map(a => a.method)),
@@ -119,7 +124,7 @@ export const eventsTool = {
       showToast('Event actions saved successfully!', 'success');
       setStatus('Config saved', `Channel ${state.activeChannel}`);
     } catch (err) {
-      showToast('Failed to save event actions: ' + err.message, 'error');
+      showToast('Failed to save event actions: ' + errorMessage(err), 'error');
       setStatus('Save failed');
     }
   },
@@ -127,17 +132,15 @@ export const eventsTool = {
   bindPanel() {
     // Bind toggle clicks
     EVENT_ACTIONS.forEach(a => {
-      document.getElementById(`eventToggle_${a.key}`).addEventListener('click', () => {
+      const toggle = byId(`eventToggle_${a.key}`);
+      toggle.addEventListener('click', () => {
         state.eventActions[a.key] = !state.eventActions[a.key];
-        document.getElementById(`eventToggle_${a.key}`).classList.toggle('on', state.eventActions[a.key]);
+        toggle.classList.toggle('on', state.eventActions[a.key]);
       });
     });
 
-    document.getElementById('loadEventsBtn').addEventListener('click', () => {
-      setToolPanelLoading('events', true);
-      this.load().then(() => setToolPanelLoading('events', false)).catch(() => setToolPanelLoading('events', false));
-    });
-    document.getElementById('saveEventsBtn').addEventListener('click', () => this.save());
+    byId('loadEventsBtn').addEventListener('click', () => loadTool('events'));
+    byId('saveEventsBtn').addEventListener('click', () => this.save());
   },
 
   onActivate() {},

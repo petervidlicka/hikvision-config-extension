@@ -8,7 +8,7 @@ import { clearFrame, stopAllGridFeeds, stopSnapshotFeed } from './feed.js';
 import { showConnectionForm, showScanIntro } from './scan.js';
 import { dom, state } from './state.js';
 import { ToolRegistry } from './tools/registry.js';
-import { channelLabel, setStatus, showToast } from './ui.js';
+import { channelLabel, errorMessage, setStatus, showToast } from './ui.js';
 import { selectChannel, switchSection } from './views.js';
 
 /**
@@ -73,7 +73,7 @@ export async function connect() {
 
     await loadChannels();
   } catch (err) {
-    showToast('Connection failed: ' + err.message, 'error');
+    showToast('Connection failed: ' + errorMessage(err), 'error');
     setStatus('Connection failed');
     dom.statusDot.classList.remove('connected');
   } finally {
@@ -85,6 +85,10 @@ export async function connect() {
 /**
  * Remember connection details. The password goes to session storage (memory
  * only, cleared when Chrome closes) unless the user opted to keep it on disk.
+ * @param {string} host
+ * @param {string} port
+ * @param {string} username
+ * @param {string} password
  */
 export function saveConnectionDetails(host, port, username, password) {
   const remember = dom.savePassCheck.checked;
@@ -137,7 +141,9 @@ export function disconnect() {
   setStatus('Ready');
 }
 
+/** Fetch the channel list and show it in the sidebar. */
 export async function loadChannels() {
+  if (!state.config) return;
   try {
     state.channels = await Isapi.getChannels(state.config);
     dom.channelList.innerHTML = '';
@@ -167,7 +173,7 @@ export async function loadChannels() {
       selectChannel(state.channels[0].id, dom.channelList.children[0]);
     }
   } catch (err) {
-    showToast('Failed to load channels: ' + err.message, 'error');
+    showToast('Failed to load channels: ' + errorMessage(err), 'error');
   }
 }
 
@@ -178,18 +184,18 @@ export async function loadChannels() {
  */
 export function loadSavedCredentials() {
   chrome.storage.local.get(['host', 'port', 'username', 'password', 'savePassword'], async (data) => {
-    if (data.host) dom.hostInput.value = data.host;
-    if (data.port) dom.portInput.value = data.port;
-    if (data.username) dom.userInput.value = data.username;
+    if (data.host) dom.hostInput.value = String(data.host);
+    if (data.port) dom.portInput.value = String(data.port);
+    if (data.username) dom.userInput.value = String(data.username);
     if (data.savePassword) {
       dom.savePassCheck.checked = true;
-      if (data.password) dom.passInput.value = data.password;
+      if (data.password) dom.passInput.value = String(data.password);
       return;
     }
     // Clean up a password left on disk by older versions that saved it unconditionally
     if (data.password) chrome.storage.local.remove('password');
     const session = await chrome.storage.session.get('password');
-    if (session.password) dom.passInput.value = session.password;
+    if (session.password) dom.passInput.value = String(session.password);
   });
 
 }

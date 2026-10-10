@@ -5,15 +5,21 @@
 import { MOTION_COORDINATE_SCALE, applyMotionConfig, readMotionCapabilities, readMotionConfig } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
 import { redraw } from '../canvas.js';
-import { dom, state } from '../state.js';
-import { setToolPanelLoading } from './registry.js';
-import { activeChannelInfo, setStatus, showToast } from '../ui.js';
+import { byId, dom, queryAll, state } from '../state.js';
+import { loadTool } from './registry.js';
+import { activeChannelInfo, errorMessage, setStatus, showToast } from '../ui.js';
+import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL: Motion Detection (polygon region-based)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/** Check if a point is inside a polygon using ray casting. */
+/**
+ * Check if a point is inside a polygon using ray casting.
+ * @param {number} px
+ * @param {number} py
+ * @param {import('../state.js').CanvasPoint[]} points
+ */
 export function pointInPolygon(px, py, points) {
   let inside = false;
   for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
@@ -26,6 +32,9 @@ export function pointInPolygon(px, py, points) {
   return inside;
 }
 
+/** @typedef {import('./registry.js').Tool} Tool */
+
+/** @satisfies {Tool} */
 export const motionTool = {
   id: 'motion',
   label: 'Motion Detection',
@@ -164,7 +173,7 @@ export const motionTool = {
       for (let i = state.motionRegions.length - 1; i >= 0; i--) {
         if (pointInPolygon(pos.x, pos.y, state.motionRegions[i].points)) {
           state.motionRegions.splice(i, 1);
-          this._updateRegionList();
+          updateRegionList();
           redraw();
           break;
         }
@@ -176,7 +185,7 @@ export const motionTool = {
 
     // Clicking near the start vertex closes the polygon
     if (pts.length >= 2 && Math.hypot(pos.x - pts[0].x, pos.y - pts[0].y) < 12) {
-      this._closePolygon();
+      closePolygon();
       return;
     }
 
@@ -191,41 +200,13 @@ export const motionTool = {
 
     pts.push({ x: pos.x, y: pos.y });
     if (pts.length >= state.motionCaps.maxPoints) {
-      this._closePolygon();
+      closePolygon();
       return;
     }
     redraw();
   },
 
-  /**
-   * Finish the polygon being drawn. Too few corners keeps it open — the
-   * device rejects regions below its minimum.
-   */
-  _closePolygon() {
-    const { minPoints } = state.motionCaps;
-    if (state.drawingPoints.length < minPoints) {
-      showToast(`A detection region needs at least ${minPoints} corners`, 'error');
-      return;
-    }
-    state.motionRegions.push({ points: [...state.drawingPoints] });
-    state.drawingPoints = [];
-    this._updateRegionList();
-    redraw();
-  },
 
-  /** Apply the device's limits to the panel controls. */
-  _applyCapabilities() {
-    const caps = state.motionCaps;
-    const slider = document.getElementById('sensitivitySlider');
-    slider.min = caps.sensitivity.min;
-    slider.max = caps.sensitivity.max;
-    slider.step = caps.sensitivity.step;
-    document.getElementById('motionMaxRegions').textContent = caps.maxRegions;
-    document.getElementById('motionPointRange').textContent = `${caps.minPoints}–${caps.maxPoints}`;
-    document.getElementById('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';
-    document.getElementById('detectVehicleLabel').style.display = caps.targetTypes.includes('vehicle') ? '' : 'none';
-    document.getElementById('targetDetectionRow').style.display = caps.targetTypes.length ? '' : 'none';
-  },
 
   onMouseMove(pos, e) {
     state.mousePos = pos;
@@ -239,7 +220,7 @@ export const motionTool = {
   },
 
   onDblClick(pos, e) {
-    if (state.drawingPoints.length > 0) this._closePolygon();
+    if (state.drawingPoints.length > 0) closePolygon();
   },
 
   async load() {
@@ -253,16 +234,16 @@ export const motionTool = {
       ]);
       state.motionDoc = doc;
       state.motionCaps = readMotionCapabilities(capsDoc);
-      this._applyCapabilities();
+      applyCapabilities();
       const md = readMotionConfig(doc);
 
       state.motionEnabled = md.enabled;
-      document.getElementById('motionToggle').classList.toggle('on', state.motionEnabled);
+      byId('motionToggle').classList.toggle('on', state.motionEnabled);
 
       if (md.sensitivity !== null) {
         state.sensitivity = md.sensitivity;
-        document.getElementById('sensitivitySlider').value = md.sensitivity;
-        document.getElementById('sensitivityVal').textContent = md.sensitivity;
+        byId('sensitivitySlider', HTMLInputElement).value = String(md.sensitivity);
+        byId('sensitivityVal').textContent = String(md.sensitivity);
       }
 
       // Device coordinates are 0–1000 with Y=0 at the bottom; the canvas has Y=0 at the top
@@ -276,18 +257,18 @@ export const motionTool = {
       state.drawingPoints = [];
 
       state.dynamicAnalysis = md.dynamicAnalysis;
-      document.getElementById('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
+      byId('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
       state.detectHuman = md.targetTypes.includes('human');
       state.detectVehicle = md.targetTypes.includes('vehicle');
-      document.getElementById('detectHuman').checked = state.detectHuman;
-      document.getElementById('detectVehicle').checked = state.detectVehicle;
+      byId('detectHuman', HTMLInputElement).checked = state.detectHuman;
+      byId('detectVehicle', HTMLInputElement).checked = state.detectVehicle;
 
-      this._updateRegionList();
+      updateRegionList();
       redraw();
       showToast('Motion detection config loaded', 'success');
       setStatus('Config loaded', `Channel ${state.activeChannel}`);
     } catch (err) {
-      showToast('Failed to load motion config: ' + err.message, 'error');
+      showToast('Failed to load motion config: ' + errorMessage(err), 'error');
       setStatus('Failed to load config');
     }
   },
@@ -310,13 +291,14 @@ export const motionTool = {
 
     // Snap to the device's sensitivity steps (e.g. 0, 20, … 100)
     const { min, max, step } = caps.sensitivity;
-    const rawSensitivity = Number(document.getElementById('sensitivitySlider').value);
+    const rawSensitivity = Number(byId('sensitivitySlider', HTMLInputElement).value);
     const sensitivity = Math.min(max, Math.max(min, min + Math.round((rawSensitivity - min) / step) * step));
 
     const scale = MOTION_COORDINATE_SCALE;
+    /** @param {number} v - fraction of the image, 0–1 */
     const toDevice = v => Math.min(scale, Math.max(0, Math.round(v * scale)));
     // Edit a copy so a failed save leaves the loaded config intact
-    const doc = state.motionDoc.cloneNode(true);
+    const doc = cloneXml(state.motionDoc);
 
     setStatus('Saving motion detection config...');
     try {
@@ -339,67 +321,95 @@ export const motionTool = {
       showToast('Motion detection saved successfully!', 'success');
       setStatus('Config saved', `Channel ${state.activeChannel}`);
     } catch (err) {
-      showToast('Failed to save: ' + err.message, 'error');
+      showToast('Failed to save: ' + errorMessage(err), 'error');
       setStatus('Save failed');
     }
   },
 
   bindPanel() {
-    document.getElementById('motionToggle').addEventListener('click', () => {
+    byId('motionToggle').addEventListener('click', () => {
       state.motionEnabled = !state.motionEnabled;
-      document.getElementById('motionToggle').classList.toggle('on', state.motionEnabled);
+      byId('motionToggle').classList.toggle('on', state.motionEnabled);
     });
 
-    document.getElementById('sensitivitySlider').addEventListener('input', function () {
-      document.getElementById('sensitivityVal').textContent = this.value;
+    byId('sensitivitySlider', HTMLInputElement).addEventListener('input', function () {
+      byId('sensitivityVal').textContent = this.value;
     });
 
-    document.getElementById('dynamicAnalysisToggle').addEventListener('click', () => {
+    byId('dynamicAnalysisToggle').addEventListener('click', () => {
       state.dynamicAnalysis = !state.dynamicAnalysis;
-      document.getElementById('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
+      byId('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
     });
 
-    document.getElementById('detectHuman').addEventListener('change', function () {
+    byId('detectHuman', HTMLInputElement).addEventListener('change', function () {
       state.detectHuman = this.checked;
     });
-    document.getElementById('detectVehicle').addEventListener('change', function () {
+    byId('detectVehicle', HTMLInputElement).addEventListener('change', function () {
       state.detectVehicle = this.checked;
     });
 
-    document.getElementById('clearMotionRegionsBtn').addEventListener('click', () => {
+    byId('clearMotionRegionsBtn').addEventListener('click', () => {
       state.motionRegions = [];
       state.drawingPoints = [];
-      this._updateRegionList();
+      updateRegionList();
       redraw();
     });
 
-    document.getElementById('loadMotionBtn').addEventListener('click', () => {
-      setToolPanelLoading('motion', true);
-      this.load().then(() => setToolPanelLoading('motion', false)).catch(() => setToolPanelLoading('motion', false));
-    });
-    document.getElementById('saveMotionBtn').addEventListener('click', () => this.save());
+    byId('loadMotionBtn').addEventListener('click', () => loadTool('motion'));
+    byId('saveMotionBtn').addEventListener('click', () => this.save());
   },
 
   onActivate() {},
 
-  /** Render the region list in the sidebar. */
-  _updateRegionList() {
-    const list = document.getElementById('motionRegionList');
-    if (!list) return;
-    list.innerHTML = state.motionRegions.map((r, i) => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;font-family:var(--mono)">
-        <span style="color:var(--text-dim)">Region ${i + 1} (${r.points.length} pts)</span>
-        <button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete-motion="${i}">x</button>
-      </div>
-    `).join('');
-
-    list.querySelectorAll('[data-delete-motion]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = parseInt(btn.dataset.deleteMotion);
-        state.motionRegions.splice(idx, 1);
-        this._updateRegionList();
-        redraw();
-      });
-    });
-  },
 };
+
+/** Render the region list in the sidebar. */
+function updateRegionList() {
+  const list = byId('motionRegionList');
+  if (!list) return;
+  list.innerHTML = state.motionRegions.map((r, i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;font-family:var(--mono)">
+      <span style="color:var(--text-dim)">Region ${i + 1} (${r.points.length} pts)</span>
+      <button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete-motion="${i}">x</button>
+    </div>
+  `).join('');
+
+  queryAll(list, '[data-delete-motion]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.deleteMotion ?? '', 10);
+      state.motionRegions.splice(idx, 1);
+      updateRegionList();
+      redraw();
+    });
+  });
+}
+
+/**
+ * Finish the polygon being drawn. Too few corners keeps it open — the
+ * device rejects regions below its minimum.
+ */
+function closePolygon() {
+  const { minPoints } = state.motionCaps;
+  if (state.drawingPoints.length < minPoints) {
+    showToast(`A detection region needs at least ${minPoints} corners`, 'error');
+    return;
+  }
+  state.motionRegions.push({ points: [...state.drawingPoints] });
+  state.drawingPoints = [];
+  updateRegionList();
+  redraw();
+}
+
+/** Apply the device's limits to the panel controls. */
+function applyCapabilities() {
+  const caps = state.motionCaps;
+  const slider = byId('sensitivitySlider', HTMLInputElement);
+  slider.min = String(caps.sensitivity.min);
+  slider.max = String(caps.sensitivity.max);
+  slider.step = String(caps.sensitivity.step);
+  byId('motionMaxRegions').textContent = String(caps.maxRegions);
+  byId('motionPointRange').textContent = `${caps.minPoints}–${caps.maxPoints}`;
+  byId('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';
+  byId('detectVehicleLabel').style.display = caps.targetTypes.includes('vehicle') ? '' : 'none';
+  byId('targetDetectionRow').style.display = caps.targetTypes.length ? '' : 'none';
+}

@@ -5,14 +5,18 @@
 import { applyPrivacyMask, readPrivacyMask } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
 import { redraw } from '../canvas.js';
-import { dom, state } from '../state.js';
-import { setToolPanelLoading } from './registry.js';
-import { activeChannelInfo, setStatus, showToast } from '../ui.js';
+import { byId, dom, queryAll, state } from '../state.js';
+import { loadTool } from './registry.js';
+import { activeChannelInfo, errorMessage, setStatus, showToast } from '../ui.js';
+import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL: Privacy Mask
 // ═══════════════════════════════════════════════════════════════════════════
 
+/** @typedef {import('./registry.js').Tool} Tool */
+
+/** @satisfies {Tool} */
 export const privacyTool = {
   id: 'privacy',
   label: 'Privacy Mask',
@@ -101,7 +105,7 @@ export const privacyTool = {
         const r = state.privacyRegions[i];
         if (pos.x >= r.x && pos.x <= r.x + r.w && pos.y >= r.y && pos.y <= r.y + r.h) {
           state.privacyRegions.splice(i, 1);
-          this._updateRegionList();
+          updateRegionList();
           redraw();
           break;
         }
@@ -130,7 +134,7 @@ export const privacyTool = {
       const h = Math.abs(pos.y - state.drawStart.y);
       if (w > 10 && h > 10) {
         state.privacyRegions.push({ x, y, w, h });
-        this._updateRegionList();
+        updateRegionList();
       }
     }
   },
@@ -145,7 +149,7 @@ export const privacyTool = {
       const pm = readPrivacyMask(doc);
 
       state.privacyEnabled = pm.enabled;
-      document.getElementById('privacyToggle').classList.toggle('on', state.privacyEnabled);
+      byId('privacyToggle').classList.toggle('on', state.privacyEnabled);
 
       // Use the coordinate space the device declares; otherwise guess between
       // the 704x576 grid of older firmware and a 0–10000 normalized range
@@ -166,12 +170,12 @@ export const privacyTool = {
         };
       });
 
-      this._updateRegionList();
+      updateRegionList();
       redraw();
       showToast('Privacy mask config loaded', 'success');
       setStatus('Config loaded', `Channel ${state.activeChannel}`);
     } catch (err) {
-      showToast('Failed to load privacy mask: ' + err.message, 'error');
+      showToast('Failed to load privacy mask: ' + errorMessage(err), 'error');
       setStatus('Failed to load config');
     }
   },
@@ -186,7 +190,7 @@ export const privacyTool = {
     // Use the same coordinate scale that was detected on load
     const normW = state.privacyNormW;
     const normH = state.privacyNormH;
-    const doc = state.privacyDoc.cloneNode(true);
+    const doc = cloneXml(state.privacyDoc);
 
     setStatus('Saving privacy mask config...');
     try {
@@ -199,54 +203,51 @@ export const privacyTool = {
           y2: ((reg.y + reg.h) / dom.canvas.height) * normH,
         })),
       });
-      await Isapi.putXml(state.config, state.privacyPath, doc);
+      await Isapi.putXml(state.config, /** @type {string} */ (state.privacyPath), doc);
       state.privacyDoc = doc;
       showToast('Privacy mask saved successfully!', 'success');
       setStatus('Config saved', `Channel ${state.activeChannel}`);
     } catch (err) {
-      showToast('Failed to save: ' + err.message, 'error');
+      showToast('Failed to save: ' + errorMessage(err), 'error');
       setStatus('Save failed');
     }
   },
 
   bindPanel() {
-    document.getElementById('privacyToggle').addEventListener('click', () => {
+    byId('privacyToggle').addEventListener('click', () => {
       state.privacyEnabled = !state.privacyEnabled;
-      document.getElementById('privacyToggle').classList.toggle('on', state.privacyEnabled);
+      byId('privacyToggle').classList.toggle('on', state.privacyEnabled);
     });
 
-    document.getElementById('clearPrivacyBtn').addEventListener('click', () => {
+    byId('clearPrivacyBtn').addEventListener('click', () => {
       state.privacyRegions = [];
-      this._updateRegionList();
+      updateRegionList();
       redraw();
     });
 
-    document.getElementById('loadPrivacyBtn').addEventListener('click', () => {
-      setToolPanelLoading('privacy', true);
-      this.load().then(() => setToolPanelLoading('privacy', false)).catch(() => setToolPanelLoading('privacy', false));
-    });
-    document.getElementById('savePrivacyBtn').addEventListener('click', () => this.save());
+    byId('loadPrivacyBtn').addEventListener('click', () => loadTool('privacy'));
+    byId('savePrivacyBtn').addEventListener('click', () => this.save());
   },
 
   onActivate() {},
-
-  /** Render the region list in the sidebar. */
-  _updateRegionList() {
-    const list = document.getElementById('privacyRegionList');
-    list.innerHTML = state.privacyRegions.map((r, i) => `
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;font-family:var(--mono)">
-        <span style="color:var(--text-dim)">Region ${i + 1}</span>
-        <button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete="${i}">x</button>
-      </div>
-    `).join('');
-
-    list.querySelectorAll('[data-delete]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = parseInt(btn.dataset.delete);
-        state.privacyRegions.splice(idx, 1);
-        this._updateRegionList();
-        redraw();
-      });
-    });
-  },
 };
+
+/** Render the region list in the sidebar. */
+function updateRegionList() {
+  const list = byId('privacyRegionList');
+  list.innerHTML = state.privacyRegions.map((r, i) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;font-family:var(--mono)">
+      <span style="color:var(--text-dim)">Region ${i + 1}</span>
+      <button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete="${i}">x</button>
+    </div>
+  `).join('');
+
+  queryAll(list, '[data-delete]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const idx = parseInt(btn.dataset.delete ?? '', 10);
+      state.privacyRegions.splice(idx, 1);
+      updateRegionList();
+      redraw();
+    });
+  });
+}

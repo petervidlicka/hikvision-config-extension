@@ -6,7 +6,7 @@ import { Isapi } from '../lib/isapi.js';
 import { bindCanvasEvents, redraw, resizeCanvas } from './canvas.js';
 import { connect, disconnect, handleAuthFailure, loadSavedCredentials } from './connection.js';
 import { cancelScan, showConnectionForm, showScanIntro, startScan } from './scan.js';
-import { dom, state } from './state.js';
+import { byId, dom, state } from './state.js';
 import { eventsTool } from './tools/events.js';
 import { motionTool } from './tools/motion.js';
 import { privacyTool } from './tools/privacy.js';
@@ -17,29 +17,29 @@ import { switchSection, switchToGridView, switchToLiveViewSingle, toggleMaximize
 function bindAppEvents() {
 
   // Section tabs
-  document.getElementById('liveViewSectionTab').addEventListener('click', () => switchSection('liveview'));
-  document.getElementById('configSectionTab').addEventListener('click', () => switchSection('config'));
+  byId('liveViewSectionTab').addEventListener('click', () => switchSection('liveview'));
+  byId('configSectionTab').addEventListener('click', () => switchSection('config'));
 
   // Live View sub-tabs
-  document.getElementById('singleViewTab').addEventListener('click', () => {
+  byId('singleViewTab').addEventListener('click', () => {
     state.viewMode = 'single';
     switchToLiveViewSingle();
   });
-  document.getElementById('gridViewTab').addEventListener('click', switchToGridView);
+  byId('gridViewTab').addEventListener('click', switchToGridView);
 
   // Config section collapse toggle
-  document.getElementById('configToggleBtn').addEventListener('click', toggleConfig);
+  byId('configToggleBtn').addEventListener('click', toggleConfig);
 
   // Scan flow
-  document.getElementById('startScanBtn').addEventListener('click', startScan);
-  document.getElementById('manualEntryBtn').addEventListener('click', showConnectionForm);
-  document.getElementById('cancelScanBtn').addEventListener('click', cancelScan);
-  document.getElementById('rescanBtn').addEventListener('click', startScan);
-  document.getElementById('manualAfterScanBtn').addEventListener('click', showConnectionForm);
-  document.getElementById('backToScanBtn').addEventListener('click', showScanIntro);
+  byId('startScanBtn').addEventListener('click', startScan);
+  byId('manualEntryBtn').addEventListener('click', showConnectionForm);
+  byId('cancelScanBtn').addEventListener('click', cancelScan);
+  byId('rescanBtn').addEventListener('click', startScan);
+  byId('manualAfterScanBtn').addEventListener('click', showConnectionForm);
+  byId('backToScanBtn').addEventListener('click', showScanIntro);
 
   dom.connectBtn.addEventListener('click', connect);
-  document.getElementById('disconnectBtn').addEventListener('click', disconnect);
+  byId('disconnectBtn').addEventListener('click', disconnect);
 
   // Allow Enter key to connect
   dom.passInput.addEventListener('keydown', (e) => {
@@ -52,7 +52,7 @@ function bindAppEvents() {
   });
 
   document.addEventListener('keydown', (e) => {
-    if (e.target.tagName === 'INPUT') return;
+    if (e.target instanceof HTMLInputElement) return;
 
     // Context-dependent number shortcuts
     const tools = ToolRegistry.getAll();

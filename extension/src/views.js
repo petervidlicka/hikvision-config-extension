@@ -4,10 +4,16 @@
  */
 
 import { startGridCellFeed, startSnapshotFeed, stopAllGridFeeds, stopSnapshotFeed } from './feed.js';
-import { dom, state } from './state.js';
-import { ToolRegistry, expandConfig, setToolPanelLoading } from './tools/registry.js';
+import { byId, dom, query, queryAll, state } from './state.js';
+import { ToolRegistry, expandConfig, loadTool } from './tools/registry.js';
 import { channelLabel, setStatus, showToast } from './ui.js';
 
+/**
+ * Select a channel: highlight it, start its feed, and load the active
+ * tool's settings when in the Configuration section.
+ * @param {string} channelId
+ * @param {Element|undefined} element - its entry in the channel list
+ */
 export async function selectChannel(channelId, element) {
   // If in grid view, switch back to single camera mode
   if (state.viewMode === 'grid') {
@@ -28,26 +34,22 @@ export async function selectChannel(channelId, element) {
   // Only load config and expand panel if in Configuration section
   if (state.activeSection === 'config') {
     expandConfig();
-    const tool = ToolRegistry.get(state.activeTool);
-    if (tool?.load) {
-      setToolPanelLoading(state.activeTool, true);
-      tool.load().then(() => {
-        setToolPanelLoading(state.activeTool, false);
-      }).catch(() => {
-        setToolPanelLoading(state.activeTool, false);
-      });
-    }
+    loadTool(state.activeTool);
   }
 }
 
 
 // ─── Section Navigation ──────────────────────────────────────────────────────
 
+/**
+ * Switch between the Live View and Configuration sections.
+ * @param {'liveview'|'config'} section
+ */
 export function switchSection(section) {
   state.activeSection = section;
 
-  document.getElementById('liveViewSectionTab').classList.toggle('active', section === 'liveview');
-  document.getElementById('configSectionTab').classList.toggle('active', section === 'config');
+  byId('liveViewSectionTab').classList.toggle('active', section === 'liveview');
+  byId('configSectionTab').classList.toggle('active', section === 'config');
 
   dom.liveViewTabs.style.display = section === 'liveview' ? 'flex' : 'none';
   dom.configTabs.style.display = section === 'config' ? 'flex' : 'none';
@@ -77,18 +79,11 @@ export function switchSection(section) {
     expandConfig();
     if (state.activeChannel) {
       startSnapshotFeed(state.activeChannel);
-      if (tool?.load) {
-        setToolPanelLoading(state.activeTool, true);
-        tool.load().then(() => {
-          setToolPanelLoading(state.activeTool, false);
-        }).catch(() => {
-          setToolPanelLoading(state.activeTool, false);
-        });
-      }
+      loadTool(state.activeTool);
     }
 
     // Update config sub-tab active states
-    dom.configTabs.querySelectorAll('.tool-tab').forEach(tab => {
+    queryAll(dom.configTabs, '.tool-tab').forEach(tab => {
       tab.classList.toggle('active', tab.dataset.tool === state.activeTool);
     });
   }
@@ -101,8 +96,8 @@ export function switchToLiveViewSingle() {
   dom.canvasContainer.style.display = '';
   dom.gridView.style.display = 'none';
 
-  document.getElementById('singleViewTab').classList.toggle('active', true);
-  document.getElementById('gridViewTab').classList.toggle('active', false);
+  byId('singleViewTab').classList.toggle('active', true);
+  byId('gridViewTab').classList.toggle('active', false);
 
   if (state.activeChannel) {
     startSnapshotFeed(state.activeChannel);
@@ -125,8 +120,8 @@ export function switchToGridView() {
   dom.canvasContainer.style.display = 'none';
   dom.gridView.style.display = 'grid';
 
-  document.getElementById('singleViewTab').classList.toggle('active', false);
-  document.getElementById('gridViewTab').classList.toggle('active', true);
+  byId('singleViewTab').classList.toggle('active', false);
+  byId('gridViewTab').classList.toggle('active', true);
 
   // Clear any maximized state
   dom.gridView.classList.remove('maximized');
@@ -142,9 +137,9 @@ export function switchToGridView() {
     }
   }
 
-  const cells = document.querySelectorAll('.grid-cell');
+  const cells = queryAll(document, '.grid-cell');
   cells.forEach((cell, idx) => {
-    const picker = cell.querySelector('.grid-channel-picker');
+    const picker = query(cell, '.grid-channel-picker', HTMLSelectElement);
 
     picker.replaceChildren(
       new Option('— empty —', ''),
@@ -159,7 +154,7 @@ export function switchToGridView() {
       startGridCellFeed(idx, state.gridCellChannels[idx]);
     };
 
-    const maxBtn = cell.querySelector('.grid-maximize-btn');
+    const maxBtn = query(cell, '.grid-maximize-btn');
     maxBtn.onclick = (e) => {
       e.stopPropagation();
       toggleMaximizeCell(idx);
@@ -184,8 +179,12 @@ export function switchToSingleView() {
   }
 }
 
+/**
+ * Maximize a grid cell, or restore the grid if it's already maximized.
+ * @param {number} cellIdx
+ */
 export function toggleMaximizeCell(cellIdx) {
-  const cells = document.querySelectorAll('.grid-cell');
+  const cells = queryAll(document, '.grid-cell');
 
   if (state.gridExpandedCell === cellIdx) {
     dom.gridView.classList.remove('maximized');
