@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  buildSearchXml, isEventRecordType, nextRecordingStart, parseCalendar, parseDeviceTime, parseSearchResult,
+  buildSearchXml, isEventRecordType, nextRecordingStart, parseCalendar, parseDeviceTime, parsePictureResult, parseSearchResult,
   recordingAt, toDeviceTime,
 } from '../../extension/lib/playback.js';
 import { Isapi } from '../../extension/lib/isapi.js';
@@ -42,8 +42,16 @@ describe('recording search', () => {
     expect(recordings[1].uri).toContain('name=00000000102000000');
   });
 
+  it('parses picture-track results as stored pictures', () => {
+    const doc = parseXml(searchPage1.replaceAll('<trackID>101</trackID>', '<trackID>103</trackID>'));
+    const { pictures } = parsePictureResult(doc);
+    expect(pictures.map(p => p.time.getHours())).toEqual([8, 14]);
+    expect(pictures[0].uri).toMatch(/^rtsp:/);
+  });
+
   it('classifies record types', () => {
     expect(isEventRecordType('recordType.meta.std-cgi.com/CMR')).toBe(false);
+    expect(isEventRecordType('recordType.meta.hikvision.com/timing')).toBe(false); // DS-7604 continuous
     expect(isEventRecordType('recordType.meta.hikvision.com/VideoMotion')).toBe(true);
     expect(isEventRecordType('recordType.meta.std-cgi.com/AllEvent')).toBe(true);
     expect(isEventRecordType('')).toBe(false);
@@ -59,6 +67,25 @@ describe('recording search', () => {
 
   it('parses the month calendar', () => {
     expect(parseCalendar(parseXml(calendar))).toEqual([2, 9, 10]);
+  });
+});
+
+// Real device captures from tests/probe-playback.sh, when present (git-ignored)
+const captured = import.meta.glob('../fixtures/local/playback-search-*.xml', { query: '?raw', import: 'default', eager: true });
+const capturedVideo = Object.entries(captured).find(([path]) => path.endsWith('search-video.xml'))?.[1];
+const capturedPictures = Object.entries(captured).find(([path]) => path.endsWith('search-pictures.xml'))?.[1];
+
+describe.runIf(capturedVideo && capturedPictures)('captured device searches', () => {
+  it('parses the device’s video search', () => {
+    const { status, recordings } = parseSearchResult(parseXml(capturedVideo));
+    expect(status).toBe('OK');
+    expect(recordings.length).toBeGreaterThan(0);
+    expect(recordings.every(r => r.end > r.start && r.uri.startsWith('rtsp://'))).toBe(true);
+  });
+
+  it('parses the device’s picture search with fetchable URIs', () => {
+    const { pictures } = parsePictureResult(parseXml(capturedPictures));
+    expect(pictures.every(p => p.uri.startsWith('http://') && p.uri.includes('/picture/'))).toBe(true);
   });
 });
 
@@ -79,6 +106,10 @@ describe('Isapi playback requests', () => {
     expect(bodies[1]).toContain('<searchResultPostion>100</searchResultPostion>');
     // One search, one searchID across pages
     expect(/<searchID>([^<]+)/.exec(bodies[0])[1]).toBe(/<searchID>([^<]+)/.exec(bodies[1])[1]);
+  });
+
+  it('only fetches stored pictures from the connected device', async () => {
+    await expect(Isapi.getStoredPicture(config(), 'http://evil.example/picture/x')).rejects.toThrow(/not on the connected device/);
   });
 
   it('returns no recorded frame when the device answers with something other than a JPEG', async () => {

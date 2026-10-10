@@ -16,11 +16,13 @@ import { byId, dom, queryAll, state } from './state.js';
 import { errorMessage, setStatus } from './ui.js';
 
 /** @typedef {import('../lib/playback.js').Recording} Recording */
+/** @typedef {import('../lib/playback.js').StoredPicture} StoredPicture */
 
 /**
  * @typedef {object} PlaybackState
  * @property {Date} date - the day shown (local midnight)
  * @property {Recording[]} recordings - that day's recordings, sorted
+ * @property {StoredPicture[]} pictures - that day's stored pictures, sorted
  * @property {number[]} recordingDays - days of that month with recordings
  * @property {Date|null} current - playhead position
  * @property {boolean} playing
@@ -34,12 +36,15 @@ import { errorMessage, setStatus } from './ui.js';
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** Real time between frames while playing. */
 const PLAY_TICK_MS = 1000;
+/** How close (px) a click must be to a picture marker to open it. */
+const MARKER_HIT_PX = 6;
 
 /** @returns {PlaybackState} */
 export function initialPlaybackState() {
   return {
     date: startOfDay(new Date()),
     recordings: [],
+    pictures: [],
     recordingDays: [],
     current: null,
     playing: false,
@@ -127,17 +132,24 @@ async function searchDay() {
   setInfo('Searching recordings…');
   setStatus('Playback', `Channel ${channelId}`);
   pb.recordings = [];
+  pb.pictures = [];
   pb.current = null;
   renderTimeline();
 
+  const dayEnd = new Date(date.getTime() + DAY_MS - 1000);
   try {
-    const [recordings, days] = await Promise.all([
-      Isapi.searchRecordings(config, channelId, date, new Date(date.getTime() + DAY_MS - 1000)),
+    const [recordings, pictures, days, ignoresTime] = await Promise.all([
+      Isapi.searchRecordings(config, channelId, date, dayEnd),
+      Isapi.searchPictures(config, channelId, date, dayEnd).catch(() => []),
       Isapi.getRecordingDays(config, channelId, date.getFullYear(), date.getMonth() + 1).catch(() => []),
+      // Only ask once per channel whether stills from recordings are real
+      pb.framesSupported === null ? Isapi.ignoresRecordedFrameTime(config, channelId) : Promise.resolve(false),
     ]);
     if (searchId !== pb.searchId) return; // a newer search started meanwhile
     pb.recordings = recordings;
+    pb.pictures = pictures;
     pb.recordingDays = days;
+    if (ignoresTime) pb.framesSupported = false;
     describeDay();
     renderTimeline();
     if (recordings.length > 0) seek(recordings[0].start);
@@ -160,15 +172,20 @@ function describeDay() {
     lines.push(`${pb.recordings.length} recording${pb.recordings.length > 1 ? 's' : ''}, ${formatDuration(minutes)}` +
       (events ? `, ${events} triggered by events` : '') + '.');
   }
+  if (pb.pictures.length > 0) {
+    lines.push(`${pb.pictures.length} stored picture${pb.pictures.length > 1 ? 's' : ''}: click a yellow marker to view.`);
+  }
   if (pb.recordingDays.length > 0) {
     const month = pb.date.toLocaleDateString(undefined, { month: 'long' });
     lines.push(`Days with recordings in ${month}: ${pb.recordingDays.join(', ')}.`);
   }
   if (pb.framesSupported === false) lines.push(FRAMES_UNSUPPORTED);
   setInfo(lines.join('\n'));
+  // Without stills from recordings, playing would only move the playhead
+  byId('pbPlayPauseBtn', HTMLButtonElement).disabled = pb.framesSupported === false;
 }
 
-const FRAMES_UNSUPPORTED = 'This device doesn’t provide still images from recordings, so only the timeline is shown.';
+const FRAMES_UNSUPPORTED = 'This device doesn’t provide still images from recorded video, so the timeline shows when recordings exist; stored pictures (yellow) can be viewed.';
 
 /** @param {number} minutes */
 function formatDuration(minutes) {
@@ -214,6 +231,9 @@ export function renderTimeline() {
     g.fillRect(x1, 4, Math.max(toX(r.end) - x1, 2), height - 8);
   }
 
+  g.fillStyle = 'rgba(250, 204, 21, 0.95)';
+  for (const p of pb.pictures) g.fillRect(Math.round(toX(p.time)) - 1, 0, 3, height);
+
   const labels = byId('pbTimelineLabels');
   labels.replaceChildren(...[0, 3, 6, 9, 12, 15, 18, 21, 24].map(h => {
     const span = document.createElement('span');
@@ -246,11 +266,43 @@ export function seek(time) {
   showFrameAt(pb.current);
 }
 
-/** @param {MouseEvent} e - click on the timeline */
+/**
+ * Click on the timeline: open a stored picture if the click is on its
+ * marker, otherwise move the playhead there.
+ * @param {MouseEvent} e
+ */
 export function seekFromClick(e) {
+  const pb = state.playback;
   const rect = byId('pbTimelineWrap').getBoundingClientRect();
-  const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-  seek(new Date(state.playback.date.getTime() + ratio * DAY_MS));
+  const x = Math.min(rect.width, Math.max(0, e.clientX - rect.left));
+  const picture = pb.pictures.find(p =>
+    Math.abs(((p.time.getTime() - pb.date.getTime()) / DAY_MS) * rect.width - x) <= MARKER_HIT_PX);
+  if (picture) {
+    showStoredPicture(picture);
+    return;
+  }
+  seek(new Date(pb.date.getTime() + (x / rect.width) * DAY_MS));
+}
+
+/**
+ * Show a stored picture and put the playhead at its time.
+ * @param {StoredPicture} picture
+ */
+async function showStoredPicture(picture) {
+  const pb = state.playback;
+  if (!state.config) return;
+  pause();
+  pb.current = picture.time;
+  updatePlayhead();
+  try {
+    const blob = await Isapi.getStoredPicture(state.config, picture.uri);
+    if (state.activeSection !== 'playback') return;
+    dom.videoFeed.onload = () => resizeCanvas();
+    showFrame(dom.videoFeed, blob);
+    setStatus(`Stored picture from ${picture.time.toTimeString().slice(0, 8)}`);
+  } catch (err) {
+    if (!(err instanceof AuthError)) setStatus(`Couldn’t load picture: ${errorMessage(err)}`);
+  }
 }
 
 /** @param {number} seconds */

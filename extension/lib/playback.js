@@ -22,6 +22,14 @@ export const SEARCH_PAGE_SIZE = 100;
  * @property {boolean} isEvent - triggered by motion/alarm/etc rather than continuous
  */
 
+/**
+ * A still picture stored on the device's picture track (scheduled or
+ * event-triggered captures).
+ * @typedef {object} StoredPicture
+ * @property {Date} time
+ * @property {string} uri - where to fetch it, an http URL on the device
+ */
+
 /** @param {number} n */
 const pad = (n) => String(n).padStart(2, '0');
 
@@ -106,6 +114,17 @@ export function parseSearchResult(doc) {
     });
   }
   return { status: (childText(root, 'responseStatusStrg') ?? '').toUpperCase(), recordings };
+}
+
+/**
+ * Pictures from a picture-track search: the same result format as video,
+ * with one moment per match.
+ * @param {XMLDocument} doc - CMSearchResult
+ * @returns {{status: string, pictures: StoredPicture[]}}
+ */
+export function parsePictureResult(doc) {
+  const { status, recordings } = parseSearchResult(doc);
+  return { status, pictures: recordings.filter(r => r.uri).map(r => ({ time: r.start, uri: r.uri })) };
 }
 
 /**

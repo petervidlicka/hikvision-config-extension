@@ -57,6 +57,17 @@ function todaysRecordings() {
     ${item('08:00:00', '08:30:00', 'CMR')}${item('14:05:10', '14:06:40', 'VideoMotion')}</matchList></CMSearchResult>`;
 }
 
+/** Today's picture track: one stored picture at 00:46:08. */
+function todaysPictures() {
+  const d = new Date();
+  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return `<CMSearchResult><responseStatusStrg>OK</responseStatusStrg><numOfMatches>1</numOfMatches><matchList>
+    <searchMatchItem><trackID>103</trackID><timeSpan><startTime>${day}T00:46:08Z</startTime><endTime>${day}T00:46:08Z</endTime></timeSpan>
+    <mediaSegmentDescriptor><contentType>picture</contentType>
+    <playbackURI>http://${NVR_HOST}/picture/Streaming/tracks/103/?starttime=x&amp;name=ch00001_1</playbackURI></mediaSegmentDescriptor>
+    </searchMatchItem></matchList></CMSearchResult>`;
+}
+
 /**
  * Create the fake device. Returns its observable state and a fetch
  * replacement; requests to other hosts go to `realFetch`.
@@ -65,7 +76,8 @@ function todaysRecordings() {
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
   const device = {
     requests: [], puts: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
-    recordedFrames: true, // whether picture?starttime= returns images
+    /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
+    recordedFrames: /** @type {'real'|'ignoresTime'|'none'} */ ('real'),
   };
   const xml = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/xml' } });
 
@@ -82,12 +94,17 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       device.puts.push({ path: p, body: opts.body });
       return xml('<ResponseStatus><statusCode>1</statusCode></ResponseStatus>');
     }
-    if (method === 'POST' && p === '/ISAPI/ContentMgmt/search') return xml(todaysRecordings());
+    if (method === 'POST' && p === '/ISAPI/ContentMgmt/search') {
+      return xml(/<trackID>\d+03<\/trackID>/.test(String(opts.body)) ? todaysPictures() : todaysRecordings());
+    }
+    if (p.startsWith('/picture/Streaming/tracks/')) return new Response(await frame(), { status: 200 });
     if (method === 'POST' && p.endsWith('/dailyDistribution')) {
       return xml(`<trackDailyDistribution><dayList><day><dayOfMonth>${new Date().getDate()}</dayOfMonth><record>true</record></day></dayList></trackDailyDistribution>`);
     }
     if (u.searchParams.has('starttime') && p.endsWith('/picture')) {
-      return device.recordedFrames ? new Response(await frame(), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
+      const before2001 = (u.searchParams.get('starttime') ?? '').startsWith('2000');
+      const image = device.recordedFrames === 'ignoresTime' || (device.recordedFrames === 'real' && !before2001);
+      return image ? new Response(await frame(), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
     }
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
     if (p === '/ISAPI/System/Video/inputs/channels') return new Response('', { status: 403 });
