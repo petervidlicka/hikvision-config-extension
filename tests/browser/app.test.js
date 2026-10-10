@@ -8,6 +8,7 @@ import '../../extension/app.css';
 import { AuthError } from '../../extension/lib/digest-auth.js';
 import { Isapi } from '../../extension/lib/isapi.js';
 import { NVR_HOST, STATUS, createChromeStub, createMockNvr } from '../support/mock-nvr.js';
+import { fixtures } from './fixtures.js';
 
 let device, chromeStub, state, dom;
 const $ = (id) => document.getElementById(id);
@@ -27,6 +28,18 @@ const readoutFps = () => {
   const match = $('statusRight').textContent.match(/· ([\d.]+) fps/);
   return match ? Number(match[1]) : null;
 };
+
+/**
+ * The DS-7604NI's channel 1 motion document with other regions stored.
+ * @param {number[][][]} regions - each region's corners as [x, y] in device units
+ */
+function motionDocWith(regions) {
+  const coordinates = (corners) => '<RegionCoordinatesList>' + corners.map(([x, y]) =>
+    `<RegionCoordinates><positionX>${x}</positionX><positionY>${y}</positionY></RegionCoordinates>`).join('') +
+    '</RegionCoordinatesList>';
+  return fixtures.motionDetectionNvr.replace(/<RegionList>[\s\S]*<\/RegionList>/, '<RegionList>' +
+    regions.map((corners, i) => `<Region><id>${i + 1}</id>${coordinates(corners)}</Region>`).join('') + '</RegionList>');
+}
 
 /**
  * Dispatch canvas mouse events at a fraction of the canvas size. Events land
@@ -651,6 +664,46 @@ describe('config page', () => {
       expect(Math.abs(steady[i][0] - x)).toBeLessThanOrEqual(10);
       expect(Math.abs(steady[i][1] - y)).toBeLessThanOrEqual(10);
     });
+  });
+
+  it('keeps a region whose edges cross open, and won’t save one the camera stores', async () => {
+    const { click, dblclick } = canvasPointer();
+    $('clearMotionRegionsBtn').click();
+    // A bow-tie: its second and fourth edges cross, closed by a double-click or at the first corner
+    click(0.1, 0.1); click(0.4, 0.4); click(0.4, 0.1); dblclick(0.1, 0.4);
+    expect(toast()).toBe('Edges of a region must not cross');
+    expect(state.motionRegions).toHaveLength(0);
+    expect(state.drawingPoints).toHaveLength(4);
+    click(0.1, 0.1);
+    expect(state.drawingPoints).toHaveLength(4);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(state.drawingPoints).toHaveLength(0);
+
+    // The tenth corner closes a region by itself; one that would cross is taken back
+    for (const [x, y] of [[0.1, 0.1], [0.2, 0.1], [0.3, 0.1], [0.4, 0.1], [0.4, 0.2], [0.4, 0.3], [0.4, 0.4], [0.3, 0.4], [0.2, 0.4]]) {
+      click(x, y);
+    }
+    $('toast').textContent = '';
+    click(0.3, 0.05);
+    expect(toast()).toBe('Edges of a region must not cross');
+    expect(state.drawingPoints).toHaveLength(9);
+    click(0.1, 0.4);
+    expect(state.drawingPoints).toHaveLength(0);
+    expect(state.motionRegions.map(r => r.points.length)).toEqual([10]);
+
+    // A crossing region loaded from the camera isn't sent back as it is
+    device.motionDocs['1'] = motionDocWith([[[100, 900], [400, 600], [400, 900], [100, 600]]]);
+    try {
+      $('loadMotionBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('Motion detection config loaded'));
+      expect(state.motionRegions.map(r => r.points.length)).toEqual([4]);
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      expect(toast()).toBe('Edges of a region must not cross: redraw region 1 before saving');
+      expect(device.puts).toHaveLength(puts);
+    } finally {
+      delete device.motionDocs['1'];
+    }
   });
 
   it('stops all four feeds after one retry when the device rejects the password mid-session', async () => {

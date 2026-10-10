@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  pixelDistance, pointInPolygon, rectContains, rectFromCorners, rectToPixels, toPixels,
+  isSimplePolygon, pixelDistance, pointInPolygon, rectContains, rectFromCorners, rectToPixels, toPixels,
 } from '../../extension/lib/shapes.js';
 
 /** Frame sizes the canvas takes on the DS-7604NI: live still, HD still, stored picture. */
@@ -69,5 +69,64 @@ describe('shapes on the picture', () => {
       expect(pointInPolygon(toPixels({ x: 0.8, y: 0.85 }, size), inPixels)).toBe(true);
       expect(pointInPolygon(toPixels({ x: 0.8, y: 0.3 }, size), inPixels)).toBe(false);
     }
+  });
+
+  describe('outlines that meet themselves', () => {
+    /** Points from [x, y] pairs */
+    const corners = (...pairs) => pairs.map(([x, y]) => ({ x, y }));
+
+    it('accepts simple outlines, convex or not', () => {
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 10], [0, 10]))).toBe(true);
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [5, 8]))).toBe(true);
+      // The DS-7604NI's stored region on channel 1, in device units
+      expect(isSimplePolygon(corners([651, 684], [751, 701], [952, 544], [850, 147], [616, 486]))).toBe(true);
+      // An L, and a star-like concave outline
+      expect(isSimplePolygon(corners([0, 0], [3, 0], [3, 7], [10, 7], [10, 10], [0, 10]))).toBe(true);
+      expect(isSimplePolygon(corners([5, 0], [6, 4], [10, 5], [6, 6], [5, 10], [4, 6], [0, 5], [4, 4]))).toBe(true);
+    });
+
+    it('accepts edges on one line that don’t meet, which Hikvision’s own check refuses', () => {
+      // A U standing on two feet along y = 0
+      expect(isSimplePolygon(corners([0, 0], [3, 0], [3, 6], [7, 6], [7, 0], [10, 0], [10, 10], [0, 10]))).toBe(true);
+      // A comb whose teeth end on one line
+      expect(isSimplePolygon(corners([0, 0], [2, 0], [2, 5], [4, 5], [4, 0], [6, 0], [6, 5], [8, 5], [8, 0], [10, 0], [10, 10], [0, 10])))
+        .toBe(true);
+    });
+
+    it('refuses edges that cross, including across the closing edge', () => {
+      expect(isSimplePolygon(corners([0, 0], [10, 10], [10, 0], [0, 10]))).toBe(false); // bow-tie
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [0, 10], [10, 10]))).toBe(false); // the closing edge crosses the second
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 10], [2, -5], [0, 10]))).toBe(false);
+      // In fractions of the picture, as drawn
+      expect(isSimplePolygon(corners([0.1, 0.1], [0.4, 0.4], [0.4, 0.1], [0.1, 0.4]))).toBe(false);
+    });
+
+    it('refuses an outline that touches itself or runs back along itself', () => {
+      // A corner on another edge
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 10], [5, 0], [0, 10]))).toBe(false);
+      // Two corners in the same place (a pinch)
+      expect(isSimplePolygon(corners([0, 0], [5, 5], [10, 0], [10, 10], [5, 5], [0, 10]))).toBe(false);
+      // Edges on one line that overlap
+      expect(isSimplePolygon(corners([0, 0], [6, 0], [6, 4], [3, 4], [3, 0], [10, 0], [10, 10], [0, 10]))).toBe(false);
+      // A spike folding straight back, and corners all on one line
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 10], [10, 5], [0, 10]))).toBe(false);
+      expect(isSimplePolygon(corners([0, 0], [5, 0], [10, 0]))).toBe(false);
+      expect(isSimplePolygon(corners([0, 0], [4, 0], [10, 0], [7, 0]))).toBe(false);
+    });
+
+    it('ignores a corner repeated straight after itself, but needs three distinct corners', () => {
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 0], [10, 10], [0, 10], [0, 0]))).toBe(true);
+      expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 0]))).toBe(false);
+      expect(isSimplePolygon([])).toBe(false);
+    });
+
+    it('gives the same answer in any units', () => {
+      const bowTie = corners([0.1, 0.1], [0.4, 0.4], [0.4, 0.1], [0.1, 0.4]);
+      const ell = corners([0, 0], [0.3, 0], [0.3, 0.7], [1, 0.7], [1, 1], [0, 1]);
+      for (const size of [SD, HD, STORED]) {
+        expect(isSimplePolygon(bowTie.map(p => toPixels(p, size)))).toBe(false);
+        expect(isSimplePolygon(ell.map(p => toPixels(p, size)))).toBe(true);
+      }
+    });
   });
 });

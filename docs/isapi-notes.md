@@ -57,6 +57,15 @@ uses the 22×18 cell grid.
   added since.
 - Saving grid mode: only `gridMap` changes. It's 18 rows × 6 hex digits; each row
   is 24 bits, MSB first, and only the first 22 bits (columns) are used.
+- **Polygons whose edges cross aren't saved.** Before saving, the web UI runs
+  `drawTools.checkLine` on each polygon (every pair of edges that don't share a
+  corner, through `intersectLineLine`) and stops with "Region is invalid, no
+  crossing line is allowed". Its test also rejects any two edges on one line,
+  even when they don't meet (a U standing on two feet). The extension refuses
+  a crossing, touching or overlapping outline (`isSimplePolygon` in
+  `lib/shapes.js`) when a region is closed and, for stored regions, on save,
+  but accepts such a U. What the device does with a crossing polygon is
+  untested.
 
 ## Coordinates
 

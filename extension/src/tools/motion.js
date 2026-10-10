@@ -8,7 +8,7 @@ import {
   applyMotionConfig, imageToMotionRegion, motionRegionToImage, readMotionCapabilities, readMotionConfig,
 } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
-import { pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
+import { isSimplePolygon, pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
 import { loadTool } from './registry.js';
@@ -25,6 +25,8 @@ import { cloneXml } from '../../lib/xml.js';
 const CLOSE_DISTANCE_PX = 12;
 /** A click this close to the last corner, in canvas (screen) pixels, is the same corner again. */
 const SAME_CORNER_PX = 4;
+/** Why a region can't be closed or saved: Hikvision's web UI refuses such regions too. */
+const CROSSING_EDGES = 'Edges of a region must not cross';
 
 /** @satisfies {Tool} */
 export const motionTool = {
@@ -219,7 +221,10 @@ export const motionTool = {
 
     pts.push({ x: pos.x, y: pos.y });
     if (pts.length >= state.motionCaps.maxPoints) {
-      closePolygon();
+      // The last corner allowed closes the region; one that makes its edges
+      // cross is taken back, so another can go in its place
+      if (!closePolygon()) pts.pop();
+      redraw();
       return;
     }
     redraw();
@@ -310,6 +315,14 @@ export const motionTool = {
       return;
     }
 
+    // Regions loaded from the device are checked here; drawn ones were when they closed
+    const regions = state.motionRegions.map(reg => imageToMotionRegion(reg.points));
+    const crossing = regions.findIndex(points => !isSimplePolygon(points));
+    if (state.motionMode === 'region' && crossing >= 0) {
+      showToast(`${CROSSING_EDGES}: redraw region ${crossing + 1} before saving`, 'error');
+      return;
+    }
+
     // Snap to the device's sensitivity steps (e.g. 0, 20, … 100)
     const { min, max, step } = caps.sensitivity;
     const rawSensitivity = Number(byId('sensitivitySlider', HTMLInputElement).value);
@@ -326,7 +339,7 @@ export const motionTool = {
         enabled: state.motionEnabled,
         sensitivity,
         dynamicAnalysis: state.dynamicAnalysis,
-        regions: state.motionRegions.map(reg => imageToMotionRegion(reg.points)),
+        regions,
         targetTypes: caps.targetTypes.length
           ? caps.targetTypes.filter(t => (t === 'human' && state.detectHuman) || (t === 'vehicle' && state.detectVehicle))
           : undefined,
@@ -401,19 +414,27 @@ function updateRegionList() {
 }
 
 /**
- * Finish the polygon being drawn. Too few corners keeps it open — the
- * device rejects regions below its minimum.
+ * Finish the polygon being drawn. It stays open, to be finished another way
+ * or cancelled (Esc), when it has too few corners (the device rejects
+ * regions below its minimum) or when its edges cross, checked in the device
+ * units it will be saved in.
+ * @returns {boolean} whether it closed
  */
 function closePolygon() {
   const { minPoints } = state.motionCaps;
   if (state.drawingPoints.length < minPoints) {
     showToast(`A detection region needs at least ${minPoints} corners`, 'error');
-    return;
+    return false;
+  }
+  if (!isSimplePolygon(imageToMotionRegion(state.drawingPoints))) {
+    showToast(CROSSING_EDGES, 'error');
+    return false;
   }
   state.motionRegions.push({ points: [...state.drawingPoints] });
   state.drawingPoints = [];
   updateRegionList();
   redraw();
+  return true;
 }
 
 /** Apply the device's limits to the panel controls. */

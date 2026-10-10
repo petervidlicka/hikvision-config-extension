@@ -95,6 +95,9 @@ export const STATUS = {
   serviceUnavailable: { statusCode: 2, statusString: 'Device Busy', subStatusCode: 'serviceUnavailable' },
 };
 
+/** The channel id in a per-channel path such as …/channels/2/video/motionDetection. @param {string} path */
+const channelOf = (path) => /\/channels\/(\d+)\//.exec(path)?.[1] ?? '';
+
 /** Direct children of `el` with the given local name. */
 const children = (el, name) => (el ? [...el.children].filter(c => c.localName === name) : []);
 
@@ -270,6 +273,8 @@ function picturesOn(day) {
  * (e.g. ['4']); their snapshots answer 503 serviceUnavailable, as an empty
  * channel's do on the DS-7604NI. `privacy.read(path)` shows the privacy
  * masks a channel stores, `triggers.read(channel)` its motion trigger.
+ * `motionDocs` replaces a channel's motion document (by channel id; the
+ * others are the DS-7604NI's channel 1).
  *
  * Every day has `recordings` (wall-clock times; the search answers for the
  * day it starts on) and a stored picture at 00:46:08, and `searches` lists
@@ -313,6 +318,8 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     offlineChannels: [],
     privacy: createPrivacyStore(),
     triggers: createTriggerStore(),
+    /** @type {Record<string, string>} a channel's motion document instead of the DS-7604NI's */
+    motionDocs: {},
     /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
     recordedFrames: /** @type {'real'|'ignoresTime'|'none'} */ ('real'),
     /** What /ISAPI/System/time says, e.g. "2026-10-25T15:00:00+01:00"; null: the browser's wall clock */
@@ -492,7 +499,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (p.endsWith('/motionDetection/capabilities')) {
       return xml(p.includes('/channels/2/') ? motionCapabilities.replace('opt="grid,region"', 'opt="grid"') : motionCapabilities);
     }
-    if (p.endsWith('/motionDetection')) return xml(motionDetection);
+    if (p.endsWith('/motionDetection')) return xml(device.motionDocs[channelOf(p)] ?? motionDetection);
     if (p.endsWith('/privacyMask')) return xml(device.privacy.read(p));
     const trigger = p.match(/^\/ISAPI\/Event\/triggers\/VMD-(\d+)$/);
     if (trigger) return xml(device.triggers.read(trigger[1]));
