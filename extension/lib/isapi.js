@@ -541,8 +541,9 @@ export const Isapi = {
    * and then.
    *
    * Optional: the editor works without them (see getMotionLimits), so any
-   * error answer, or a body that isn't XML, gives null rather than failing
-   * the Motion tab. Not only "not here" answers: the DS-7604NI answers 503
+   * error answer, or a body that isn't a <MotionDetection> document, gives
+   * null (and the next URL is tried) rather than failing the Motion tab.
+   * Not only "not here" answers: the DS-7604NI answers 503
    * serviceUnavailable every time for capability resources it doesn't serve.
    * No answer at all, or a rejected login, still throws.
    * @param {DeviceConfig} config
@@ -553,7 +554,7 @@ export const Isapi = {
     const paths = [`${this.motionDetectionPath(channel)}/capabilities`];
     if (channel.kind === 'digital') paths.push(`/ISAPI/System/Video/inputs/channels/${channel.id}/motionDetection/capabilities`);
     for (const path of paths) {
-      const doc = await this.optionalCapabilities(config, path);
+      const doc = await this.optionalCapabilities(config, path, 'MotionDetection');
       if (doc) return doc;
     }
     return null;
@@ -569,7 +570,7 @@ export const Isapi = {
    * @returns {Promise<XMLDocument|null>}
    */
   getMotionLayoutCapabilities(config, channel) {
-    return this.optionalCapabilities(config, `${this.motionDetectionPath(channel)}/layout/capabilities`);
+    return this.optionalCapabilities(config, `${this.motionDetectionPath(channel)}/layout/capabilities`, 'MotionDetectionLayout');
   },
 
   /**
@@ -590,14 +591,18 @@ export const Isapi = {
 
   /**
    * A capabilities document the caller can do without: null for any error
-   * answer or a body that isn't XML (see getMotionCapabilities for why any
-   * error). No answer at all, or a rejected login, still throws.
+   * answer, a body that isn't XML, or XML of another kind (see
+   * getMotionCapabilities for why any error). The last is for firmware that
+   * reports an error in a 200 body (a ResponseStatus, a well-formed error
+   * page): taken as the capabilities, it would hide what the next URL serves.
+   * No answer at all, or a rejected login, still throws.
    * @param {DeviceConfig} config
    * @param {string} path
+   * @param {string} rootName - the capabilities' root element, e.g. "MotionDetection"
    * @returns {Promise<XMLDocument|null>}
    * @private
    */
-  async optionalCapabilities(config, path) {
+  async optionalCapabilities(config, path, rootName) {
     let resp;
     try {
       resp = await this.request(config, 'GET', path);
@@ -605,7 +610,8 @@ export const Isapi = {
       if (!(err instanceof IsapiError)) throw err;
       return null;
     }
-    return parseXmlOrNull(String(resp.data));
+    const doc = parseXmlOrNull(String(resp.data));
+    return doc?.documentElement.localName === rootName ? doc : null;
   },
 
   /**

@@ -461,6 +461,15 @@ describe('Isapi', () => {
       expect((await Isapi.getMotionCapabilities(testConfig(), digital('1')))?.documentElement.localName).toBe('MotionDetection');
       expect(calls).toEqual([proxy, system]);
     }
+    // So is a 200 answer of another kind: an error in the body, or a well-formed error page
+    const notSupport = responseStatusXml('/x', { statusCode: 4, statusString: 'Invalid Operation', subStatusCode: 'notSupport' });
+    for (const body of [notSupport, '<html><body>Not Found</body></html>']) {
+      const calls = mockDevice({ [proxy]: { body }, [system]: { body: fixtures.motionCapabilitiesNvr } });
+      const doc = await Isapi.getMotionCapabilities(testConfig(), digital('1'));
+      expect(doc?.documentElement.localName).toBe('MotionDetection');
+      expect(childText(doc?.documentElement ?? null, 'samplingInterval')).toBe('5');
+      expect(calls).toEqual([proxy, system]);
+    }
     let calls = mockDevice({ [proxy]: { body: fixtures.motionCapabilitiesNvr } });
     expect(await Isapi.getMotionCapabilities(testConfig(), digital('1'))).not.toBeNull();
     expect(calls).toEqual([proxy]);
@@ -500,6 +509,9 @@ describe('Isapi', () => {
     // Nothing says which levels the camera accepts
     mockDevice({ [layout]: statusRoute(503, 2, 'serviceUnavailable') });
     expect(await Isapi.getMotionLimits(testConfig(), digital('1'))).toMatchObject({ regionTypes: [], sensitivity: null, targetTypes: [] });
+    // Nor does an error answered with 200 where the layout capabilities should be
+    mockDevice({ [layout]: { body: responseStatusXml('/x', { statusCode: 4, statusString: 'Invalid Operation', subStatusCode: 'notSupport' }) } });
+    expect(await Isapi.getMotionLimits(testConfig(), digital('1'))).toMatchObject({ regionTypes: [], sensitivity: null });
   });
 
   it('treats any error answer as "no recorded frame", but not a missing answer', async () => {

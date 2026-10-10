@@ -380,7 +380,11 @@ for PAL or 15 for NTSC, sensitivity 0–5).
   URL for every channel (`discardFalseAlarmCap` in `websdk.js`). The extension
   asks an IP camera's InputProxy URL first, next to its motion config, then
   the System one (`Isapi.getMotionCapabilities`). The DS-7604NI serves the
-  same document at both, and either can answer 503 now and then.
+  same document at both, and either can answer 503 now and then. Any error
+  answer, a body that isn't XML, or a 200 answer whose root isn't
+  `MotionDetection` (`MotionDetectionLayout` for the layout capabilities),
+  such as a `ResponseStatus`, counts as not having them, so the next URL is
+  tried; the DS-7604NI never answered that way.
 - **Without capabilities** the web UI hides the sensitivity slider and
   follows the motion document's own `regionType` (`bSupportMulRegion` stays
   false): its grid editor for `grid`, whose save changes only `gridMap`; its
