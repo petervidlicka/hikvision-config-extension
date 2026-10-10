@@ -107,8 +107,10 @@ const children = (el, name) => (el ? [...el.children].filter(c => c.localName ==
  * tests on channel 3): a PUT of /privacyMask sets the global <enabled> and
  * MERGES the regions it sends into the stored ones by id, so a region left
  * out stays stored; DELETE /privacyMask/regions clears them all; and every
- * region reads back with <enabled>false</enabled>, whatever was sent. Each
- * channel starts with the two regions of privacyMask-nvr-regions.xml.
+ * region reads back with <enabled>false</enabled>, whatever was sent. A GET
+ * of /privacyMask/regions answers with the bare region list, without the
+ * global switch. Each channel starts with the two regions of
+ * privacyMask-nvr-regions.xml.
  */
 function createPrivacyStore() {
   /** @type {Map<string, XMLDocument>} */
@@ -124,6 +126,8 @@ function createPrivacyStore() {
   return {
     /** The document a GET returns. @param {string} path */
     read: (path) => new XMLSerializer().serializeToString(stored(path)),
+    /** What a GET of …/privacyMask/regions returns: the bare region list. @param {string} path - …/privacyMask */
+    readRegions: (path) => new XMLSerializer().serializeToString(regionList(stored(path))),
     /** @param {string} path @param {string} body */
     put(path, body) {
       const doc = stored(path);
@@ -508,6 +512,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (p.endsWith('/motionDetection/layout/capabilities')) return xml(motionLayoutCapabilities);
     if (p.endsWith('/motionDetection')) return xml(device.motionDocs[channelOf(p)] ?? motionDetection);
     if (p.endsWith('/privacyMask')) return xml(device.privacy.read(p));
+    if (p.endsWith('/privacyMask/regions')) return xml(device.privacy.readRegions(p.slice(0, -'/regions'.length)));
     const trigger = p.match(/^\/ISAPI\/Event\/triggers\/VMD-(\d+)$/);
     if (trigger) return xml(device.triggers.read(trigger[1]));
     if (p === '/ISAPI/Event/triggersCap') return xml(triggersCap);

@@ -2,7 +2,8 @@
  * Privacy mask tool: draw rectangular masks over the image. Masks are kept
  * as fractions of the picture (lib/shapes.js); device coordinates (Y from
  * the bottom) are mapped by the helpers in lib/config-xml.js, and
- * Isapi.savePrivacyMask does the save.
+ * Isapi.savePrivacyMask does the save. The on/off switch is disabled where
+ * the device serves only its bare region list, which has no switch.
  */
 
 import {
@@ -24,6 +25,9 @@ import { errorMessage, reportSaveFailed, reportSaved, setStatus, showToast } fro
 /** A drag smaller than this on either side, in canvas pixels (screen pixels, see resizeCanvas), draws no mask. */
 const MIN_MASK_SIDE_PX = 10;
 
+/** What the disabled switch says when hovered, where the loaded document has no switch (see readPrivacyMask). */
+const NO_SWITCH_HINT = 'This device doesn’t let the extension switch masks on or off';
+
 /** @satisfies {Tool} */
 export const privacyTool = {
   id: 'privacy',
@@ -31,7 +35,7 @@ export const privacyTool = {
   cursor: 'crosshair',
 
   panelHTML: `
-    <div class="toggle-row">
+    <div class="toggle-row" id="privacyToggleRow">
       <span>Privacy Mask</span>
       <div class="toggle" id="privacyToggle"></div>
     </div>
@@ -61,6 +65,7 @@ export const privacyTool = {
   initState() {
     return {
       privacyEnabled: false,
+      privacySwitchable: true,
       privacyRegions: [],
       privacyNormW: 704,
       privacyNormH: 576,
@@ -77,6 +82,8 @@ export const privacyTool = {
     state.privacyFrom = null;
     state.privacyNormW = 704;
     state.privacyNormH = 576;
+    state.privacySwitchable = true;
+    showSwitch();
   },
 
   draw(ctx, canvas) {
@@ -156,7 +163,8 @@ export const privacyTool = {
       const pm = readPrivacyMask(doc);
 
       state.privacyEnabled = pm.enabled;
-      byId('privacyToggle').classList.toggle('on', state.privacyEnabled);
+      state.privacySwitchable = pm.switchable;
+      showSwitch();
 
       // The coordinate space the device declares, else the web UI's default
       const screen = pm.screen ?? DEFAULT_PRIVACY_SCREEN;
@@ -201,8 +209,9 @@ export const privacyTool = {
 
   bindPanel() {
     byId('privacyToggle').addEventListener('click', () => {
+      if (!state.privacySwitchable) return;
       state.privacyEnabled = !state.privacyEnabled;
-      byId('privacyToggle').classList.toggle('on', state.privacyEnabled);
+      showSwitch();
     });
 
     byId('clearPrivacyBtn').addEventListener('click', () => {
@@ -217,6 +226,20 @@ export const privacyTool = {
 
   onActivate() {},
 };
+
+/**
+ * Show the on/off switch as the state has it: disabled, saying why, where
+ * the loaded document has no switch to write, rather than accepting clicks
+ * a save would ignore.
+ */
+function showSwitch() {
+  const row = byId('privacyToggleRow');
+  row.classList.toggle('unavailable', !state.privacySwitchable);
+  row.title = state.privacySwitchable ? '' : NO_SWITCH_HINT;
+  const toggle = byId('privacyToggle');
+  toggle.classList.toggle('on', state.privacyEnabled);
+  toggle.setAttribute('aria-disabled', String(!state.privacySwitchable));
+}
 
 /** Render the region list in the sidebar. */
 function updateRegionList() {

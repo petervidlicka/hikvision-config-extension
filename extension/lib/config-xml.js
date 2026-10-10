@@ -492,6 +492,15 @@ export const DEFAULT_PRIVACY_SCREEN = Object.freeze({ width: 704, height: 576 })
  */
 
 /**
+ * A privacy mask document as a panel shows it (see readPrivacyMask).
+ * @typedef {object} PrivacyMaskConfig
+ * @property {boolean} enabled - masking on; true when the document has no switch
+ * @property {boolean} switchable - the document has the global switch a save can turn on or off
+ * @property {Size|null} screen - the coordinate space the document declares
+ * @property {DevicePoint[][]} regions - each mask's corners in device units
+ */
+
+/**
  * The region list, whether the document is a PrivacyMask or the bare list.
  * @param {XMLDocument} doc
  * @returns {Element|null}
@@ -509,12 +518,19 @@ export function privacyRegionList(doc) {
  * masks it, and Hikvision's web UI ignores the per-region flag as well.
  * Empty or zero-area slots (unused slots on fixed-slot cameras) are skipped.
  *
- * `enabled` is the document's global switch. A bare region list has none, so
- * there it reports whether any region is enabled — the flag a save writes to
- * each region. `screen` is the coordinate space the device declares, when it
- * does (see DEFAULT_PRIVACY_SCREEN otherwise).
+ * `switchable` says whether the document has the global <enabled> switch,
+ * which is all that switches masking on and off. The bare region list some
+ * firmware serves instead (getPrivacyMask's fallback) has none, and a save
+ * can't add one, so a panel must not offer the switch there. `enabled` is
+ * the switch; without one it is true, the flag a save then writes to each
+ * region: every mask the panel shows is saved switched on, where a device
+ * honours the per-region flag at all. `screen` is the coordinate space the
+ * device declares, when it does (see DEFAULT_PRIVACY_SCREEN otherwise).
  * @param {XMLDocument} doc
- * @returns {{enabled: boolean, screen: Size|null, regions: DevicePoint[][]}}
+ * @returns {PrivacyMaskConfig}
+ * @example
+ * readPrivacyMask(parseXml('<PrivacyMaskRegionList/>'))
+ * // → {enabled: true, switchable: false, screen: null, regions: []}
  */
 export function readPrivacyMask(doc) {
   const root = doc.documentElement;
@@ -524,9 +540,8 @@ export function readPrivacyMask(doc) {
   const slots = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
   const globalFlag = childText(root, 'enabled');
   return {
-    enabled: globalFlag !== null
-      ? globalFlag === 'true'
-      : slots.some(r => childText(r, 'enabled') === 'true'),
+    enabled: globalFlag === null || globalFlag === 'true',
+    switchable: globalFlag !== null,
     screen: width > 0 && height > 0 ? { width, height } : null,
     regions: slots.map(readCoordinates).filter(hasArea),
   };

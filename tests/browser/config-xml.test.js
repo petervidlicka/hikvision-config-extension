@@ -347,7 +347,7 @@ describe('privacy mask', () => {
     expect(camera.regions[0][2]).toEqual({ x: 110, y: 120 });
   });
 
-  it('skips zero-area regions and reads a bare region list’s switch from its regions', () => {
+  it('skips zero-area regions; a bare region list has no switch, and its masks are on', () => {
     const ns = 'xmlns="http://www.isapi.org/ver20/XMLSchema"';
     const region = (id, enabled, points) => `<PrivacyMaskRegion><id>${id}</id><enabled>${enabled}</enabled><RegionCoordinatesList>${
       points.map(([x, y]) => `<RegionCoordinates><positionX>${x}</positionX><positionY>${y}</positionY></RegionCoordinates>`).join('')
@@ -355,8 +355,16 @@ describe('privacy mask', () => {
     const list = (...regions) => parseXml(`<PrivacyMaskRegionList ${ns}>${regions.join('')}</PrivacyMaskRegionList>`);
 
     const flat = readPrivacyMask(list(region(1, 'true', [[0, 0], [0, 0], [0, 0]]), region(2, 'false', [[10, 10], [90, 10], [90, 10]])));
-    expect([flat.enabled, flat.regions]).toEqual([true, []]);
-    expect(readPrivacyMask(list(region(1, 'false', [[0, 0], [50, 50]]))).enabled).toBe(false);
+    expect([flat.enabled, flat.switchable, flat.regions]).toEqual([true, false, []]);
+    // Whatever its regions' own flags say: a save writes them all on, as the panel shows them
+    const off = readPrivacyMask(list(region(1, 'false', [[0, 0], [50, 50]])));
+    expect([off.enabled, off.switchable, off.regions.length]).toEqual([true, false, 1]);
+    expect(readPrivacyMask(parseXml(`<PrivacyMaskRegionList ${ns}/>`))).toEqual({ enabled: true, switchable: false, screen: null, regions: [] });
+
+    // A full document has the switch, on or off
+    expect(readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions))).toMatchObject({ enabled: true, switchable: true });
+    const switchedOff = fixtures.privacyMaskNvrRegions.replace('<enabled>true</enabled>', '<enabled>false</enabled>');
+    expect(readPrivacyMask(parseXml(switchedOff))).toMatchObject({ enabled: false, switchable: true });
   });
 
   it('rebuilds the list with exactly the new rectangles, as the web UI does', () => {

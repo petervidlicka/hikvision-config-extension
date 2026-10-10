@@ -231,6 +231,19 @@ slots, answers "not here" or `methodNotAllowed`. For that firmware the
 extension sends a single PUT instead: unused slots are disabled and their
 coordinates emptied, so a deleted mask can't come back.
 
+Only when `{base}/privacyMask` itself answers "not here" (`isFallbackError`)
+does `Isapi.getPrivacyMask` read `{base}/privacyMask/regions` instead. A busy
+answer, a refusal, a timeout or a network error is the load's error, to be
+retried: this NVR answers some privacy sub-resources 503 "Device Busy" every
+time, and the region list is no substitute for the full document. That list
+is a bare `<PrivacyMaskRegionList>` (the DS-7604NI serves one too) without the
+root `<enabled>`, the only switch that turns masking on and off, and a save
+can't add one. So with that document the panel's switch is disabled, saying
+"This device doesn’t let the extension switch masks on or off", and every
+mask it shows is saved with its own `<enabled>` on, where firmware honours
+that flag at all. The list goes back to its own path in a single PUT, without
+a DELETE.
+
 ## Playback search
 
 `POST /ISAPI/ContentMgmt/search` pages its results, and the DS-7604NI

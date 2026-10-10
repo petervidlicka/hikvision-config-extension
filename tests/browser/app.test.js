@@ -976,6 +976,57 @@ describe('config page', () => {
     expect(device.puts.at(-1).path).toBe('/ISAPI/Event/triggers/VMD-1');
   });
 
+  it('disables the privacy switch where the camera serves only its region list, and saves every mask on', async () => {
+    const path = '/ISAPI/ContentMgmt/InputProxy/channels/2/video/privacyMask';
+    const row = $('privacyToggleRow');
+    const toggle = $('privacyToggle');
+    // Firmware without the full document: only {path}/regions answers, a bare list without the global switch
+    device.failures[`GET ${path}`] = { httpStatus: 403, ...STATUS.notSupport };
+    try {
+      $('configTabs').querySelector('[data-tool="privacy"]').click();
+      pickChannel(1);
+      await vi.waitFor(() => {
+        expect(state.privacyPath).toBe(`${path}/regions`);
+        expect($('savePrivacyBtn').disabled).toBe(false);
+      });
+      const masks = state.privacyRegions.length;
+      expect(masks).toBeGreaterThan(0);
+      expect(row.classList.contains('unavailable')).toBe(true);
+      expect(row.title).toBe('This device doesn’t let the extension switch masks on or off');
+      expect(toggle.getAttribute('aria-disabled')).toBe('true');
+      // Its regions read back enabled=false, yet every mask shown is saved on
+      expect(toggle.classList.contains('on')).toBe(true);
+      toggle.click();
+      expect([state.privacyEnabled, toggle.classList.contains('on')]).toEqual([true, true]);
+
+      const [puts, deletes] = [device.puts.length, device.deletes.length];
+      $('savePrivacyBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      const { path: putPath, body } = device.puts.at(-1);
+      expect(putPath).toBe(`${path}/regions`);
+      expect(device.deletes).toHaveLength(deletes);
+      expect(new DOMParser().parseFromString(body, 'application/xml').documentElement.localName).toBe('PrivacyMaskRegionList');
+      expect([...body.matchAll(/<enabled>(\w+)<\/enabled>/g)].map(m => m[1])).toEqual(Array(masks).fill('true'));
+      await vi.waitFor(() => expect(toast()).toBe('Privacy mask saved successfully!'));
+    } finally {
+      delete device.failures[`GET ${path}`];
+    }
+
+    // The full document has the switch
+    $('loadPrivacyBtn').click();
+    await vi.waitFor(() => {
+      expect(state.privacyPath).toBe(path);
+      expect($('savePrivacyBtn').disabled).toBe(false);
+    });
+    expect(row.classList.contains('unavailable')).toBe(false);
+    expect(row.title).toBe('');
+    expect(toggle.getAttribute('aria-disabled')).toBe('false');
+    toggle.click();
+    expect([state.privacyEnabled, toggle.classList.contains('on')]).toEqual([false, false]);
+    toggle.click();
+    expect(state.privacyEnabled).toBe(true);
+  });
+
   it('stops all four feeds after one retry when the device rejects the password mid-session', async () => {
     $('liveViewSectionTab').click();
     $('gridViewTab').click();

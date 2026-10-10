@@ -54,6 +54,7 @@
  *
  * Privacy mask tool
  * @property {boolean} privacyEnabled
+ * @property {boolean} privacySwitchable - privacyDoc has the global on/off switch; false for a bare region list
  * @property {ImageRect[]} privacyRegions
  * @property {number} privacyNormW - device coordinate space width
  * @property {number} privacyNormH

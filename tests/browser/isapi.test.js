@@ -338,14 +338,33 @@ describe('Isapi', () => {
     const base = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/privacyMask';
     const regions = { body: '<PrivacyMaskRegionList/>' };
 
-    let calls = mockDevice({ [base]: statusRoute(403, 4, 'notSupport'), [`${base}/regions`]: regions });
-    expect((await Isapi.getPrivacyMask(testConfig(), channel)).path).toBe(`${base}/regions`);
-    expect(calls).toEqual([base, `${base}/regions`]);
+    // "Not here" answers: the DS-7604NI's 403 notSupport, a bare 404, firmware's 400 badParameters
+    for (const notHere of [statusRoute(403, 4, 'notSupport'), { status: 404 }, statusRoute(400, 6, 'badParameters')]) {
+      const calls = mockDevice({ [base]: notHere, [`${base}/regions`]: regions });
+      const loaded = await Isapi.getPrivacyMask(testConfig(), channel);
+      expect(loaded.path).toBe(`${base}/regions`);
+      expect(readPrivacyMask(loaded.doc).switchable).toBe(false); // the panel can't offer the switch
+      expect(calls).toEqual([base, `${base}/regions`]);
+    }
 
-    for (const [status, code, sub] of [[503, 2, 'deviceBusy'], [403, 4, 'lowPrivilege']]) {
-      calls = mockDevice({ [base]: statusRoute(status, code, sub), [`${base}/regions`]: regions });
-      await expect(Isapi.getPrivacyMask(testConfig(), channel)).rejects.toMatchObject({ subStatusCode: sub });
+    // A busy device (this NVR answers privacy sub-resources 503), a refusal or a failure is the load's error
+    for (const [status, code, sub] of [[503, 2, 'deviceBusy'], [503, 2, 'serviceUnavailable'], [403, 4, 'lowPrivilege'], [500, 3, 'deviceError']]) {
+      const calls = mockDevice({ [base]: statusRoute(status, code, sub), [`${base}/regions`]: regions });
+      await expect(Isapi.getPrivacyMask(testConfig(), channel)).rejects.toMatchObject({ httpStatus: status, subStatusCode: sub });
       expect(calls).toEqual([base]);
+    }
+
+    // So is no answer at all
+    const calls = mockDevice({ [base]: { unreachable: true }, [`${base}/regions`]: regions });
+    await expect(Isapi.getPrivacyMask(testConfig(), channel)).rejects.toBeInstanceOf(NetworkError);
+    expect(calls).toEqual([base]);
+    const request = vi.spyOn(Isapi, 'request')
+      .mockRejectedValueOnce(new TimeoutError({ method: 'GET', path: base, address: '10.9.9.9:80', timeoutMs: TIMEOUT_MS.read }));
+    try {
+      await expect(Isapi.getPrivacyMask(testConfig(), channel)).rejects.toBeInstanceOf(TimeoutError);
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      request.mockRestore();
     }
   });
 
