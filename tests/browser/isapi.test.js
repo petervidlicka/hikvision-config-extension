@@ -520,7 +520,7 @@ describe('picture sizes', () => {
     expect(calls).toHaveLength(2);
   });
 
-  it('leaves the sizes unknown when the list can’t be read, asking again next time, unless nothing answers', async () => {
+  it('leaves the sizes unknown when the list can’t be read, asking again next time, unless the login is rejected', async () => {
     const config = testConfig();
     let calls = mockDevice({ '/ISAPI/Streaming/channels': statusRoute(403, 4, 'lowPrivilege') });
     expect((await Isapi.getStreamSizes(config)).size).toBe(0);
@@ -532,8 +532,23 @@ describe('picture sizes', () => {
     calls = mockDevice({ '/ISAPI/Streaming/channels': { body: '<StreamingChannelList/>' } });
     expect((await Isapi.getStreamSizes(config)).size).toBe(0);
     expect(calls).toHaveLength(1);
-    mockDevice({ '/ISAPI/Streaming/channels': { unreachable: true } });
-    await expect(Isapi.getStreamSizes(config)).rejects.toBeInstanceOf(NetworkError);
+    // Nothing answering, or not in time (a long list), leaves them unknown too
+    calls = mockDevice({ '/ISAPI/Streaming/channels': { unreachable: true } });
+    expect((await Isapi.getStreamSizes(config)).size).toBe(0);
+    expect(calls).toHaveLength(1);
+    const request = vi.spyOn(Isapi, 'request').mockRejectedValueOnce(
+      new TimeoutError({ method: 'GET', path: '/ISAPI/Streaming/channels', address: '10.9.9.9:80', timeoutMs: TIMEOUT_MS.read }));
+    try {
+      expect((await Isapi.getStreamSizes(config)).size).toBe(0);
+    } finally {
+      request.mockRestore();
+    }
+    calls = mockDevice({ '/ISAPI/Streaming/channels': { body: fixtures.streamingChannelsNvr } });
+    expect((await Isapi.getStreamSizes(config)).get('1')).toEqual(mainStream);
+    expect(calls).toHaveLength(1);
+
+    mockDevice({ '/ISAPI/Streaming/channels': { status: 401, headers: { 'WWW-Authenticate': 'Digest realm="r", nonce="n", qop="auth"' } } });
+    await expect(Isapi.getStreamSizes(testConfig())).rejects.toBeInstanceOf(AuthError);
   });
 
   it('switches an NVR camera’s HD feed to the full-size still once, then asks for it straight away', async () => {

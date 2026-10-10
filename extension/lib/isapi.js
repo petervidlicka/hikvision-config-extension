@@ -23,7 +23,7 @@ import {
   AuthError, digestFetch, forgetDigestSessions, forgetRejectedCredentials, rejectCredentials,
 } from './digest-auth.js';
 import {
-  IsapiError, NotAnImageError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError,
+  IsapiError, NetworkError, NotAnImageError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError,
   parseLoginStatus, parseResponseStatus,
 } from './errors.js';
 import {
@@ -388,11 +388,14 @@ export const Isapi = {
    * still in. Read once per device, until clearDeviceCache().
    *
    * Only for showing pictures right, so a device that answers with an error,
-   * or with something other than a list of sizes, leaves the sizes unknown
-   * (and is asked again next time) rather than failing the channel list. A
-   * rejected login or a device that doesn't answer still fails it.
+   * with something other than a list of sizes, or not at all (the list of a
+   * large NVR may take longer than the time limit, or a connection may drop)
+   * leaves the sizes unknown, and is asked again next time, rather than
+   * failing the channel list it goes with. Only a rejected login fails it:
+   * every further request would be refused too.
    * @param {DeviceConfig} config
    * @returns {Promise<Map<string, Size>>} channel id → main stream size; empty when unknown
+   * @throws {AuthError} the device rejected the login
    */
   getStreamSizes(config) {
     const key = deviceKey(config);
@@ -404,7 +407,7 @@ export const Isapi = {
       try {
         resp = await this.request(config, 'GET', STREAMING_CHANNELS_PATH);
       } catch (err) {
-        if (err instanceof IsapiError) return null;
+        if (err instanceof IsapiError || err instanceof NetworkError) return null;
         throw err;
       }
       const doc = parseXmlOrNull(String(resp.data));
