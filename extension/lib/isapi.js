@@ -262,7 +262,9 @@ export const Isapi = {
    * attempts are left (see AuthError). Firmware without userCheck ("not
    * here", see isFallbackError) leaves the check to the next request; the
    * device checks the login before it looks at the path, so getting that far
-   * means it accepted the credentials.
+   * means it accepted the credentials. So does firmware that answers
+   * userCheck without asking for them: its verdict then is on a request
+   * without credentials (it says 401 to anyone), not on these.
    * @param {DeviceConfig} config
    * @returns {Promise<void>}
    * @throws {AuthError} the device rejected the login, also when it says so in a 200 answer (older firmware)
@@ -275,6 +277,7 @@ export const Isapi = {
       if (isFallbackError(err)) return;
       throw err;
     }
+    if (!resp.authenticated) return;
     const status = parseLoginStatus(String(resp.data));
     if (status?.statusValue !== undefined && status.statusValue !== 200) {
       const err = rejectCredentials(config, status);

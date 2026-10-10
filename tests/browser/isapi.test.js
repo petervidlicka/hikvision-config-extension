@@ -18,7 +18,9 @@ import { fixtures } from './fixtures.js';
  * Replace fetch with a router keyed by path (without the query), or by
  * "METHOD path" for one method; unknown paths return 404. A route with
  * `hang` never answers until the request's signal aborts it, like a stalled
- * device; one with `unreachable` fails like a wrong IP address.
+ * device; one with `unreachable` fails like a wrong IP address; one with
+ * `challenge` answers only a request with credentials, and one without them
+ * with a Digest challenge, as the NVR answers everything.
  * @returns {string[]} the requested paths with their queries, in order
  */
 function mockDevice(routes) {
@@ -29,6 +31,9 @@ function mockDevice(routes) {
     const r = routes[`${opts.method ?? 'GET'} ${path}`] ?? routes[path];
     if (!r) return new Response('', { status: 404 });
     if (r.unreachable) throw new TypeError('Failed to fetch');
+    if (r.challenge && !new Headers(opts.headers).has('Authorization')) {
+      return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Digest realm="r", nonce="n", qop="auth"' } });
+    }
     if (r.hang) {
       return new Promise((_, reject) => opts.signal?.addEventListener('abort', () => reject(opts.signal.reason)));
     }
@@ -126,10 +131,15 @@ describe('Isapi', () => {
     await expect(Isapi.getDeviceInfo(testConfig())).rejects.toMatchObject({ httpStatus: 503 });
   });
 
-  it('takes a userCheck answered 200 with a rejection as a rejected login', async () => {
-    const rejected = '<userCheck><statusValue>401</statusValue><statusString>Unauthorized</statusString>' +
-      '<lockStatus>unlock</lockStatus><retryLoginTime>2</retryLoginTime></userCheck>';
-    const calls = mockDevice({ '/ISAPI/Security/userCheck': { body: rejected }, '/ISAPI/System/deviceInfo': { body: '<DeviceInfo/>' } });
+  /** A userCheck answered HTTP 200 with a rejection, as older firmware answers a wrong password. */
+  const REJECTED_IN_200 = '<userCheck><statusValue>401</statusValue><statusString>Unauthorized</statusString>' +
+    '<lockStatus>unlock</lockStatus><retryLoginTime>2</retryLoginTime></userCheck>';
+
+  it('takes a userCheck answered 200 with a rejection as a rejected login, when it carried the credentials', async () => {
+    const calls = mockDevice({
+      '/ISAPI/Security/userCheck': { challenge: true, body: REJECTED_IN_200 },
+      '/ISAPI/System/deviceInfo': { challenge: true, body: '<DeviceInfo/>' },
+    });
     const hook = vi.fn();
     Isapi.onAuthFailure = hook;
     const config = testConfig();
@@ -139,7 +149,23 @@ describe('Isapi', () => {
     expect(hook).toHaveBeenCalledWith(err);
     // Nothing sends these credentials again until the next Connect
     await expect(Isapi.getChannels(config)).rejects.toMatchObject({ attemptsLeft: 2 });
-    expect(calls).toEqual(['/ISAPI/Security/userCheck']);
+    expect(calls).toEqual(['/ISAPI/Security/userCheck', '/ISAPI/Security/userCheck']);
+  });
+
+  it('leaves the login to the device info when userCheck answers without asking for the credentials', async () => {
+    // Such firmware gives a request without credentials the same rejection: it judged nobody's password
+    const calls = mockDevice({
+      '/ISAPI/Security/userCheck': { body: REJECTED_IN_200 },
+      '/ISAPI/System/deviceInfo': { challenge: true, body: '<DeviceInfo><deviceName>NVR</deviceName></DeviceInfo>' },
+    });
+    const hook = vi.fn();
+    Isapi.onAuthFailure = hook;
+    const config = testConfig();
+    expect((await Isapi.getDeviceInfo(config)).deviceName).toBe('NVR');
+    expect(hook).not.toHaveBeenCalled();
+    expect(calls).toEqual(['/ISAPI/Security/userCheck', '/ISAPI/System/deviceInfo', '/ISAPI/System/deviceInfo']);
+    // The credentials stay usable
+    await expect(Isapi.getXml(config, '/ISAPI/System/deviceInfo')).resolves.toBeDefined();
   });
 
   it('falls back to the main stream when a camera has no sub-stream', async () => {

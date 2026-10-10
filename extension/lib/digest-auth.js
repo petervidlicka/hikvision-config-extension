@@ -136,7 +136,13 @@ export const md5 = (() => {
  * @typedef {{challenge: DigestChallenge, qop: 'auth'|null, nc: number}} DigestSession
  */
 
-/** @typedef {{status: number, headers: Headers, data: string|ArrayBuffer}} DigestResponse */
+/**
+ * A device's successful answer. `authenticated` says whether the request it
+ * answers carried our credentials: only then does the answer say anything
+ * about them (e.g. userCheck's verdict, see Isapi.checkLogin), since a
+ * device may answer some paths without asking for a login first.
+ * @typedef {{status: number, headers: Headers, data: string|ArrayBuffer, authenticated: boolean}} DigestResponse
+ */
 
 /**
  * Per-request options. Every request the UI makes should be bounded: without
@@ -428,7 +434,8 @@ export function forgetDigestSessions(config) {
  * Record a rejection that came in a successful answer's body (older
  * firmware answers userCheck with HTTP 200 and <statusValue>401</statusValue>),
  * so nothing sends these credentials again until the user presses Connect,
- * as after a 401.
+ * as after a 401. Only for an answer to a request that carried them
+ * (DigestResponse.authenticated): any other answer didn't judge them.
  * @param {DeviceConfig} config
  * @param {LoginStatus|null} status - what the device said
  * @returns {AuthError} the error to throw
@@ -466,7 +473,10 @@ function throwIfRejected(key) {
  * credentials (see `retries`). If that retry gets a 401 too, the
  * credentials are marked rejected, and every request waiting for it fails
  * without sending. A wrong password then costs each request in flight the
- * attempt it was already sent with, plus one retry for all of them.
+ * attempt it was already sent with, plus one retry for all of them. The
+ * refused challenge is dropped as the retry starts, so a retry cancelled or
+ * timed out before its verdict leaves the waiting requests to start over
+ * from an unauthenticated challenge, not to send the refused one again.
  *
  * The final 401's body is read (its start) for the device's explanation:
  * the AuthError then says whether the device has locked this computer out,
@@ -481,7 +491,8 @@ function throwIfRejected(key) {
  * @param {string|null} [body] - XML for PUT/POST
  * @param {RequestOptions} [options] - no time limit unless `timeoutMs` is given
  * @returns {Promise<DigestResponse>} images (by Content-Type, or from a "/picture" URL in any
- *   letter case) as ArrayBuffer, everything else as text
+ *   letter case) as ArrayBuffer, everything else as text; `authenticated` false when the device
+ *   answered without asking for the credentials
  * @throws {AuthError} the device rejected the credentials (now or earlier)
  * @throws {IsapiError} the device answered with an error status
  * @throws {TimeoutError} no complete answer within `timeoutMs`
@@ -517,16 +528,21 @@ export async function digestFetch(config, method, urlPath, body = null, { signal
     }
   };
 
+  /** Whether the latest send, whose answer this call returns, carried our credentials */
+  let credentialed = false;
   /** @param {string|null} authorization */
-  const send = (authorization) => network(() => fetch(url, {
-    method,
-    headers: {
-      ...(body ? { 'Content-Type': 'application/xml' } : {}),
-      ...(authorization ? { Authorization: authorization } : {}),
-    },
-    body,
-    signal: requestSignal,
-  }));
+  const send = (authorization) => {
+    credentialed = authorization !== null;
+    return network(() => fetch(url, {
+      method,
+      headers: {
+        ...(body ? { 'Content-Type': 'application/xml' } : {}),
+        ...(authorization ? { Authorization: authorization } : {}),
+      },
+      body,
+      signal: requestSignal,
+    }));
+  };
   /** @param {DigestSession} session */
   const authorize = (session) => buildDigestHeader(
     method.toUpperCase(), urlPath, session, config.username, config.password);
@@ -627,6 +643,12 @@ export async function digestFetch(config, method, urlPath, body = null, { signal
       resent = true;
       resp = await send(authorize(current));
     } else {
+      // The device refused the cached challenge: drop it, so that if this
+      // retry ends without a verdict (its caller cancels it, or it times
+      // out) the requests waiting for it start over without credentials,
+      // which costs no attempt, instead of each sending the refused
+      // challenge again, which may be one failed login apiece
+      if (used && digestSessions.get(credKey) === used) digestSessions.delete(credKey);
       resp = await retry(resp);
     }
   }
@@ -640,7 +662,7 @@ export async function digestFetch(config, method, urlPath, body = null, { signal
   /** @type {() => Promise<string|ArrayBuffer>} */
   const readBody = () => (isBinaryAnswer(resp, urlPath) ? resp.arrayBuffer() : resp.text());
   const data = await network(readBody);
-  return { status: resp.status, headers: resp.headers, data };
+  return { status: resp.status, headers: resp.headers, data, authenticated: credentialed };
 }
 
 /**

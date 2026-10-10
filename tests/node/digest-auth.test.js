@@ -163,8 +163,9 @@ describe('digestFetch against a mock device', () => {
   it('reuses the nonce: one request per call after the first', async () => {
     const first = await digestFetch(cfg, 'GET', '/ISAPI/System/deviceInfo');
     expect(first.data).toBe('<ok/>');
+    expect(first.authenticated).toBe(true);
     expect(device.requests).toBe(2);
-    await digestFetch(cfg, 'GET', '/ISAPI/x');
+    expect((await digestFetch(cfg, 'GET', '/ISAPI/x')).authenticated).toBe(true);
     await digestFetch(cfg, 'GET', '/ISAPI/y');
     expect(device.requests).toBe(4);
   });
@@ -229,6 +230,34 @@ describe('digestFetch against a mock device', () => {
         expect(await Promise.all([first, ...others])).toEqual(Array(4).fill(expect.any(AuthError)));
         expect(device.failedLogins).toBe(2);
         expect(device.requests).toBe(2 + 2);
+      });
+    } finally {
+      device.hold = null;
+      release();
+    }
+  });
+
+  it('keeps the refused challenge off the device when the retry is cancelled before its verdict', async () => {
+    await digestFetch(cfg, 'GET', '/warm');
+    let arrived;
+    const retryArrived = new Promise(resolve => { arrived = resolve; });
+    let release;
+    // Hold the retry (the 2nd request after warming up) at the device
+    device.hold = { at: device.requests + 2, arrived, release: new Promise(resolve => { release = resolve; }) };
+    try {
+      await withPassword('changed-on-device', async () => {
+        // A live feed stopped (or paused) while its request was retrying
+        const feed = new AbortController();
+        const first = digestFetch(cfg, 'GET', '/grid/1', null, { signal: feed.signal }).catch(e => e);
+        await retryArrived;
+        const others = [2, 3, 4].map(i => digestFetch(cfg, 'GET', `/grid/${i}`).catch(e => e));
+        await new Promise(resolve => setTimeout(resolve, 50));
+        feed.abort();
+        expect((await first).name).toBe('AbortError');
+        expect(await Promise.all(others)).toEqual(Array(3).fill(expect.any(AuthError)));
+        // The first request's attempt and one retry; the others started over without credentials
+        expect(device.failedLogins).toBe(2);
+        expect(device.requests).toBe(2 + 2 + 3 + 1);
       });
     } finally {
       device.hold = null;

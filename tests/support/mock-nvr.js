@@ -251,6 +251,12 @@ function picturesOn(day) {
  * Create the fake device. Returns its observable state and a fetch
  * replacement; requests to other hosts go to `realFetch`.
  *
+ * It accepts any request unless `digestAuth` is set: then, like V4.75, it
+ * answers a request without credentials, or with a nonce it never issued,
+ * with a 401 challenge carrying a fresh nonce (not a failed login), and
+ * accepts any nonce it issued (`authorized` counts those requests), so the
+ * page keeps a cached challenge as with the real NVR.
+ *
  * Tests can make it misbehave: `unreachable` fails every request like a
  * wrong IP address, `rejectAuth` answers every request with a 401 like a
  * password changed on the device (each with a fresh nonce, like V4.75;
@@ -295,7 +301,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     /** @type {{width: number, height: number}|null} */
     fullSizeStill: FULL_SIZE_STILL,
     requests: [], urls: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
-    unreachable: false, failedLogins: 0, noncesIssued: 0,
+    unreachable: false, failedLogins: 0, noncesIssued: 0, digestAuth: false, authorized: 0,
     /** @type {null | {lockStatus: 'lock'|'unlock', unlockTime: number, retryLoginTime: number}} */
     loginLock: null,
     /** @type {Record<string, {httpStatus: number, statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string, times?: number}>} */
@@ -315,6 +321,21 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     recordings: DAILY_RECORDINGS,
     /** @type {string[]} the bodies of recording and picture searches */
     searches: [],
+  };
+  /** Every nonce the device has issued; it accepts each of them again, like V4.75. */
+  const nonces = new Set();
+  /**
+   * A 401 with a fresh nonce, as V4.75 answers every request it doesn't accept.
+   * @param {string} [body]
+   * @param {string} [type]
+   */
+  const unauthorized = (body = UNAUTHORIZED_HTML, type = 'text/html') => {
+    const nonce = `n${++device.noncesIssued}`;
+    nonces.add(nonce);
+    return new Response(body, {
+      status: 401,
+      headers: { 'Content-Type': type, 'WWW-Authenticate': `Digest realm="r", qop="auth", nonce="${nonce}", stale="FALSE"` },
+    });
   };
   const xml = (body, status = 200) => new Response(body, { status, headers: { 'Content-Type': 'application/xml; charset="UTF-8"' } });
   const json = (body) => new Response(body, { status: 200, headers: { 'Content-Type': 'application/json; charset="UTF-8"' } });
@@ -356,17 +377,16 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     const hold = device.holds[`${method} ${p}`];
     if (hold) await hold;
     if (device.unreachable) throw new TypeError('Failed to fetch');
+    const authorization = new Headers(opts.headers).get('Authorization');
     if (device.rejectAuth) {
-      const credentialed = new Headers(opts.headers).has('Authorization');
-      if (credentialed) device.failedLogins++;
-      const explained = credentialed && device.loginLock && p === '/ISAPI/Security/userCheck';
-      return new Response(explained ? userCheckRejectedXml(device.loginLock) : UNAUTHORIZED_HTML, {
-        status: 401,
-        headers: {
-          'Content-Type': explained ? 'application/xml' : 'text/html',
-          'WWW-Authenticate': `Digest realm="r", qop="auth", nonce="n${++device.noncesIssued}", stale="FALSE"`,
-        },
-      });
+      if (authorization) device.failedLogins++;
+      const explained = authorization && device.loginLock && p === '/ISAPI/Security/userCheck';
+      return explained ? unauthorized(userCheckRejectedXml(device.loginLock), 'application/xml') : unauthorized();
+    }
+    if (device.digestAuth) {
+      const nonce = /\bnonce="([^"]*)"/.exec(authorization ?? '')?.[1];
+      if (!nonce || !nonces.has(nonce)) return unauthorized();
+      device.authorized++;
     }
     const failure = device.failures[`${method} ${p}`];
     if (failure) {

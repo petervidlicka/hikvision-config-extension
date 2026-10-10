@@ -643,19 +643,44 @@ describe('config page', () => {
     });
   });
 
-  it('stops everything after one failed login when the device rejects the password', async () => {
+  it('stops all four feeds after one retry when the device rejects the password mid-session', async () => {
     $('liveViewSectionTab').click();
-    device.rejectAuth = true;
-    await vi.waitFor(() => expect(state.connected).toBe(false), { timeout: 5000 });
-    const afterRejection = device.requests.length;
-    await new Promise(r => setTimeout(r, 2500));
+    $('gridViewTab').click();
+    // From now on the device challenges requests without credentials, as the NVR does,
+    // so the feeds send a cached challenge (a warm session) when the password changes
+    device.digestAuth = true;
+    device.snapshotDelayMs = 300;
+    const pictures = [1, 2, 3, 4].map(ch => `GET /ISAPI/Streaming/channels/${ch}02/picture`);
+    let release = () => {};
+    try {
+      await vi.waitFor(() => expect(device.authorized).toBeGreaterThanOrEqual(8), { timeout: 5000 });
+      // The password changes; hold each feed's next request at the device until all four
+      // are on their way with the cached challenge, the worst case
+      const held = new Promise(resolve => { release = resolve; });
+      pictures.forEach(request => { device.holds[request] = held; });
+      device.failedLogins = 0;
+      device.rejectAuth = true;
+      const since = device.requests.length;
+      await vi.waitFor(() => expect(new Set(device.requests.slice(since))).toEqual(new Set(pictures)), { timeout: 3000 });
+      pictures.forEach(request => { delete device.holds[request]; });
+      release();
+      await vi.waitFor(() => expect(state.connected).toBe(false), { timeout: 5000 });
+      const afterRejection = device.requests.length;
+      await new Promise(r => setTimeout(r, 2500));
 
-    expect(device.requests.length).toBe(afterRejection);
-    // Every request in flight got a 401, but only one of them retried with the password
-    expect(device.failedLogins).toBe(1);
-    expect($('connectionForm').style.display).toBe('block');
-    expect($('passInput').value).toBe('');
-    expect(toast()).toBe('The device rejected the login. Re-enter the password to reconnect.');
+      expect(device.requests.length).toBe(afterRejection);
+      // The four requests already sent with the cached challenge, then one retry for all
+      // of them (a retry each would make it 8)
+      expect(device.failedLogins).toBe(4 + 1);
+      expect($('connectionForm').style.display).toBe('block');
+      expect($('passInput').value).toBe('');
+      expect(toast()).toBe('The device rejected the login. Re-enter the password to reconnect.');
+    } finally {
+      pictures.forEach(request => { delete device.holds[request]; });
+      release();
+      device.digestAuth = false;
+      device.snapshotDelayMs = 1200;
+    }
   });
 
   it('logs in with userCheck and keeps the plain message for an unexplained rejection', async () => {

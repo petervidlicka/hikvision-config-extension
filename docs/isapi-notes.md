@@ -402,17 +402,23 @@ also on another connection, with a rising `nc`. So `digestFetch` lets one
 request per credentials make that retry while the others wait for it, then
 send with the challenge it proved, or fail without sending: a password changed
 on the device costs each request already on its way one failed login, plus one
-for the retry. Credentials the device rejected are never sent again until
-the user presses Connect, and Connect and disconnect drop the cached
-challenges, so Connect starts from an unauthenticated challenge (which costs
-no attempt).
+for the retry. The retry drops the refused cached challenge first, so if it
+is cancelled (a live feed stopped) or times out before its verdict, the
+waiting requests start over without credentials (a challenge, no attempt)
+rather than each sending the refused challenge again. Credentials the
+device rejected are never sent again until the user presses Connect, and
+Connect and disconnect drop the cached challenges, so Connect starts from an
+unauthenticated challenge (which costs no attempt).
 
 Connect logs in with `GET /ISAPI/Security/userCheck` first, like the web UI in
 Digest mode and HCNetSDK (the DS-7604NI has `isSupportUserCheck`), then reads
 `/ISAPI/System/deviceInfo`. An accepted userCheck answers `<statusValue>200`;
 older firmware answers HTTP 200 with `<statusValue>401</statusValue>` for a
-wrong password, which counts as a rejection. A device without userCheck
-(404, 403 `notSupport`) leaves the check to deviceInfo. Unauthenticated 401s
+wrong password, which counts as a rejection only when that request carried
+the credentials (`DigestResponse.authenticated`). Connect's userCheck goes
+out without them, so firmware that answers it without a challenge says 401
+to nobody in particular; that answer, like a device without userCheck (404,
+403 `notSupport`), leaves the check to deviceInfo. Unauthenticated 401s
 are an HTML page, but a rejected *credentialed* userCheck can explain itself
 in XML (`statusValue`, `lockStatus` lock/unlock, `unlockTime` in seconds,
 `retryLoginTime` = attempts left, `subStatusCode`), which the web UI turns into
