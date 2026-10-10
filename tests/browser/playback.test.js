@@ -145,11 +145,17 @@ describe('recording search', () => {
     for (const uri of [`http://192.168.0.108.${path}`, `https://Proxy.example:8443${path}`, `rtsp://10.0.0.5${path}`, path]) {
       expect(storedPicturePath(uri), uri).toBe(path);
     }
+    // The path as an http: request sends it, where a backslash separates segments
+    expect(storedPicturePath('rtsp://10.0.0.5/picture/x\\y?name=a')).toBe('/picture/x/y?name=a');
   });
 
   it('refuses any other resource as a stored picture, also through dot segments', () => {
     for (const uri of ['http://192.168.0.108/ISAPI/Security/users', 'http://192.168.0.108/picture/../ISAPI/Security/users',
-      'http://192.168.0.108/picture/%2E%2E/ISAPI/Security/users', 'http://192.168.0.108/Picture/x', '/pictures/x', 'http://']) {
+      'http://192.168.0.108/picture/%2E%2E/ISAPI/Security/users', 'http://192.168.0.108/Picture/x', '/pictures/x', 'http://',
+      // In another scheme "\" isn't a separator, so "..\" can survive the URI's parse and the http: request resolve it
+      // (the standard parser keeps "/..\"; Chromium resolves that one but keeps "\..\")
+      'rtsp://h/picture/..\\ISAPI/Security/users', 'foo:/picture/..\\ISAPI/x', 'rtsp://h/picture/%2e%2e\\ISAPI/x',
+      'rtsp://h/picture/x\\..\\..\\ISAPI/Security/users', 'foo:/picture/a\\..\\..\\ISAPI/x']) {
       expect(() => storedPicturePath(uri), uri).toThrow(/isn’t a stored picture/);
     }
   });
@@ -298,7 +304,9 @@ describe('Isapi playback requests', () => {
   it('fetches nothing but stored pictures', async () => {
     const urls = stubPictures();
     for (const uri of ['http://10.9.9.8/ISAPI/Security/users', 'http://10.9.9.8/picture/../ISAPI/Security/users',
-      'http://10.9.9.8/picture/%2e%2e/ISAPI/Security/users', 'http://10.9.9.8/pictures/x', 'http://10.9.9.8/picture', 'http://']) {
+      'http://10.9.9.8/picture/%2e%2e/ISAPI/Security/users', 'http://10.9.9.8/pictures/x', 'http://10.9.9.8/picture', 'http://',
+      'rtsp://h/picture/..\\ISAPI/Security/users', 'foo:/picture/..\\ISAPI/x', 'rtsp://h/picture/%2e%2e\\ISAPI/x',
+      'rtsp://h/picture/x\\..\\..\\ISAPI/Security/users', 'foo:/picture/a\\..\\..\\ISAPI/x']) {
       await expect(Isapi.getStoredPicture(config(), uri), uri).rejects.toThrow(/isn’t a stored picture/);
     }
     expect(urls).toEqual([]);

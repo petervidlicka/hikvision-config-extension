@@ -714,10 +714,14 @@ rewrite it, and other firmware may write its own LAN address. The web UI's
 address it is connected to. The extension does the same
 (`storedPicturePath` in `lib/playback.js`): it requests the URI's path and
 query from the connected device, whatever scheme, host and port the URI
-names, and only when the path, with `.`/`..` segments resolved, starts with
-`/picture/`. It used to refuse any URI whose host wasn't exactly the one
-typed, so a hostname typed in capitals got no pictures. The DS-7604NI's
-stored pictures are 1280×720.
+names, and only when the path starts with `/picture/` both in the URI and as
+it will be requested on an `http:` address, with `.`/`..` segments resolved
+and `\` taken as `/`. It requests that resolved path. The second check is needed
+because a URI of another scheme, such as `rtsp:`, doesn't take `\` as a
+separator: `rtsp://h/picture/a\..\..\ISAPI/…` keeps its path, which the
+request would resolve to `/ISAPI/…`. It used to refuse any URI whose host
+wasn't exactly the one typed, so a hostname typed in capitals got no
+pictures. The DS-7604NI's stored pictures are 1280×720.
 
 ### Stills from recordings
 

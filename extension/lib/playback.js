@@ -195,8 +195,11 @@ const STORED_PICTURE_PREFIX = '/picture/';
  * rewrite), and other firmware may write its own LAN address.
  *
  * Only the picture store is followed, so a search answer can't point the
- * login at any other resource. The URL parser resolves "." and ".." segments
- * (also percent-encoded) before the check.
+ * login at any other resource. The check is made on the path as it will be
+ * requested: appended to an http: address, as digestFetch does, where "." and
+ * ".." segments (also percent-encoded) are resolved and a backslash separates
+ * segments too, whatever scheme the URI had. The path returned is that
+ * resolved one, so the request line and the Digest uri name the same thing.
  * @param {string} uri - a StoredPicture's uri
  * @returns {string} e.g. "/picture/Streaming/tracks/103/?name=…&size=…"
  * @throws {Error} when the URI isn't a stored picture's
@@ -207,14 +210,20 @@ const STORED_PICTURE_PREFIX = '/picture/';
 export function storedPicturePath(uri) {
   const message = `The device listed this picture at an address that isn’t a stored picture: ${uri}`;
   let url;
+  let sent;
   try {
     // The base only lets a bare path through; its host is never used
     url = new URL(uri, 'http://device');
+    // A URI of another scheme (rtsp:, …) keeps "..\" as a plain segment,
+    // which an http: request would resolve
+    sent = new URL(`http://device${url.pathname}${url.search}`);
   } catch (err) {
     throw new Error(message, { cause: err });
   }
-  if (!url.pathname.startsWith(STORED_PICTURE_PREFIX)) throw new Error(message);
-  return url.pathname + url.search;
+  if (!url.pathname.startsWith(STORED_PICTURE_PREFIX) || !sent.pathname.startsWith(STORED_PICTURE_PREFIX)) {
+    throw new Error(message);
+  }
+  return sent.pathname + sent.search;
 }
 
 /**
