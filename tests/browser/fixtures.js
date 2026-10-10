@@ -1,7 +1,11 @@
 /**
- * Test fixtures: synthetic and NVR-shaped XML committed in tests/fixtures,
- * plus any real device captures in tests/fixtures/local (git-ignored; made
- * with tests/capture-fixtures.sh).
+ * Test fixtures committed in tests/fixtures, plus any real device captures in
+ * tests/fixtures/local (git-ignored; made with tests/capture-fixtures.sh).
+ *
+ * Files named *-nvr are captures from the DS-7604NI-K1/4P (firmware
+ * V4.75.206) that docs/isapi-notes.md describes, with serial numbers and
+ * device ids removed. The others are synthetic: each says in a comment why
+ * it exists and how the DS-7604NI differs.
  */
 import motionDetection from '../fixtures/motionDetection.xml?raw';
 import motionDetectionNvr from '../fixtures/motionDetection-nvr.xml?raw';
@@ -30,10 +34,17 @@ import streamingChannelsNvr from '../fixtures/streamingChannels-nvr.xml?raw';
 import systemTimeNvr from '../fixtures/systemTime-nvr.xml?raw';
 
 export const fixtures = {
+  // Synthetic: the hikvision.com namespace and an empty targetType with xmlns="" (see the file)
+  motionDetection,
   // motionDetectionNvr is the DS-7604NI's channel 1 config as captured, with its capabilities
   // (the same at the InputProxy and System URLs) and layout capabilities
-  motionDetection, motionDetectionNvr, motionCapabilitiesNvr, motionLayoutCapabilitiesNvr,
-  privacyMask, privacyMaskNvr, privacyMaskNvrRegions, eventTrigger, eventTriggerNvr,
+  motionDetectionNvr, motionCapabilitiesNvr, motionLayoutCapabilitiesNvr,
+  // Synthetic: a camera with fixed mask slots (see the file)
+  privacyMask,
+  // The DS-7604NI's channel 1 masks as captured (none), and channel 3's after a write test (two regions)
+  privacyMaskNvr, privacyMaskNvrRegions,
+  // Synthetic: a camera-style trigger (see the file); the DS-7604NI's channel 1 trigger as captured
+  eventTrigger, eventTriggerNvr,
   // DS-7604NI captures (channel 3: its camera has a relay, white light and speaker); the -io301 and
   // -whitelight triggers are what the NVR stored after its own web UI's linkage was PUT
   eventTriggerNvrVmd3, eventTriggerNvrVmd3Io301, eventTriggerNvrVmd3WhiteLight, triggersCapNvr, ioOutputsNvr,

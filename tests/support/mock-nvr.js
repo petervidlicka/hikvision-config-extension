@@ -229,7 +229,8 @@ function wallClock(moment) {
 
 /**
  * Every day's recordings: continuous 08:00–08:30, a manual one at 10:00 and
- * a motion event at 14:05.
+ * a motion event at 14:05, so the timeline shows each kind. The DS-7604NI
+ * records on a schedule only, and its searches return nothing but "timing".
  * @type {{start: string, end: string, type: string}[]}
  */
 const DAILY_RECORDINGS = [
@@ -480,7 +481,8 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
     if (p === '/ISAPI/System/Video/inputs/channels') return xml(responseStatusXml(p, STATUS.notSupport), 403);
     if (p === '/ISAPI/ContentMgmt/InputProxy/channels') {
-      // The DS-7604NI's camera addresses: channels 3 and 4 own outputs 301 and 401
+      // The DS-7604NI's camera addresses: channels 3 and 4 own outputs 301 and 401. The names
+      // are made up, two of them to check that names are escaped
       const channel = (id, name, ip) => `<InputProxyChannel><id>${id}</id><name>${name}</name>` +
         `<sourceInputPortDescriptor><ipAddress>${ip}</ipAddress></sourceInputPortDescriptor></InputProxyChannel>`;
       return xml('<InputProxyChannelList>' +

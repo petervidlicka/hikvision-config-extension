@@ -1,6 +1,8 @@
 /**
  * Vitest config. Projects:
- * - node: pure logic (Digest auth against a local HTTP server, network scan)
+ * - node: pure logic in extension/lib (Digest auth against a local HTTP
+ *   server, the network scan, snapshots and their pacing, shapes, device
+ *   time, picture sizes, the recordings calendar cache)
  * - browser: anything that needs the real browser XML stack or DOM, run
  *   headless in the locally installed Google Chrome (no browser download)
  * - the same in time zones with daylight saving (tests/timezones): playback

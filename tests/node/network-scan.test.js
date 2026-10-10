@@ -23,7 +23,10 @@ const activateStatus = (activated) => ({
   body: '<?xml version="1.0" encoding="UTF-8" ?>\n<ActivateStatus version="1.0" ' +
     `xmlns="http://www.hikvision.com/ver20/XMLSchema">\n<Activated>${activated}</Activated>\n</ActivateStatus>\n`,
 });
-/** The DS-7604NI's unauthenticated answer to any /ISAPI path. */
+/**
+ * The DS-7604NI's unauthenticated answer to any /ISAPI path. Its realm is an
+ * opaque 24-digit hex id, which may be the device's own, so it is made up here.
+ */
 const DIGEST = {
   status: 401,
   headers: { 'www-authenticate': 'Digest realm="0123456789abcdef01234567", domain="/", qop="auth", nonce="n", algorithm="MD5", stale="FALSE"' },

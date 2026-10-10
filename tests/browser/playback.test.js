@@ -12,6 +12,8 @@ import { Isapi, MAX_SEARCH_REQUESTS } from '../../extension/lib/isapi.js';
 import { parseXml } from '../../extension/lib/xml.js';
 import searchPage1 from '../fixtures/search-page1.xml?raw';
 import calendar from '../fixtures/calendar.xml?raw';
+// The DS-7604NI's calendar for channel 1, October 2026, asked on the 10th
+import calendarNvr from '../fixtures/calendar-nvr.xml?raw';
 // The DS-7604NI's answers to one 3-day video search (10-07 to 10-10, 139
 // recordings) and one 10-day picture search (113 pictures), page by page.
 // Each page holds at most 64 matches although maxResults asked for 100.
@@ -125,6 +127,11 @@ describe('recording search', () => {
 
   it('parses the month calendar', () => {
     expect(parseCalendar(parseXml(calendar))).toEqual([2, 9, 10]);
+  });
+
+  it('parses the device’s month calendar, which lists every day', () => {
+    expect(parseXml(calendarNvr).getElementsByTagNameNS('*', 'day')).toHaveLength(31);
+    expect(parseCalendar(parseXml(calendarNvr))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 
   it('takes a stored picture’s path and query from its URI, whatever scheme, host and port it names', () => {
