@@ -3,8 +3,10 @@
  *
  * Config is edited in place on the document the device returned, so fields
  * this extension doesn't know about survive a save untouched. Lookups match
- * on local name because ISAPI documents use a default namespace
- * (http://www.hikvision.com/ver20/XMLSchema) and some firmware mixes in
+ * on local name because the namespace varies by document, and within one:
+ * most use http://www.hikvision.com/ver20/XMLSchema, motion and privacy-mask
+ * documents use http://www.isapi.org/ver20/XMLSchema, list items can
+ * redeclare the other one, some answers have none, and some firmware mixes in
  * elements with an empty namespace.
  */
 

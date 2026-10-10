@@ -169,13 +169,22 @@ extension then fails with "Unsupported digest algorithm".
 ## Errors, write results and time limits
 
 Error answers carry a `<ResponseStatus>` body (`statusCode`, `statusString`,
-`subStatusCode`, sometimes `subStatusString`). Config documents use the
-`isapi.org/ver20` namespace but error bodies from the DS-7604NI use
-`hikvision.com/ver20`, and `/SDK/` endpoints answer in `urn:psialliance-org`
-without a `subStatusCode`, so `lib/errors.js` matches by local name and also
-accepts the JSON form. A path the NVR doesn't have answers
-403 `notSupport`, not 404. `subStatusString` can mislead: a crossing motion
-polygon got "Tag 32 is invalid (two root tags)".
+`subStatusCode`, sometimes `subStatusString`). The namespace says little
+about a document. On the DS-7604NI only the motion documents (config,
+capabilities, layout capabilities), the privacy-mask documents and the
+per-trigger `Event/triggers/VMD-n` (and its `notifications`) use
+`isapi.org/ver20`. Everything else uses `hikvision.com/ver20`: deviceInfo, the
+channel lists and channel status, triggersCap, the IO outputs, System/time,
+the search and calendar answers, `/SDK/activateStatus` and every error body
+from `/ISAPI`. The stream lists (`Streaming/channels`,
+`StreamingProxy/channels`) and the full `Event/triggers` list mix the two: a
+`hikvision.com` root whose `StreamingChannel` and `EventTrigger` items
+redeclare `isapi.org`. userCheck and the motion arming schedule have no
+default namespace, and `/SDK/play`'s error answers use `urn:psialliance-org`
+without a `subStatusCode`. So `lib/errors.js` and every reader match elements
+by local name, and `lib/errors.js` also accepts the JSON form. A path the NVR
+doesn't have answers 403 `notSupport`, not 404. `subStatusString` can
+mislead: a crossing motion polygon got "Tag 32 is invalid (two root tags)".
 
 A successful PUT or DELETE also returns a ResponseStatus. Like the web UI's
 `response.js`, only `statusCode` 1 (OK) counts as success, and 7 means
@@ -543,7 +552,7 @@ The web UI (`config/image/privacyMask.js`) and write tests on the DS-7604NI
   the whole picture, with Y measured from the **bottom**. A region at
   `positionY` 432–576 masked the top quarter of the image. The web UI converts
   with `1 - positionY / height`, like motion regions. The camera overlays
-  (`…/video/overlays`, 704×576 in the older `hikvision.com` namespace) count
+  (`…/video/overlays`, 704×576 in the `hikvision.com` namespace) count
   Y from the bottom too. The extension clamps saved rectangles to the screen.
 - **The per-region `<enabled>` flag does nothing on this NVR.** Every stored
   region reads back with `<enabled>false</enabled>`, and a region sent with

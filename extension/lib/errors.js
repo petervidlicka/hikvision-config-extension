@@ -20,12 +20,12 @@
 
 /**
  * The status a device reports in a <ResponseStatus> body: XML in any
- * namespace (hikvision.com and isapi.org ver20, or PSIA on older firmware),
- * or the JSON form. Fields the body doesn't have are null.
+ * namespace (hikvision.com and isapi.org ver20, or urn:psialliance-org as
+ * /SDK/play answers), or the JSON form. Fields the body doesn't have are null.
  * @typedef {object} ResponseStatus
  * @property {number|null} statusCode - 1 OK, 2 busy, 3 device error, 4 invalid operation, 5 bad XML format, 6 bad XML content, 7 OK but reboot required
  * @property {string|null} statusString - the device's short text, e.g. "Invalid Operation"
- * @property {string|null} subStatusCode - the specific reason, e.g. "notSupport"; PSIA firmware omits it
+ * @property {string|null} subStatusCode - the specific reason, e.g. "notSupport"; PSIA bodies omit it
  * @property {string|null} subStatusString - detail some firmware adds, e.g. "Tag 16 is invalid (two root tags)"
  */
 
