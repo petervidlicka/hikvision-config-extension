@@ -395,7 +395,10 @@ for PAL or 15 for NTSC, sensitivity 0–5).
   document without a grid.
 - **Sensitivity levels**: `sensitivityLevel@min/max/step` in the capabilities,
   else in `…/motionDetection/layout/capabilities` (the web UI's `motionCapa`,
-  where it always reads them; 0–100 step 20 on the DS-7604NI). With neither,
+  where it always reads them; 0–100 step 20 on the DS-7604NI). The layout's
+  own level is read first (`MotionDetectionLayout > sensitivityLevel`, the
+  root's child in the layout capabilities), then the first other one that
+  states min and max, so a per-region level can't set the steps. With neither,
   the slider is locked and the stored level is sent back unchanged, never
   snapped to a guessed step: the DS-7604NI stores a level between steps as the
   step below (37 became 20).
@@ -414,7 +417,9 @@ for PAL or 15 for NTSC, sensitivity 0–5).
   the capabilities (4 on the DS-7604NI; 4 when unknown).
 - **How many corners**: `MotionDetectionLayout > regionEdgesNum@min` to
   `@max` (4–10 on the DS-7604NI, which stores a 4-corner region on channel 3
-  and a 10-corner one on channel 4; 3–10 when unknown). The web UI passes
+  and a 10-corner one on channel 4; 3–10 when unknown). Without the
+  capabilities the extension reads `regionEdgesNum` and `targetType@opt` from
+  the layout capabilities, which state them on the DS-7604NI too. The web UI passes
   `@max + 1` (else 5) to its drawing plugin as `PointNumMax`, with
   `MinClosed` 5: those are plugin click counts, which include the click that
   closes the polygon, not corner counts.

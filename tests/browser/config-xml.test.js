@@ -197,6 +197,31 @@ describe('motion detection', () => {
     expect(readSensitivityRange(null)).toBeNull();
   });
 
+  it('takes the layout’s own sensitivity levels before any other level in the document', () => {
+    // A per-region level earlier in the document, with other steps or none at all
+    const layoutLevels = '<MotionDetectionLayout><sensitivityLevel min="0" max="100" step="20">40</sensitivityLevel></MotionDetectionLayout>';
+    for (const earlier of ['<sensitivityLevel min="0" max="100">50</sensitivityLevel>', '<sensitivityLevel>3</sensitivityLevel>']) {
+      const caps = parseXml(`<MotionDetection><MotionDetectionRegionList><MotionDetectionRegion>${earlier}` +
+        `</MotionDetectionRegion></MotionDetectionRegionList>${layoutLevels}</MotionDetection>`);
+      expect(readSensitivityRange(caps)).toEqual({ min: 0, max: 100, step: 20 });
+    }
+    // The layout capabilities' root is the layout
+    expect(readSensitivityRange(parseXml('<MotionDetectionLayout><RegionList><sensitivityLevel min="0" max="5"/></RegionList>' +
+      '<sensitivityLevel min="0" max="100" step="20">40</sensitivityLevel></MotionDetectionLayout>'))).toEqual({ min: 0, max: 100, step: 20 });
+    // No levels in the layout: the first level elsewhere that states min and max
+    expect(readSensitivityRange(parseXml('<MotionDetection><A><sensitivityLevel>3</sensitivityLevel></A>' +
+      '<B><sensitivityLevel min="1" max="6"/></B></MotionDetection>'))).toEqual({ min: 1, max: 6, step: 1 });
+  });
+
+  it('takes the corners and targets from the layout capabilities when the capabilities can’t be read', () => {
+    expect(readMotionCapabilities(null, parseXml(fixtures.motionLayoutCapabilitiesNvr))).toEqual({
+      regionTypes: [], maxRegions: 4, minPoints: 4, maxPoints: 10, sensitivity: { min: 0, max: 100, step: 20 }, targetTypes: ['human', 'vehicle'],
+    });
+    // Layout capabilities that state none of them leave the defaults
+    expect(readMotionCapabilities(null, parseXml('<MotionDetectionLayout><sensitivityLevel>40</sensitivityLevel></MotionDetectionLayout>')))
+      .toEqual(readMotionCapabilities(null));
+  });
+
   it('snaps a sensitivity to the nearest level the camera accepts', () => {
     const levels = { min: 0, max: 100, step: 20 };
     expect([0, 9, 10, 37, 50, 99, 140, -5].map(v => snapSensitivity(v, levels))).toEqual([0, 0, 20, 40, 60, 100, 100, 0]);

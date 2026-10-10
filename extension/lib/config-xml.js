@@ -89,32 +89,46 @@ export function optList(el) {
  *
  * The sensitivity levels come from it, or else from the
  * motionDetection/layout/capabilities document, where Hikvision's web UI
- * reads them; with neither, they stay unknown (null).
+ * reads them; with neither, they stay unknown (null). Without the
+ * capabilities, the layout capabilities also give the corners per region
+ * and the detection targets when they state them (the DS-7604NI's do), so a
+ * region the camera would refuse can't be drawn; the region types stay
+ * unknown, since only the capabilities list them.
  * @param {XMLDocument|null} doc - the capabilities, or null when the device didn't give them
  * @param {XMLDocument|null} [layoutDoc] - the layout capabilities, when fetched
  * @returns {MotionCapabilities}
  */
 export function readMotionCapabilities(doc, layoutDoc = null) {
   const d = DEFAULT_MOTION_CAPABILITIES;
-  const sensitivity = readSensitivityRange(doc) ?? readSensitivityRange(layoutDoc);
-  if (!doc) return { ...d, regionTypes: [], targetTypes: [], sensitivity };
-  const root = doc.documentElement;
-  const layout = childElement(root, 'MotionDetectionLayout');
+  const layout = capabilitiesLayout(doc ?? layoutDoc);
   const edges = childElement(layout, 'regionEdgesNum');
   return {
-    regionTypes: optList(childElement(root, 'regionType')),
+    regionTypes: doc ? optList(childElement(doc.documentElement, 'regionType')) : [],
     maxRegions: intAttr(xmlPath(layout, 'layout', 'RegionList'), 'size', d.maxRegions),
     minPoints: intAttr(edges, 'min', d.minPoints),
     maxPoints: intAttr(edges, 'max', d.maxPoints),
-    sensitivity,
+    sensitivity: readSensitivityRange(doc) ?? readSensitivityRange(layoutDoc),
     targetTypes: optList(childElement(layout, 'targetType')),
   };
 }
 
 /**
- * The sensitivity levels a capabilities document states: its
- * <sensitivityLevel> with min and max (a step of 1 when it gives none).
- * Works on both the motion capabilities and the layout capabilities.
+ * Where a capabilities document states the motion layout's limits: the root
+ * of the layout capabilities, or the motion capabilities' MotionDetectionLayout.
+ * @param {XMLDocument|null} doc
+ * @returns {Element|null}
+ */
+function capabilitiesLayout(doc) {
+  const root = doc?.documentElement ?? null;
+  return root?.localName === 'MotionDetectionLayout' ? root : childElement(root, 'MotionDetectionLayout');
+}
+
+/**
+ * The sensitivity levels a capabilities document states: the layout's own
+ * <sensitivityLevel> with min and max (a step of 1 when it gives none), else
+ * the first one elsewhere in the document that has both. The layout's comes
+ * first because a per-region level earlier in the document may give other
+ * steps. Works on both the motion capabilities and the layout capabilities.
  * @param {XMLDocument|null} doc
  * @returns {SensitivityRange|null} null when the document doesn't say
  * @example
@@ -122,11 +136,21 @@ export function readMotionCapabilities(doc, layoutDoc = null) {
  * readSensitivityRange(layoutCaps) // → {min: 0, max: 100, step: 20}
  */
 export function readSensitivityRange(doc) {
-  const el = doc ? findDescendant(doc.documentElement, 'sensitivityLevel') : null;
-  const min = intAttr(el, 'min', NaN);
-  const max = intAttr(el, 'max', NaN);
-  if (Number.isNaN(min) || Number.isNaN(max) || max < min) return null;
-  return { min, max, step: Math.max(1, intAttr(el, 'step', 1)) };
+  const root = doc?.documentElement;
+  if (!root) return null;
+  const levels = [
+    childElement(root, 'sensitivityLevel'),
+    childElement(capabilitiesLayout(doc), 'sensitivityLevel'),
+    ...root.getElementsByTagNameNS('*', 'sensitivityLevel'),
+  ];
+  for (const el of levels) {
+    const min = intAttr(el, 'min', NaN);
+    const max = intAttr(el, 'max', NaN);
+    if (!Number.isNaN(min) && !Number.isNaN(max) && max >= min) {
+      return { min, max, step: Math.max(1, intAttr(el, 'step', 1)) };
+    }
+  }
+  return null;
 }
 
 /**
