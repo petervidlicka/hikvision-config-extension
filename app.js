@@ -134,6 +134,15 @@ function handleAuthFailure() {
 }
 Isapi.onAuthFailure = handleAuthFailure;
 
+/**
+ * The active channel with its kind, which decides the ISAPI URL family.
+ * @returns {{id: string, name: string, kind: 'analog'|'digital'}}
+ */
+function activeChannelInfo() {
+  return state.channels.find(ch => ch.id === state.activeChannel)
+    ?? { id: state.activeChannel, name: '', kind: 'analog' };
+}
+
 /** Display name for a channel, falling back to its number. */
 function channelLabel(ch) {
   return ch.name || `Channel ${ch.id}`;
@@ -200,8 +209,8 @@ ToolRegistry.register({
       <div class="toggle" id="motionToggle"></div>
     </div>
     <div class="slider-group">
-      <label>Sensitivity <span id="sensitivityVal">50</span></label>
-      <input type="range" id="sensitivitySlider" min="0" max="100" value="50" />
+      <label>Sensitivity <span id="sensitivityVal">40</span></label>
+      <input type="range" id="sensitivitySlider" min="0" max="100" step="20" value="40" />
     </div>
     <div class="toggle-row">
       <span>Dynamic Analysis</span>
@@ -210,14 +219,15 @@ ToolRegistry.register({
     <div class="target-detection-row" id="targetDetectionRow">
       <label class="target-label">Detection Target</label>
       <div class="target-checkboxes">
-        <label class="target-checkbox"><input type="checkbox" id="detectHuman" /> Person</label>
-        <label class="target-checkbox"><input type="checkbox" id="detectVehicle" /> Vehicle</label>
+        <label class="target-checkbox" id="detectHumanLabel"><input type="checkbox" id="detectHuman" /> Person</label>
+        <label class="target-checkbox" id="detectVehicleLabel"><input type="checkbox" id="detectVehicle" /> Vehicle</label>
       </div>
     </div>
     <div class="instructions">
       <strong>Click</strong> to place vertices and draw a detection region.
       <strong>Double-click</strong> or click near the start to close the shape.
-      <strong>Right-click</strong> a region to delete it. Max 8 regions.
+      <strong>Right-click</strong> a region to delete it.
+      Up to <span id="motionMaxRegions">4</span> regions, <span id="motionPointRange">4–10</span> corners each.
     </div>
     <div class="legend">
       <div class="legend-item">
@@ -241,10 +251,9 @@ ToolRegistry.register({
     return {
       motionRegions: [],
       drawingPoints: [],
-      motionNormW: 0,
-      motionNormH: 0,
+      motionCaps: readMotionCapabilities(null), // device limits, refreshed on load
       motionEnabled: false,
-      sensitivity: 50,
+      sensitivity: 40,
       dynamicAnalysis: false,
       detectHuman: false,
       detectVehicle: false,
@@ -256,8 +265,6 @@ ToolRegistry.register({
     state.motionRegions = [];
     state.drawingPoints = [];
     state.motionDoc = null;
-    // Reset coordinate space on channel switch so next load re-detects correctly
-    // but keep normW/H across channels on same NVR session (handled in load via sticky logic)
   },
 
   draw(ctx, canvas) {
@@ -337,29 +344,59 @@ ToolRegistry.register({
       return;
     }
 
-    // Left click: place vertex or close polygon
-    if (state.drawingPoints.length >= 2) {
-      const first = state.drawingPoints[0];
-      const dist = Math.hypot(pos.x - first.x, pos.y - first.y);
-      if (dist < 12) {
-        // Close polygon — clicked near start vertex
-        if (state.drawingPoints.length >= 3) {
-          state.motionRegions.push({ points: [...state.drawingPoints] });
-          this._updateRegionList();
-        }
-        state.drawingPoints = [];
-        redraw();
-        return;
-      }
-    }
+    const pts = state.drawingPoints;
 
-    if (state.motionRegions.length >= 8 && state.drawingPoints.length === 0) {
-      showToast('Maximum 8 detection regions allowed', 'error');
+    // Clicking near the start vertex closes the polygon
+    if (pts.length >= 2 && Math.hypot(pos.x - pts[0].x, pos.y - pts[0].y) < 12) {
+      this._closePolygon();
       return;
     }
 
-    state.drawingPoints.push({ x: pos.x, y: pos.y });
+    if (state.motionRegions.length >= state.motionCaps.maxRegions && pts.length === 0) {
+      showToast(`This camera allows at most ${state.motionCaps.maxRegions} detection regions`, 'error');
+      return;
+    }
+
+    // The clicks of a double-click land on the same spot — don't add duplicate corners
+    const last = pts[pts.length - 1];
+    if (last && Math.hypot(pos.x - last.x, pos.y - last.y) < 4) return;
+
+    pts.push({ x: pos.x, y: pos.y });
+    if (pts.length >= state.motionCaps.maxPoints) {
+      this._closePolygon();
+      return;
+    }
     redraw();
+  },
+
+  /**
+   * Finish the polygon being drawn. Too few corners keeps it open — the
+   * device rejects regions below its minimum.
+   */
+  _closePolygon() {
+    const { minPoints } = state.motionCaps;
+    if (state.drawingPoints.length < minPoints) {
+      showToast(`A detection region needs at least ${minPoints} corners`, 'error');
+      return;
+    }
+    state.motionRegions.push({ points: [...state.drawingPoints] });
+    state.drawingPoints = [];
+    this._updateRegionList();
+    redraw();
+  },
+
+  /** Apply the device's limits to the panel controls. */
+  _applyCapabilities() {
+    const caps = state.motionCaps;
+    const slider = document.getElementById('sensitivitySlider');
+    slider.min = caps.sensitivity.min;
+    slider.max = caps.sensitivity.max;
+    slider.step = caps.sensitivity.step;
+    document.getElementById('motionMaxRegions').textContent = caps.maxRegions;
+    document.getElementById('motionPointRange').textContent = `${caps.minPoints}–${caps.maxPoints}`;
+    document.getElementById('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';
+    document.getElementById('detectVehicleLabel').style.display = caps.targetTypes.includes('vehicle') ? '' : 'none';
+    document.getElementById('targetDetectionRow').style.display = caps.targetTypes.length ? '' : 'none';
   },
 
   onMouseMove(pos, e) {
@@ -374,21 +411,21 @@ ToolRegistry.register({
   },
 
   onDblClick(pos, e) {
-    // Double-click: close the polygon if we have enough points
-    if (state.drawingPoints.length >= 3) {
-      state.motionRegions.push({ points: [...state.drawingPoints] });
-      this._updateRegionList();
-    }
-    state.drawingPoints = [];
-    redraw();
+    if (state.drawingPoints.length > 0) this._closePolygon();
   },
 
   async load() {
     if (!state.config || !state.activeChannel) return;
+    const channel = activeChannelInfo();
     setStatus('Loading motion detection config...');
     try {
-      const doc = await Isapi.getXml(state.config, Isapi.motionDetectionPath(state.activeChannel));
+      const [doc, capsDoc] = await Promise.all([
+        Isapi.getXml(state.config, Isapi.motionDetectionPath(channel)),
+        Isapi.getMotionCapabilities(state.config, channel),
+      ]);
       state.motionDoc = doc;
+      state.motionCaps = readMotionCapabilities(capsDoc);
+      this._applyCapabilities();
       const md = readMotionConfig(doc);
 
       state.motionEnabled = md.enabled;
@@ -400,29 +437,20 @@ ToolRegistry.register({
         document.getElementById('sensitivityVal').textContent = md.sensitivity;
       }
 
-      // Detect the coordinate scale from the largest values seen. All cameras
-      // on one NVR share a coordinate space, so only ever grow it (it resets
-      // on disconnect).
-      const allPoints = md.regions.flat();
-      const detectedW = allPoints.length ? Math.max(...allPoints.map(p => p.x)) : 0;
-      const detectedH = allPoints.length ? Math.max(...allPoints.map(p => p.y)) : 0;
-      if (detectedW > (state.motionNormW || 0)) state.motionNormW = detectedW;
-      if (detectedH > (state.motionNormH || 0)) state.motionNormH = detectedH;
-      if (!state.motionNormW) state.motionNormW = 10000;
-      if (!state.motionNormH) state.motionNormH = 10000;
-
-      // Hikvision puts Y=0 at the bottom of the image; the canvas at the top.
+      // Device coordinates are 0–1000 with Y=0 at the bottom; the canvas has Y=0 at the top
+      const scale = MOTION_COORDINATE_SCALE;
       state.motionRegions = md.regions.map(points => ({
         points: points.map(p => ({
-          x: (p.x / state.motionNormW) * dom.canvas.width,
-          y: (1 - p.y / state.motionNormH) * dom.canvas.height,
+          x: (p.x / scale) * dom.canvas.width,
+          y: (1 - p.y / scale) * dom.canvas.height,
         })),
       }));
+      state.drawingPoints = [];
 
       state.dynamicAnalysis = md.dynamicAnalysis;
       document.getElementById('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
-      state.detectHuman = md.detectHuman;
-      state.detectVehicle = md.detectVehicle;
+      state.detectHuman = md.targetTypes.includes('human');
+      state.detectVehicle = md.targetTypes.includes('vehicle');
       document.getElementById('detectHuman').checked = state.detectHuman;
       document.getElementById('detectVehicle').checked = state.detectVehicle;
 
@@ -442,9 +470,23 @@ ToolRegistry.register({
       showToast('Load the settings from the device before saving', 'error');
       return;
     }
+    const caps = state.motionCaps;
+    if (!caps.regionTypes.includes('region')) {
+      showToast('This camera only supports grid-based motion areas, which the extension cannot edit yet', 'error');
+      return;
+    }
+    if (state.drawingPoints.length > 0) {
+      showToast('Finish or cancel (Esc) the region you are drawing first', 'error');
+      return;
+    }
 
-    const normW = state.motionNormW;
-    const normH = state.motionNormH;
+    // Snap to the device's sensitivity steps (e.g. 0, 20, … 100)
+    const { min, max, step } = caps.sensitivity;
+    const rawSensitivity = Number(document.getElementById('sensitivitySlider').value);
+    const sensitivity = Math.min(max, Math.max(min, min + Math.round((rawSensitivity - min) / step) * step));
+
+    const scale = MOTION_COORDINATE_SCALE;
+    const toDevice = v => Math.min(scale, Math.max(0, Math.round(v * scale)));
     // Edit a copy so a failed save leaves the loaded config intact
     const doc = state.motionDoc.cloneNode(true);
 
@@ -452,17 +494,19 @@ ToolRegistry.register({
     try {
       applyMotionConfig(doc, {
         enabled: state.motionEnabled,
-        sensitivity: Number(document.getElementById('sensitivitySlider').value),
+        sensitivity,
         dynamicAnalysis: state.dynamicAnalysis,
         // Flip Y back to the device convention (Y=0 at the bottom)
         regions: state.motionRegions.map(reg => reg.points.map(p => ({
-          x: (p.x / dom.canvas.width) * normW,
-          y: (1 - p.y / dom.canvas.height) * normH,
+          x: toDevice(p.x / dom.canvas.width),
+          y: toDevice(1 - p.y / dom.canvas.height),
         }))),
+        targetTypes: caps.targetTypes.length
+          ? caps.targetTypes.filter(t => (t === 'human' && state.detectHuman) || (t === 'vehicle' && state.detectVehicle))
+          : undefined,
       });
-      // Person/vehicle target detection lives on a different ISAPI endpoint and isn't saved here.
 
-      await Isapi.putXml(state.config, Isapi.motionDetectionPath(state.activeChannel), doc);
+      await Isapi.putXml(state.config, Isapi.motionDetectionPath(activeChannelInfo()), doc);
       state.motionDoc = doc;
       showToast('Motion detection saved successfully!', 'success');
       setStatus('Config saved', `Channel ${state.activeChannel}`);
@@ -663,7 +707,7 @@ ToolRegistry.register({
     if (!state.config || !state.activeChannel) return;
     setStatus('Loading privacy mask config...');
     try {
-      const { doc, path } = await Isapi.getPrivacyMask(state.config, state.activeChannel);
+      const { doc, path } = await Isapi.getPrivacyMask(state.config, activeChannelInfo());
       state.privacyDoc = doc;
       state.privacyPath = path;
       const pm = readPrivacyMask(doc);
@@ -1279,9 +1323,6 @@ function disconnect() {
 
   // Reset tool state
   ToolRegistry.getAll().forEach(t => t.resetState());
-  // Reset NVR coordinate space so a new connection re-detects from scratch
-  state.motionNormW = 0;
-  state.motionNormH = 0;
 
   // Collapse config section
   state.configExpanded = false;

@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<MotionDetection version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<enabled opt="true,false">true</enabled>
+<enableHighlight opt="true,false">true</enableHighlight>
+<samplingInterval>5</samplingInterval>
+<startTriggerTime>1000</startTriggerTime>
+<endTriggerTime>1000</endTriggerTime>
+<regionType opt="grid,region">
+</regionType>
+<Grid>
+<rowGranularity>18</rowGranularity>
+<columnGranularity>22</columnGranularity>
+</Grid>
+<MotionDetectionLayout version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<sensitivityLevel min="0" max="100" step="20">40</sensitivityLevel>
+<layout>
+<gridMap>000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000</gridMap>
+<RegionList size="4">
+<Region>
+<id>1</id>
+<RegionCoordinatesList>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+</RegionCoordinatesList>
+</Region>
+<Region>
+<id>2</id>
+<RegionCoordinatesList>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+</RegionCoordinatesList>
+</Region>
+<Region>
+<id>3</id>
+<RegionCoordinatesList>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+</RegionCoordinatesList>
+</Region>
+<Region>
+<id>4</id>
+<RegionCoordinatesList>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>1000</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>1000</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>0</positionX>
+<positionY>0</positionY>
+</RegionCoordinates>
+</RegionCoordinatesList>
+</Region>
+</RegionList>
+</layout>
+<targetType opt="human,vehicle">
+</targetType>
+<regionEdgesNum min="4" max="10"/>
+</MotionDetectionLayout>
+</MotionDetection>

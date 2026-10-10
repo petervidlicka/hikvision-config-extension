@@ -119,6 +119,36 @@ test('motion save with no regions empties the list', async () => {
   assert(serializeXml(doc).includes('<RegionList size="0"></RegionList>'));
 });
 
+test('readMotionCapabilities reads NVR limits', async () => {
+  const caps = readMotionCapabilities(parseXml(await fixture('motionCapabilities-nvr.xml')));
+  eq(caps, {
+    regionTypes: ['grid', 'region'],
+    maxRegions: 4,
+    minPoints: 4,
+    maxPoints: 10,
+    sensitivity: { min: 0, max: 100, step: 20 },
+    targetTypes: ['human', 'vehicle'],
+  });
+  eq(readMotionCapabilities(null).maxRegions, 4, 'defaults without capabilities');
+});
+
+test('motion save writes the detection target list', async () => {
+  const base = { enabled: true, sensitivity: 40, dynamicAnalysis: false, regions: [] };
+  const doc = parseXml(await fixture('motionDetection.xml'));
+  applyMotionConfig(doc, { ...base, targetTypes: ['human', 'vehicle'] });
+  eq(readMotionConfig(doc).targetTypes, ['human', 'vehicle']);
+  assert(serializeXml(doc).includes('<targetType xmlns="">human,vehicle</targetType>'), 'existing element updated');
+  applyMotionConfig(doc, { ...base, targetTypes: [] });
+  assert(serializeXml(doc).includes('<targetType xmlns=""></targetType>'), 'cleared');
+});
+
+test('motion save creates targetType like the Hikvision client when missing', () => {
+  const doc = parseXml('<MotionDetection xmlns="urn:x"><enabled>true</enabled><MotionDetectionLayout>' +
+    '<sensitivityLevel>40</sensitivityLevel><layout><RegionList></RegionList></layout></MotionDetectionLayout></MotionDetection>');
+  applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: false, regions: [], targetTypes: ['human'] });
+  assert(serializeXml(doc).includes('</layout><targetType xmlns="">human</targetType></MotionDetectionLayout>'));
+});
+
 /* ── Privacy mask ───────────────────────────────────────────────────────── */
 
 test('readPrivacyMask returns only enabled regions', async () => {
@@ -251,7 +281,7 @@ test('getChannels de-duplicates streaming channels', async () => {
       '<StreamingChannel><id>201</id></StreamingChannel></StreamingChannelList>' },
   });
   try {
-    eq(await Isapi.getChannels(testConfig()), [{ id: '1', name: 'Front' }, { id: '2', name: '' }]);
+    eq(await Isapi.getChannels(testConfig()), [{ id: '1', name: 'Front', kind: 'analog' }, { id: '2', name: '', kind: 'analog' }]);
   } finally { mock.restore(); }
 });
 
@@ -270,6 +300,21 @@ test('auth failure stops endpoint fallbacks and fires the hook once', async () =
     eq(hookCalls, 1);
     eq(mock.calls, ['/ISAPI/System/Video/inputs/channels', '/ISAPI/System/Video/inputs/channels']);
   } finally { mock.restore(); Isapi.onAuthFailure = null; }
+});
+
+test('IP cameras behind an NVR use InputProxy URLs', async () => {
+  eq(Isapi.motionDetectionPath({ id: '2', kind: 'digital' }), '/ISAPI/ContentMgmt/InputProxy/channels/2/video/motionDetection');
+  eq(Isapi.motionDetectionPath({ id: '2', kind: 'analog' }), '/ISAPI/System/Video/inputs/channels/2/motionDetection');
+  const mock = mockFetch({
+    '/ISAPI/System/Video/inputs/channels': { status: 403 },
+    '/ISAPI/ContentMgmt/InputProxy/channels': { body: '<InputProxyChannelList><InputProxyChannel><id>1</id><name>Gate</name></InputProxyChannel></InputProxyChannelList>' },
+    '/ISAPI/ContentMgmt/InputProxy/channels/1/video/privacyMask': { body: '<PrivacyMask><enabled>false</enabled></PrivacyMask>' },
+  });
+  try {
+    const [channel] = await Isapi.getChannels(testConfig());
+    eq(channel, { id: '1', name: 'Gate', kind: 'digital' });
+    eq((await Isapi.getPrivacyMask(testConfig(), channel)).path, '/ISAPI/ContentMgmt/InputProxy/channels/1/video/privacyMask');
+  } finally { mock.restore(); }
 });
 
 test('getSnapshot returns a JPEG blob', async () => {

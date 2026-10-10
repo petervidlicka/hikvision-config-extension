@@ -57,7 +57,9 @@
     const p = u.pathname;
     if (method === 'PUT') { device.puts.push({ path: p, body: opts.body }); return xml('<ResponseStatus><statusCode>1</statusCode></ResponseStatus>'); }
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
-    if (p === '/ISAPI/System/Video/inputs/channels') return xml('<VideoInputChannelList><VideoInputChannel><id>1</id><name>Front &amp; Gate</name></VideoInputChannel><VideoInputChannel><id>2</id><name>&lt;img src=x onerror=alert(1)&gt;</name></VideoInputChannel></VideoInputChannelList>');
+    // Like a real NVR with only IP cameras: no analog inputs, channels via InputProxy
+    if (p === '/ISAPI/System/Video/inputs/channels') return new Response('', { status: 403 });
+    if (p === '/ISAPI/ContentMgmt/InputProxy/channels') return xml('<InputProxyChannelList><InputProxyChannel><id>1</id><name>Front &amp; Gate</name></InputProxyChannel><InputProxyChannel><id>2</id><name>&lt;img src=x onerror=alert(1)&gt;</name></InputProxyChannel></InputProxyChannelList>');
     if (/^\/ISAPI\/Streaming\/channels\/\d+01\/picture$/.test(p)) {
       device.inFlightSnapshots++;
       device.maxInFlightSnapshots = Math.max(device.maxInFlightSnapshots, device.inFlightSnapshots);
@@ -65,6 +67,7 @@
       device.inFlightSnapshots--;
       return new Response(await frame(), { status: 200 });
     }
+    if (p.endsWith('/motionDetection/capabilities')) return xml(fixtures.motionCaps);
     if (p.endsWith('/motionDetection')) return xml(fixtures.motion);
     if (p.endsWith('/privacyMask')) return xml(fixtures.privacy);
     if (/\/Event\/triggers\/VMD-\d+$/.test(p)) return xml(fixtures.trigger);
@@ -73,8 +76,8 @@
 
   // Load fixtures and the app's own markup + scripts, in order
   (async () => {
-    [fixtures.motion, fixtures.privacy, fixtures.trigger] = await Promise.all(
-      ['motionDetection', 'privacyMask', 'eventTrigger'].map(n => realFetch(`../fixtures/${n}.xml`).then(r => r.text())));
+    [fixtures.motion, fixtures.privacy, fixtures.trigger, fixtures.motionCaps] = await Promise.all(
+      ['motionDetection', 'privacyMask', 'eventTrigger', 'motionCapabilities-nvr'].map(n => realFetch(`../fixtures/${n}.xml`).then(r => r.text())));
     const page = new DOMParser().parseFromString(await realFetch('../../app.html').then(r => r.text()), 'text/html');
     const scripts = [...page.querySelectorAll('script[src]')].map(s => s.getAttribute('src'));
     page.querySelectorAll('script').forEach(s => s.remove());
