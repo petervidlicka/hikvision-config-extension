@@ -302,6 +302,22 @@ day's search. Only the device's current month can still gain days, so its
 answer is asked for again after 5 minutes. Changing the channel or
 reconnecting starts afresh.
 
+### Stored pictures
+
+A picture search (track `…03`) gives each picture a `playbackURI` such as
+`http://192.168.0.108/picture/Streaming/tracks/103/?starttime=…&name=…&size=…`.
+The address in it is the `Host` header the search was sent with, echoed back
+(a search sent as `192.168.0.108.` got URIs on `192.168.0.108.`), not
+necessarily the address the user typed: browsers lower-case it, a proxy may
+rewrite it, and other firmware may write its own LAN address. The web UI's
+`download.js` keeps only the part from `/picture` on and requests it from the
+address it is connected to. The extension does the same
+(`storedPicturePath` in `lib/playback.js`): it requests the URI's path and
+query from the connected device, whatever scheme, host and port the URI
+names, and only when the path, with `.`/`..` segments resolved, starts with
+`/picture/`. It used to refuse any URI whose host wasn't exactly the one
+typed, so a hostname typed in capitals got no pictures.
+
 ## Errors and write results
 
 Error answers carry a `<ResponseStatus>` body (`statusCode`, `statusString`,

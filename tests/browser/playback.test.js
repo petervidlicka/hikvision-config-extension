@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseDeviceTime, toDeviceTime } from '../../extension/lib/device-time.js';
 import {
   SEARCH_PAGE_SIZE, buildSearchXml, isEventRecordType, nextRecordingStart, parseCalendar, parsePictures,
-  parseRecordings, parseSearchPage, recordKind, recordingAt, searchMatchKey,
+  parseRecordings, parseSearchPage, recordKind, recordingAt, searchMatchKey, storedPicturePath,
 } from '../../extension/lib/playback.js';
 import { Isapi, MAX_SEARCH_REQUESTS } from '../../extension/lib/isapi.js';
 import { parseXml } from '../../extension/lib/xml.js';
@@ -126,6 +126,26 @@ describe('recording search', () => {
   it('parses the month calendar', () => {
     expect(parseCalendar(parseXml(calendar))).toEqual([2, 9, 10]);
   });
+
+  it('takes a stored picture’s path and query from its URI, whatever scheme, host and port it names', () => {
+    const pictures = parsePictures(parseSearchPage(parseXml(picturesP0)).matches);
+    expect(pictures.length).toBeGreaterThan(0);
+    for (const { uri } of pictures) expect(storedPicturePath(uri)).toBe(uri.slice('http://192.168.0.108'.length));
+    expect(storedPicturePath(pictures[0].uri)).toMatch(/^\/picture\/Streaming\/tracks\/103\/\?starttime=20261001T031019Z&endtime=/);
+
+    const path = '/picture/Streaming/tracks/103/?name=ch01_7&size=95018';
+    // The Host header echoed back with curl's trailing dot, a proxy's address, another scheme, or just the path
+    for (const uri of [`http://192.168.0.108.${path}`, `https://Proxy.example:8443${path}`, `rtsp://10.0.0.5${path}`, path]) {
+      expect(storedPicturePath(uri), uri).toBe(path);
+    }
+  });
+
+  it('refuses any other resource as a stored picture, also through dot segments', () => {
+    for (const uri of ['http://192.168.0.108/ISAPI/Security/users', 'http://192.168.0.108/picture/../ISAPI/Security/users',
+      'http://192.168.0.108/picture/%2E%2E/ISAPI/Security/users', 'http://192.168.0.108/Picture/x', '/pictures/x', 'http://']) {
+      expect(() => storedPicturePath(uri), uri).toThrow(/isn’t a stored picture/);
+    }
+  });
 });
 
 // Real device captures from tests/probe-playback.sh, when present (git-ignored)
@@ -243,8 +263,38 @@ describe('Isapi playback requests', () => {
     expect(recordings).toHaveLength(MAX_SEARCH_REQUESTS);
   });
 
-  it('only fetches stored pictures from the connected device', async () => {
-    await expect(Isapi.getStoredPicture(config(), 'http://evil.example/picture/x')).rejects.toThrow(/not on the connected device/);
+  /**
+   * Answer every request with a JPEG.
+   * @returns {string[]} the requested URLs, in order
+   */
+  function stubPictures() {
+    const urls = [];
+    vi.stubGlobal('fetch', async (url) => {
+      urls.push(String(url));
+      return new Response(new Uint8Array([0xff, 0xd8, 0xff, 0xd9]), { status: 200, headers: { 'Content-Type': 'image/jpeg' } });
+    });
+    return urls;
+  }
+
+  it('fetches a stored picture from the connected device, whatever address its URI names', async () => {
+    const urls = stubPictures();
+    const blob = await Isapi.getStoredPicture(config(), 'http://evil.example/picture/x?name=a');
+    expect(urls).toEqual(['http://10.9.9.8:80/picture/x?name=a']);
+    expect(blob.type).toBe('image/jpeg');
+
+    // The DS-7604NI writes back the Host header, which the browser lower-cases
+    const named = { ...config(), host: 'NVR-Office' };
+    await Isapi.getStoredPicture(named, 'http://nvr-office/picture/Streaming/tracks/103/?starttime=20261010T004608Z&name=ch01_7&size=95018');
+    expect(urls[1]).toBe('http://NVR-Office:80/picture/Streaming/tracks/103/?starttime=20261010T004608Z&name=ch01_7&size=95018');
+  });
+
+  it('fetches nothing but stored pictures', async () => {
+    const urls = stubPictures();
+    for (const uri of ['http://10.9.9.8/ISAPI/Security/users', 'http://10.9.9.8/picture/../ISAPI/Security/users',
+      'http://10.9.9.8/picture/%2e%2e/ISAPI/Security/users', 'http://10.9.9.8/pictures/x', 'http://10.9.9.8/picture', 'http://']) {
+      await expect(Isapi.getStoredPicture(config(), uri), uri).rejects.toThrow(/isn’t a stored picture/);
+    }
+    expect(urls).toEqual([]);
   });
 
   it('returns no recorded frame when the device answers with something other than a JPEG', async () => {

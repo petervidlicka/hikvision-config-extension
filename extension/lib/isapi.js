@@ -30,6 +30,7 @@ import {
 } from './errors.js';
 import {
   buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey,
+  storedPicturePath,
 } from './playback.js';
 import { SnapshotSource, fullSizeUpgrade, isJpeg, snapshotPaths } from './snapshots.js';
 import {
@@ -809,18 +810,17 @@ export const Isapi = {
   },
 
   /**
-   * Fetch a stored picture by the URI a picture search returned. Only URIs
-   * on the connected device are followed.
+   * Fetch a stored picture by the URI a picture search returned. It is
+   * always requested from the connected device, whatever scheme, host or
+   * port the URI names, and only from the device's picture store (see
+   * storedPicturePath).
    * @param {DeviceConfig} config
-   * @param {string} uri
+   * @param {string} uri - a StoredPicture's uri
    * @returns {Promise<Blob>}
+   * @throws {Error} when the URI isn't a stored picture's; nothing is requested then
    */
   async getStoredPicture(config, uri) {
-    const url = new URL(uri);
-    if (url.hostname !== config.host || url.protocol !== 'http:') {
-      throw new Error('Picture is not on the connected device');
-    }
-    const resp = await this.request(config, 'GET', url.pathname + url.search);
+    const resp = await this.request(config, 'GET', storedPicturePath(uri));
     return new Blob([/** @type {ArrayBuffer} */ (resp.data)], { type: 'image/jpeg' });
   },
 

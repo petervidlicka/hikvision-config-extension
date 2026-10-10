@@ -50,7 +50,7 @@ export const SEARCH_PAGE_SIZE = 50;
  * event-triggered captures).
  * @typedef {object} StoredPicture
  * @property {Date} time - the device's wall-clock time, as a floating Date
- * @property {string} uri - where to fetch it, an http URL on the device
+ * @property {string} uri - the device's URL for it; fetched by its path from the connected device (storedPicturePath)
  */
 
 /** Escape text for an XML element body. @param {string} text */
@@ -180,6 +180,41 @@ export function parseRecordings(matches) {
  */
 export function parsePictures(matches) {
   return parseRecordings(matches).filter(r => r.uri).map(r => ({ time: r.start, uri: r.uri }));
+}
+
+/** Where a device keeps its stored pictures: a picture URI's path starts with this. */
+const STORED_PICTURE_PREFIX = '/picture/';
+
+/**
+ * The path to request a stored picture at, on the device the extension is
+ * connected to: the path and query of the URI a picture search gave for it.
+ * The URI's scheme, host and port are dropped, as the device's web UI does
+ * (download.js rebuilds the URL on its own address). The address in the URI
+ * needn't be the one the user typed: the DS-7604NI writes back the Host
+ * header the search came with, which browsers lower-case (and a proxy may
+ * rewrite), and other firmware may write its own LAN address.
+ *
+ * Only the picture store is followed, so a search answer can't point the
+ * login at any other resource. The URL parser resolves "." and ".." segments
+ * (also percent-encoded) before the check.
+ * @param {string} uri - a StoredPicture's uri
+ * @returns {string} e.g. "/picture/Streaming/tracks/103/?name=…&size=…"
+ * @throws {Error} when the URI isn't a stored picture's
+ * @example
+ * storedPicturePath('http://NVR-Office.local/picture/Streaming/tracks/103/?name=ch01_7&size=95018')
+ * // → '/picture/Streaming/tracks/103/?name=ch01_7&size=95018'
+ */
+export function storedPicturePath(uri) {
+  const message = `The device listed this picture at an address that isn’t a stored picture: ${uri}`;
+  let url;
+  try {
+    // The base only lets a bare path through; its host is never used
+    url = new URL(uri, 'http://device');
+  } catch (err) {
+    throw new Error(message, { cause: err });
+  }
+  if (!url.pathname.startsWith(STORED_PICTURE_PREFIX)) throw new Error(message);
+  return url.pathname + url.search;
 }
 
 /**
