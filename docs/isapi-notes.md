@@ -69,10 +69,15 @@ page does before it shows (`getDeviceActiveStat`). The DS-7604NI answers
   all, so such a device may not be found.
 
 The scan never sends credentials (`credentials: 'omit'`), so a probe can't
-count as a failed login. Connect asks the same question after a rejected
-login the device didn't explain (no lock, no attempts left): when the device
-says it isn't activated, the message says to activate it instead of asking
-for another password.
+count as a failed login. Connect asks the same question after every
+rejected login (an `AuthError`): when the device says it isn't activated, the
+message says to activate it instead of asking for another password, and
+keeps what the device said about a lock or the attempts left. It asks even
+when the device explained the rejection, since the lock is kept per computer,
+not per account, so a device that isn't activated may count attempts too;
+the question costs no attempt. Unverified: whether a device that isn't
+activated refuses the login with a 401 at all. One that answers 403 instead
+gets the plain message.
 
 Each address is tried on port 80 and on 8080, the usual alternative for a
 device whose web port was moved, and the card shows the port it answered on

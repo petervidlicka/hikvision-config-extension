@@ -42,12 +42,16 @@ export function handleAuthFailure(err) {
 
 export async function connect() {
   const host = dom.hostInput.value.trim();
-  const port = dom.portInput.value.trim() || '80';
+  const port = readPort(dom.portInput.value);
   const username = dom.userInput.value.trim();
   const password = dom.passInput.value;
 
   if (!host || !username || !password) {
     showToast('Please fill in all connection fields', 'error');
+    return;
+  }
+  if (port === null) {
+    showToast('The port must be a number from 1 to 65535 (80 when left empty)', 'error');
     return;
   }
 
@@ -65,14 +69,14 @@ export async function connect() {
     return;
   }
 
-  state.config = { host, port: parseInt(port), username, password };
+  state.config = { host, port, username, password };
   dom.connectBtn.innerHTML = '<span class="loading"></span> Connecting...';
   dom.connectBtn.disabled = true;
   setStatus('Connecting to ' + host + '...');
 
   try {
     const dev = await Isapi.getDeviceInfo(state.config);
-    saveConnectionDetails(host, port, username, password);
+    saveConnectionDetails(host, String(port), username, password);
 
     state.connected = true;
     dom.statusDot.classList.add('connected');
@@ -98,43 +102,66 @@ export async function connect() {
 }
 
 /**
+ * The port in the connection form, read as logins always have: an empty
+ * field is 80, and leading digits count ("80a" is 80). Read once, so the
+ * login, the activation check and the messages all use the same number.
+ * @param {string} text
+ * @returns {number|null} null when it isn't a port
+ */
+function readPort(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return 80;
+  const port = parseInt(trimmed, 10);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+/**
  * Why Connect failed, in words the user can act on. When nothing answers at
  * all (refused, unreachable or timed out), the address is almost always
- * wrong, so say which address was tried. When the device refuses the login
- * without saying why, it may not have been activated yet: then no password
- * works, so asking for another would only cost failed logins. The device
- * is asked without a login, which costs no attempt.
+ * wrong, so say which address was tried. When the device refuses the login,
+ * it may not have been activated yet: then no password works, so asking for
+ * another would only cost failed logins. The device is asked without a
+ * login, which costs no attempt. That is asked whatever the device said
+ * about the rejection, since a lock is kept per computer, not per account,
+ * so a device that isn't activated may count attempts too.
  * @param {unknown} err
  * @param {string} host
- * @param {string} port
+ * @param {number} port
  * @returns {Promise<string>}
  */
 async function connectFailureMessage(err, host, port) {
   if (err instanceof NetworkError) return `No response from ${host}:${port} — check the IP address and port`;
-  if (isUnexplainedRejection(err) && await isNotActivated(host, port)) return NOT_ACTIVATED_MESSAGE;
+  if (err instanceof AuthError && await isNotActivated(host, port)) return notActivatedMessage(err);
   return errorMessage(err);
 }
 
 /**
- * A rejected login the device didn't explain: no lock and no attempts left,
- * which only an activated device's accounts have.
- * @param {unknown} err
- * @returns {boolean}
+ * Say to activate the device, and keep what it said about a lock or the
+ * attempts left, which still holds until it is activated.
+ * @param {AuthError} err
+ * @returns {string}
  */
-function isUnexplainedRejection(err) {
-  return err instanceof AuthError && !err.locked && err.attemptsLeft === undefined;
+function notActivatedMessage(err) {
+  const explained = err.locked || err.attemptsLeft !== undefined;
+  return explained ? `${NOT_ACTIVATED_MESSAGE}. ${err.message}` : NOT_ACTIVATED_MESSAGE;
 }
 
 /**
  * Whether the device says it hasn't been activated. Not knowing (older
  * firmware without /SDK/activateStatus, or no answer) counts as activated.
  * @param {string} host
- * @param {string} port
+ * @param {number} port
  * @returns {Promise<boolean>}
  */
 async function isNotActivated(host, port) {
-  const status = await checkActivation({ host, port }, { timeoutMs: TIMEOUT_MS.connect });
-  return status?.activated === false;
+  try {
+    const status = await checkActivation({ host, port }, { timeoutMs: TIMEOUT_MS.connect });
+    return status?.activated === false;
+  } catch {
+    // Only an invalid address throws, and the login has just reached this one. Should it
+    // happen anyway, the login's own failure is still the message to show, not this check's
+    return false;
+  }
 }
 
 /**

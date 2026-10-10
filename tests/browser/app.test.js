@@ -1175,6 +1175,31 @@ describe('config page', () => {
     await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
   });
 
+  it('reads the port once, so a rejected login on a loosely typed port still gets its message', async () => {
+    device.failedLogins = 0;
+    const activationChecks = device.activationChecks.length;
+    try {
+      // Leading digits count, as they always have; the activation check uses the same port as the login
+      $('portInput').value = '80a';
+      $('toast').textContent = '';
+      $('connectBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('Connection failed: Device rejected the username or password'));
+      expect($('statusText').textContent).toBe('Connection failed');
+      expect(device.failedLogins).toBe(1);
+      expect(device.activationChecks).toHaveLength(activationChecks + 1);
+      await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+
+      // Not a port at all: nothing is sent
+      const requests = device.requests.length;
+      $('portInput').value = 'abc';
+      $('connectBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('The port must be a number from 1 to 65535 (80 when left empty)'));
+      expect(device.requests).toHaveLength(requests);
+    } finally {
+      $('portInput').value = '80';
+    }
+  });
+
   it('says how many attempts are left before the device locks this computer out', async () => {
     device.loginLock = { lockStatus: 'unlock', unlockTime: 0, retryLoginTime: 2 };
     device.failedLogins = 0;
@@ -1183,8 +1208,24 @@ describe('config page', () => {
     await vi.waitFor(() => expect(toast())
       .toBe('Connection failed: Wrong user name or password — 2 attempts left before the device locks this computer out'));
     expect(device.failedLogins).toBe(1);
-    // An explained rejection comes from an activated device: nothing more to ask
-    expect(device.activationChecks).toHaveLength(activationChecks);
+    // Whether it has been activated is asked after every rejected login, without one
+    expect(device.activationChecks).toHaveLength(activationChecks + 1);
+    expect(device.activationChecks.at(-1)).toEqual({ authorization: null, credentials: 'omit' });
+    await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+
+    // A device that counts attempts may not be activated either: say so, and keep the count
+    device.activated = false;
+    device.loginLock = { lockStatus: 'unlock', unlockTime: 0, retryLoginTime: 1 };
+    try {
+      $('connectBtn').click();
+      await vi.waitFor(() => expect(toast()).toBe('Connection failed: This device hasn’t been activated yet — ' +
+        'activate it with Hikvision SADP or its web page first, then connect with the admin password you set there. ' +
+        'Wrong user name or password — 1 attempt left before the device locks this computer out'));
+      expect(device.failedLogins).toBe(2);
+    } finally {
+      device.activated = true;
+      device.loginLock = { lockStatus: 'unlock', unlockTime: 0, retryLoginTime: 2 };
+    }
     await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
   });
 
