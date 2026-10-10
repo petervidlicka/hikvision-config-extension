@@ -19,8 +19,16 @@ paths=(
   "/ISAPI/Streaming/channels"
   "/ISAPI/System/Video/inputs/channels/$ch/motionDetection"
   "/ISAPI/System/Video/inputs/channels/$ch/privacyMask"
+  "/ISAPI/System/Video/inputs/channels/$ch/motionDetection/capabilities"
+  "/ISAPI/System/Video/inputs/channels/$ch/motionDetection/layout/capabilities"
+  # IP cameras behind an NVR ("digital" channels) — what Hikvision's web UI uses
+  "/ISAPI/ContentMgmt/InputProxy/channels/$ch/video/motionDetection"
+  "/ISAPI/ContentMgmt/InputProxy/channels/$ch/video/motionDetection/capabilities"
+  "/ISAPI/ContentMgmt/InputProxy/channels/$ch/video/motionDetection/layout/capabilities"
+  "/ISAPI/ContentMgmt/InputProxy/channels/$ch/video/privacyMask"
   "/ISAPI/Event/triggers/VMD-$ch"
   "/ISAPI/Event/triggers"
+  "/ISAPI/Event/schedules/motionDetections/VMD_video$ch"
 )
 for p in $paths; do
   name=${${p#/ISAPI/}//\//_}.xml
