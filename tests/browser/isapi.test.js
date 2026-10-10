@@ -103,6 +103,37 @@ describe('Isapi', () => {
     expect(calls).toEqual(['/ISAPI/System/Video/inputs/channels', '/ISAPI/System/Video/inputs/channels']);
   });
 
+  it('logs in with userCheck before reading the device info', async () => {
+    const deviceInfo = { body: '<DeviceInfo><deviceName>NVR</deviceName><model>DS-7604NI-K1/4P</model></DeviceInfo>' };
+    const calls = mockDevice({ '/ISAPI/Security/userCheck': { body: fixtures.userCheckNvr }, '/ISAPI/System/deviceInfo': deviceInfo });
+    expect(await Isapi.getDeviceInfo(testConfig())).toMatchObject({ deviceName: 'NVR', model: 'DS-7604NI-K1/4P' });
+    expect(calls).toEqual(['/ISAPI/Security/userCheck', '/ISAPI/System/deviceInfo']);
+
+    // Firmware without userCheck: the device info request checks the login
+    for (const missing of [{ status: 404 }, statusRoute(403, 4, 'notSupport')]) {
+      mockDevice({ '/ISAPI/Security/userCheck': missing, '/ISAPI/System/deviceInfo': deviceInfo });
+      expect((await Isapi.getDeviceInfo(testConfig())).deviceName).toBe('NVR');
+    }
+    mockDevice({ '/ISAPI/Security/userCheck': statusRoute(503, 2, 'serviceUnavailable'), '/ISAPI/System/deviceInfo': deviceInfo });
+    await expect(Isapi.getDeviceInfo(testConfig())).rejects.toMatchObject({ httpStatus: 503 });
+  });
+
+  it('takes a userCheck answered 200 with a rejection as a rejected login', async () => {
+    const rejected = '<userCheck><statusValue>401</statusValue><statusString>Unauthorized</statusString>' +
+      '<lockStatus>unlock</lockStatus><retryLoginTime>2</retryLoginTime></userCheck>';
+    const calls = mockDevice({ '/ISAPI/Security/userCheck': { body: rejected }, '/ISAPI/System/deviceInfo': { body: '<DeviceInfo/>' } });
+    const hook = vi.fn();
+    Isapi.onAuthFailure = hook;
+    const config = testConfig();
+    const err = await Isapi.getDeviceInfo(config).catch(e => e);
+    expect(err).toBeInstanceOf(AuthError);
+    expect(err).toMatchObject({ statusValue: 401, attemptsLeft: 2 });
+    expect(hook).toHaveBeenCalledWith(err);
+    // Nothing sends these credentials again until the next Connect
+    await expect(Isapi.getChannels(config)).rejects.toMatchObject({ attemptsLeft: 2 });
+    expect(calls).toEqual(['/ISAPI/Security/userCheck']);
+  });
+
   it('falls back to the main stream when a camera has no sub-stream', async () => {
     const calls = mockDevice({ '/ISAPI/Streaming/channels/301/picture': { body: new Uint8Array([0xff, 0xd8]) } });
     const blob = await Isapi.getSnapshot(testConfig(), '3', 'sub');

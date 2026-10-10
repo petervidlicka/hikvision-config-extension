@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<userCheck>
+<statusValue>200</statusValue>
+<statusString>OK</statusString>
+<isDefaultPassword>false</isDefaultPassword>
+<isRiskPassword>false</isRiskPassword>
+<isActivated>true</isActivated>
+</userCheck>

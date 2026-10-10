@@ -21,6 +21,7 @@ import ioProxyOutputsNvr from '../fixtures/ioProxyOutputs-nvr.xml?raw';
 import whiteLightAlarmChannelsNvr from '../fixtures/whiteLightAlarmChannels-nvr.json?raw';
 import audioAlarmChannelsNvr from '../fixtures/audioAlarmChannels-nvr.json?raw';
 import inputProxyChannelsNvr from '../fixtures/inputProxyChannels-nvr.xml?raw';
+import userCheckNvr from '../fixtures/userCheck-nvr.xml?raw';
 
 export const fixtures = {
   // motionDetectionNvr is the DS-7604NI's channel 1 config as captured
@@ -30,6 +31,8 @@ export const fixtures = {
   // -whitelight triggers are what the NVR stored after its own web UI's linkage was PUT
   eventTriggerNvrVmd3, eventTriggerNvrVmd3Io301, eventTriggerNvrVmd3WhiteLight, triggersCapNvr, ioOutputsNvr,
   ioOutputsCapabilitiesNvr, ioProxyOutputsNvr, whiteLightAlarmChannelsNvr, audioAlarmChannelsNvr, inputProxyChannelsNvr,
+  // The DS-7604NI's answer to a userCheck it accepts
+  userCheckNvr,
 };
 
 const captured = import.meta.glob('../fixtures/local/*_motionDetection.xml', { query: '?raw', import: 'default', eager: true });

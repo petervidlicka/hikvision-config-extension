@@ -3,6 +3,7 @@
  * connection details.
  */
 
+import { forgetDigestSessions } from '../lib/digest-auth.js';
 import { NetworkError } from '../lib/errors.js';
 import { Isapi } from '../lib/isapi.js';
 import { clearFrame, stopAllGridFeeds, stopSnapshotFeed } from './feed.js';
@@ -13,17 +14,29 @@ import { channelLabel, errorMessage, setStatus, showToast } from './ui.js';
 import { selectChannel, switchSection } from './views.js';
 import { resetPlayback } from './playback.js';
 
+/** @typedef {import('../lib/digest-auth.js').AuthError} AuthError */
+
 /**
  * The device rejected our credentials mid-session (password changed, device
  * reset, account locked). Stop every feed immediately — each further request
  * counts as a failed login and Hikvision locks the account after a few.
+ *
+ * A lock isn't the password's fault (the right one is refused too until it
+ * lifts), so the password stays and the message says how long to wait.
+ * @param {AuthError} err
  */
-export function handleAuthFailure() {
+export function handleAuthFailure(err) {
   if (!state.connected) return;
   disconnect();
   showConnectionForm();
+  if (err.locked) {
+    showToast(err.message, 'error');
+    return;
+  }
   dom.passInput.value = '';
-  showToast('The device rejected the login. Re-enter the password to reconnect.', 'error');
+  showToast(err.attemptsLeft !== undefined
+    ? `${err.message}. Re-enter the password to reconnect.`
+    : 'The device rejected the login. Re-enter the password to reconnect.', 'error');
 }
 // ─── Connection ─────────────────────────────────────────────────────────────
 
@@ -119,6 +132,10 @@ export function saveConnectionDetails(host, port, username, password) {
 }
 
 export function disconnect() {
+  // The next Connect starts from a fresh challenge, so a password changed
+  // meanwhile costs one failed login there, not two
+  if (state.config) forgetDigestSessions(state.config);
+
   // Stop all feeds
   resetPlayback();
   stopSnapshotFeed();

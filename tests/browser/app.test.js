@@ -5,6 +5,8 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import appHtml from '../../extension/app.html?raw';
 import '../../extension/app.css';
+import { AuthError } from '../../extension/lib/digest-auth.js';
+import { Isapi } from '../../extension/lib/isapi.js';
 import { NVR_HOST, STATUS, createChromeStub, createMockNvr } from '../support/mock-nvr.js';
 
 let device, chromeStub, state, dom;
@@ -368,8 +370,54 @@ describe('config page', () => {
     await new Promise(r => setTimeout(r, 2500));
 
     expect(device.requests.length).toBe(afterRejection);
+    // Every request in flight got a 401, but only one of them retried with the password
+    expect(device.failedLogins).toBe(1);
     expect($('connectionForm').style.display).toBe('block');
     expect($('passInput').value).toBe('');
-    expect(toast()).toMatch(/rejected the login/);
+    expect(toast()).toBe('The device rejected the login. Re-enter the password to reconnect.');
+  });
+
+  it('logs in with userCheck and keeps the plain message for an unexplained rejection', async () => {
+    device.failedLogins = 0;
+    $('passInput').value = 'wrong-pass';
+    $('connectBtn').click();
+    await vi.waitFor(() => expect(toast()).toBe('Connection failed: Device rejected the username or password'));
+    expect(device.failedLogins).toBe(1);
+    expect(device.requests.slice(-2)).toEqual(['GET /ISAPI/Security/userCheck', 'GET /ISAPI/Security/userCheck']);
+    await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+  });
+
+  it('says how many attempts are left before the device locks this computer out', async () => {
+    device.loginLock = { lockStatus: 'unlock', unlockTime: 0, retryLoginTime: 2 };
+    device.failedLogins = 0;
+    $('connectBtn').click();
+    await vi.waitFor(() => expect(toast())
+      .toBe('Connection failed: Wrong user name or password — 2 attempts left before the device locks this computer out'));
+    expect(device.failedLogins).toBe(1);
+    await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+  });
+
+  it('says how long the device has locked logins, and keeps the password', async () => {
+    device.loginLock = { lockStatus: 'lock', unlockTime: 1790, retryLoginTime: 0 };
+    $('connectBtn').click();
+    await vi.waitFor(() => expect(toast())
+      .toBe('Connection failed: The device has temporarily locked logins from this computer — try again in 30 min'));
+    expect($('passInput').value).toBe('wrong-pass');
+    expect(state.connected).toBe(false);
+    await vi.waitFor(() => expect($('connectBtn').disabled).toBe(false));
+  });
+
+  it('keeps the password when the device locks logins mid-session', async () => {
+    device.rejectAuth = false;
+    device.loginLock = null;
+    $('passInput').value = 'test-pass';
+    $('connectBtn').click();
+    await vi.waitFor(() => expect(state.channels).toHaveLength(4));
+
+    // What a request gets when the device explains its 401 (V4.75 sends HTML pages instead)
+    Isapi.onAuthFailure?.(new AuthError({ statusValue: 401, locked: true, unlockSeconds: 600 }));
+    expect(state.connected).toBe(false);
+    expect(toast()).toBe('The device has temporarily locked logins from this computer — try again in 10 min');
+    expect($('passInput').value).toBe('test-pass');
   });
 });

@@ -13,9 +13,12 @@
  */
 
 import { applyPrivacyMask, readAlarmOutputs, readLightAudioChannels, readMotionTriggerCap } from './config-xml.js';
-import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
 import {
-  IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError, parseResponseStatus,
+  AuthError, digestFetch, forgetDigestSessions, forgetRejectedCredentials, rejectCredentials,
+} from './digest-auth.js';
+import {
+  IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError, parseLoginStatus,
+  parseResponseStatus,
 } from './errors.js';
 import {
   buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey, toDeviceTime,
@@ -49,7 +52,7 @@ export const MAX_SEARCH_REQUESTS = 40;
  * bound their requests too (web UI 30 s, iVMS 3–30 s to connect).
  */
 export const TIMEOUT_MS = Object.freeze({
-  /** Connect: the whole deviceInfo request, including the Digest challenge round trip */
+  /** Connect: each of its requests (userCheck, deviceInfo), including the Digest challenge round trip */
   connect: 8000,
   /** One sub-stream (SD) JPEG: a frame that times out just lets a live feed move on to the next */
   picture: 5000,
@@ -66,6 +69,9 @@ export const TIMEOUT_MS = Object.freeze({
   /** PUT and DELETE: the device may take a while to apply a change */
   write: 20000,
 });
+
+/** The explicit login check of Hikvision's web UI and SDK (see Isapi.checkLogin). */
+const USER_CHECK_PATH = '/ISAPI/Security/userCheck';
 
 /** A sub-stream (SD) snapshot: stream ID channel × 100 + 2. */
 const SUB_STREAM_PICTURE = /\/Streaming\/channels\/\d+02\/picture(?:\?|$)/;
@@ -214,19 +220,53 @@ export const Isapi = {
   },
 
   /**
-   * Verify credentials and read the device's identity. An explicit user
-   * action, so it may retry credentials the device rejected earlier.
+   * Verify credentials (checkLogin) and read the device's identity. An
+   * explicit user action, so it may retry credentials the device rejected
+   * earlier. It starts from a fresh challenge, so a wrong password costs
+   * one login attempt, not two.
    * @param {DeviceConfig} config
    * @returns {Promise<{deviceName: string|null, model: string|null, firmwareVersion: string|null}>}
+   * @throws {AuthError} also when the device has locked this computer out (`locked`), or with the attempts left
    */
   async getDeviceInfo(config) {
     forgetRejectedCredentials(config);
+    forgetDigestSessions(config);
+    await this.checkLogin(config);
     const root = (await this.getXml(config, '/ISAPI/System/deviceInfo', { timeoutMs: TIMEOUT_MS.connect })).documentElement;
     return {
       deviceName: childText(root, 'deviceName'),
       model: childText(root, 'model'),
       firmwareVersion: childText(root, 'firmwareVersion'),
     };
+  },
+
+  /**
+   * Log in explicitly, as Hikvision's web UI (in Digest mode) and SDK do,
+   * with GET /ISAPI/Security/userCheck. A rejected login there can come with
+   * an explanation that other requests' HTML 401 pages lack: whether the
+   * device has locked this computer out and for how long, or how many
+   * attempts are left (see AuthError). Firmware without userCheck ("not
+   * here", see isFallbackError) leaves the check to the next request; the
+   * device checks the login before it looks at the path, so getting that far
+   * means it accepted the credentials.
+   * @param {DeviceConfig} config
+   * @returns {Promise<void>}
+   * @throws {AuthError} the device rejected the login, also when it says so in a 200 answer (older firmware)
+   */
+  async checkLogin(config) {
+    let resp;
+    try {
+      resp = await this.request(config, 'GET', USER_CHECK_PATH, null, { timeoutMs: TIMEOUT_MS.connect });
+    } catch (err) {
+      if (isFallbackError(err)) return;
+      throw err;
+    }
+    const status = parseLoginStatus(String(resp.data));
+    if (status?.statusValue !== undefined && status.statusValue !== 200) {
+      const err = rejectCredentials(config, status);
+      this.onAuthFailure?.(err);
+      throw err;
+    }
   },
 
   /**

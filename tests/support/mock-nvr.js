@@ -4,8 +4,9 @@
  * extension was developed against: four IP cameras (analog channel list
  * returns 403 notSupport), configs via InputProxy, polygon motion regions,
  * privacy masks and event triggers stored the way the NVR stores them, the
- * cameras on channels 3 and 4 with a relay, white light and speaker, and
- * errors and write results as <ResponseStatus> bodies.
+ * cameras on channels 3 and 4 with a relay, white light and speaker,
+ * errors and write results as <ResponseStatus> bodies, and the userCheck
+ * login check.
  *
  * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
  */
@@ -19,6 +20,7 @@ import ioOutputs from '../fixtures/ioOutputs-nvr.xml?raw';
 import ioOutputsCapabilities from '../fixtures/ioOutputsCapabilities-nvr.xml?raw';
 import whiteLightAlarmChannels from '../fixtures/whiteLightAlarmChannels-nvr.json?raw';
 import audioAlarmChannels from '../fixtures/audioAlarmChannels-nvr.json?raw';
+import userCheck from '../fixtures/userCheck-nvr.xml?raw';
 
 export const NVR_HOST = '192.168.0.108';
 
@@ -57,6 +59,24 @@ export function responseStatusXml(path, { statusCode, statusString, subStatusCod
     `<statusString>${statusString}</statusString>\n<subStatusCode>${subStatusCode}</subStatusCode>\n` +
     (subStatusString ? `<subStatusString>${subStatusString}</subStatusString>\n` : '') +
     '</ResponseStatus>\n';
+}
+
+/** The 401 page the DS-7604NI (V4.75) sends with every challenge. */
+const UNAUTHORIZED_HTML = '<!DOCTYPE html>\n<head>\n    <title>Unauthorized</title>\n</head>\n<body>\n' +
+  '<h2>Access Error: 401 -- Unauthorized</h2>\n<pre></pre>\n</body>\n</html>\n';
+
+/**
+ * A rejected userCheck that explains itself, in the form Hikvision's web UI
+ * and HCNetSDK parse. Not captured from the DS-7604NI: that would cost a
+ * failed login on the real device.
+ * @param {{lockStatus: 'lock'|'unlock', unlockTime: number, retryLoginTime: number}} lock
+ */
+function userCheckRejectedXml({ lockStatus, unlockTime, retryLoginTime }) {
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' +
+    '<userCheck version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">\n' +
+    '<statusValue>401</statusValue>\n<statusString>Unauthorized</statusString>\n' +
+    `<lockStatus>${lockStatus}</lockStatus>\n<unlockTime>${unlockTime}</unlockTime>\n` +
+    `<retryLoginTime>${retryLoginTime}</retryLoginTime>\n</userCheck>\n`;
 }
 
 /** What the DS-7604NI answers for a resource it doesn't have, or a write that succeeded. */
@@ -175,7 +195,11 @@ function todaysPictures() {
  * replacement; requests to other hosts go to `realFetch`.
  *
  * Tests can make it misbehave: `unreachable` fails every request like a
- * wrong IP address, `failures` answers "METHOD /path" with an error status
+ * wrong IP address, `rejectAuth` answers every request with a 401 like a
+ * password changed on the device (each with a fresh nonce, like V4.75;
+ * `failedLogins` counts the ones that carried credentials), `loginLock`
+ * makes a rejected userCheck say the device has locked this computer out or
+ * how many attempts are left, `failures` answers "METHOD /path" with an error status
  * (only the first `times` requests, when set), `holds` keeps "METHOD /path"
  * unanswered until its promise settles, and `writeStatus` changes what a
  * successful PUT or DELETE reports (e.g. statusCode 7, reboot required). `privacy.read(path)` shows the privacy masks a channel stores,
@@ -185,7 +209,9 @@ function todaysPictures() {
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
   const device = {
     requests: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
-    unreachable: false,
+    unreachable: false, failedLogins: 0, noncesIssued: 0,
+    /** @type {null | {lockStatus: 'lock'|'unlock', unlockTime: number, retryLoginTime: number}} */
+    loginLock: null,
     /** @type {Record<string, {httpStatus: number, statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string, times?: number}>} */
     failures: {},
     /** @type {Record<string, Promise<void>>} */
@@ -210,7 +236,16 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
     if (hold) await hold;
     if (device.unreachable) throw new TypeError('Failed to fetch');
     if (device.rejectAuth) {
-      return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Digest realm="r", nonce="n", qop="auth"' } });
+      const credentialed = new Headers(opts.headers).has('Authorization');
+      if (credentialed) device.failedLogins++;
+      const explained = credentialed && device.loginLock && p === '/ISAPI/Security/userCheck';
+      return new Response(explained ? userCheckRejectedXml(device.loginLock) : UNAUTHORIZED_HTML, {
+        status: 401,
+        headers: {
+          'Content-Type': explained ? 'application/xml' : 'text/html',
+          'WWW-Authenticate': `Digest realm="r", qop="auth", nonce="n${++device.noncesIssued}", stale="FALSE"`,
+        },
+      });
     }
     const failure = device.failures[`${method} ${p}`];
     if (failure) {
@@ -249,6 +284,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       const image = device.recordedFrames === 'ignoresTime' || (device.recordedFrames === 'real' && !before2001);
       return image ? new Response(await frame(), { status: 200 }) : new Response('<ResponseStatus/>', { status: 200 });
     }
+    if (p === '/ISAPI/Security/userCheck') return xml(userCheck);
     if (p === '/ISAPI/System/deviceInfo') return xml('<DeviceInfo><deviceName>Mock NVR</deviceName><model>DS-7604</model><firmwareVersion>V4.0</firmwareVersion></DeviceInfo>');
     if (p === '/ISAPI/System/Video/inputs/channels') return xml(responseStatusXml(p, STATUS.notSupport), 403);
     if (p === '/ISAPI/ContentMgmt/InputProxy/channels') {

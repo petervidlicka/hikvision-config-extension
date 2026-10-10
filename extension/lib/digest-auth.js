@@ -4,9 +4,16 @@
  * Uses a compact MD5 implementation (no external dependencies) to compute
  * the challenge-response that Hikvision devices require. Failed requests
  * throw the error types in lib/errors.js, or AuthError for a rejected login.
+ *
+ * Hikvision locks a computer out after a few failed logins, so a wrong
+ * password must cost as few attempts as possible: credentials the device
+ * rejected are never sent again until the user presses Connect, and after a
+ * 401 only one request per credentials retries (see digestFetch).
  */
 
-import { IsapiError, NetworkError, TimeoutError, parseResponseStatus } from './errors.js';
+import { IsapiError, NetworkError, TimeoutError, parseLoginStatus, parseResponseStatus } from './errors.js';
+
+/** @typedef {import('./errors.js').LoginStatus} LoginStatus */
 
 /* ── Minimal MD5 (RFC 1321) ─────────────────────────────────────────────── */
 
@@ -145,15 +152,51 @@ export const md5 = (() => {
 
 /**
  * The device rejected our credentials. Callers must not retry with the same
- * credentials: Hikvision locks the account after a handful of failed logins.
+ * credentials: Hikvision locks this computer out after a handful of failed
+ * logins, and while it is locked the right password is refused too.
+ *
+ * When the device explained the rejection (an XML 401 body, as userCheck
+ * gives), the fields say whether it has locked this computer out and for how
+ * long, or how many attempts are left, and the message says so; otherwise
+ * they are undefined and the message is the plain one.
  */
 export class AuthError extends Error {
-  /** @param {string} message */
-  constructor(message) {
-    super(message);
+  /** @param {LoginStatus|null} [status] - what the device said about the rejected login */
+  constructor(status = null) {
+    super(describeLoginFailure(status));
     this.name = 'AuthError';
     this.code = 'AUTH_FAILED';
+    /** userCheck's statusValue, e.g. 401 */
+    this.statusValue = status?.statusValue;
+    /** e.g. "maxSessionUserLink" */
+    this.subStatusCode = status?.subStatusCode;
+    /** The device refuses logins from this computer for now, whatever the password */
+    this.locked = status?.locked;
+    /** Seconds until the device accepts logins again */
+    this.unlockSeconds = status?.unlockSeconds;
+    /** Failed logins left before the device locks this computer out */
+    this.attemptsLeft = status?.attemptsLeft;
   }
+}
+
+/**
+ * The message for a rejected login: the lock, or the attempts left, when the
+ * device said; else the plain rejection. Hikvision's web UI tells the user
+ * the same two things, so they stop guessing passwords before (or while) the
+ * device locks them out.
+ * @param {LoginStatus|null} status
+ * @returns {string}
+ */
+function describeLoginFailure(status) {
+  if (status?.locked) {
+    const wait = status.unlockSeconds ? `in ${Math.ceil(status.unlockSeconds / 60)} min` : 'later';
+    return `The device has temporarily locked logins from this computer — try again ${wait}`;
+  }
+  if (status?.attemptsLeft !== undefined) {
+    const left = status.attemptsLeft;
+    return `Wrong user name or password — ${left === 0 ? 'no' : left} attempt${left === 1 ? '' : 's'} left before the device locks this computer out`;
+  }
+  return 'Device rejected the username or password';
 }
 
 /* ── Input validation ───────────────────────────────────────────────────── */
@@ -306,12 +349,29 @@ export function buildDigestHeader(method, uri, session, username, password, cnon
 export const digestSessions = new Map();
 
 /**
- * Credentials the device has already rejected. Requests with these fail
- * immediately instead of hitting the device, so background polling can't
- * burn through the device's failed-login limit.
- * @type {Set<string>}
+ * Credentials the device has already rejected, with what it said about the
+ * rejection (null when its answer didn't explain it). Requests with these
+ * fail immediately instead of hitting the device, so background polling
+ * can't burn through the device's failed-login limit.
+ * @type {Map<string, LoginStatus|null>}
  */
-export const rejectedCredentials = new Set();
+export const rejectedCredentials = new Map();
+
+/**
+ * Retries after a 401 in progress, per credentials. Hikvision answers a
+ * wrong password and an expired nonce alike, with a 401 carrying a fresh
+ * nonce and stale="FALSE", so the only way to tell them apart is to answer
+ * the new challenge, and each such retry with a wrong password is one more
+ * failed login. So one request retries for all: every other request that
+ * gets a 401, or starts, meanwhile waits for it, then sends with the
+ * challenge it proved, or fails without sending. The promise settles when
+ * the retry has (it never rejects).
+ * @type {Map<string, Promise<void>>}
+ */
+const retries = new Map();
+
+/** Read at most this much of a rejected login's body: the device's explanation is a few hundred bytes. */
+const MAX_LOGIN_BODY_BYTES = 16 * 1024;
 
 /**
  * @param {string} baseUrl
@@ -332,12 +392,66 @@ export function forgetRejectedCredentials(config) {
 }
 
 /**
+ * Forget the cached challenges for a device, for every user, e.g. on
+ * disconnect. The next request then starts from an unauthenticated
+ * challenge, which costs no login attempt, so a password changed meanwhile
+ * costs one failed login, not two (a stale challenge, then the retry).
+ * @param {DeviceConfig} config
+ */
+export function forgetDigestSessions(config) {
+  const prefix = `${buildBaseUrl(config)}|`;
+  for (const key of digestSessions.keys()) {
+    if (key.startsWith(prefix)) digestSessions.delete(key);
+  }
+}
+
+/**
+ * Record a rejection that came in a successful answer's body (older
+ * firmware answers userCheck with HTTP 200 and <statusValue>401</statusValue>),
+ * so nothing sends these credentials again until the user presses Connect,
+ * as after a 401.
+ * @param {DeviceConfig} config
+ * @param {LoginStatus|null} status - what the device said
+ * @returns {AuthError} the error to throw
+ */
+export function rejectCredentials(config, status) {
+  const key = credentialKey(buildBaseUrl(config), config);
+  markRejected(key, status);
+  return new AuthError(status);
+}
+
+/**
+ * @param {string} key - credentialKey()
+ * @param {LoginStatus|null} status
+ */
+function markRejected(key, status) {
+  digestSessions.delete(key);
+  rejectedCredentials.set(key, status);
+}
+
+/**
+ * @param {string} key - credentialKey()
+ * @throws {AuthError} with what the device said, if it rejected these credentials
+ */
+function throwIfRejected(key) {
+  if (rejectedCredentials.has(key)) throw new AuthError(rejectedCredentials.get(key));
+}
+
+/**
  * Perform an HTTP request with Digest Authentication.
  *
- * Reuses the last challenge for these credentials when we have one. On a
- * 401 it retries once with the new challenge — but only if the device
- * actually issued a new nonce; a 401 for the nonce we just used means the
- * credentials are wrong, and retrying would just add a failed login.
+ * Reuses the last challenge for these credentials when we have one. A 401
+ * can't say whether the password is wrong or the nonce expired: Hikvision
+ * issues a fresh nonce with every 401 and never sets stale=true. So a 401 is
+ * answered once with a new challenge, by one request at a time per
+ * credentials (see `retries`). If that retry gets a 401 too, the
+ * credentials are marked rejected, and every request waiting for it fails
+ * without sending. A wrong password then costs each request in flight the
+ * attempt it was already sent with, plus one retry for all of them.
+ *
+ * The final 401's body is read (its start) for the device's explanation:
+ * the AuthError then says whether the device has locked this computer out,
+ * or how many attempts are left. An HTML body leaves those fields undefined.
  *
  * A timeout or network failure leaves the cached challenge and the rejected
  * credentials alone: the device never judged the credentials.
@@ -359,18 +473,16 @@ export async function digestFetch(config, method, urlPath, body = null, { signal
   const url = `${baseUrl}${urlPath}`;
   const isImage = urlPath.includes('/picture');
   const credKey = credentialKey(baseUrl, config);
-
-  if (rejectedCredentials.has(credKey)) {
-    throw new AuthError('Device rejected the username or password');
-  }
+  throwIfRejected(credKey);
 
   const timeout = timeoutMs ? AbortSignal.timeout(timeoutMs) : undefined;
   const requestSignal = signal && timeout ? AbortSignal.any([signal, timeout]) : signal ?? timeout;
 
   /**
-   * Run one network step (sending, or reading a body), turning a failure
-   * into TimeoutError or NetworkError. A caller's abort passes through
-   * unchanged, so the caller can recognise its own cancellation.
+   * Run one network step (sending, reading a body, or waiting for another
+   * request's retry), turning a failure into TimeoutError or NetworkError.
+   * A caller's abort passes through unchanged, so the caller can recognise
+   * its own cancellation.
    * @template T
    * @param {() => Promise<T>} step
    * @returns {Promise<T>}
@@ -400,25 +512,104 @@ export async function digestFetch(config, method, urlPath, body = null, { signal
   const authorize = (session) => buildDigestHeader(
     method.toUpperCase(), urlPath, session, config.username, config.password);
 
-  const reject = () => {
-    digestSessions.delete(credKey);
-    rejectedCredentials.add(credKey);
-    return new AuthError('Device rejected the username or password');
+  /**
+   * Wait for another request's retry, within this request's own time limit
+   * and signal.
+   * @param {Promise<void>} retry
+   */
+  const waitFor = (retry) => network(() => new Promise((resolve, reject) => {
+    const onAbort = () => reject(requestSignal?.reason);
+    if (requestSignal?.aborted) return onAbort();
+    requestSignal?.addEventListener('abort', onAbort, { once: true });
+    retry.then(() => {
+      requestSignal?.removeEventListener('abort', onAbort);
+      resolve(undefined);
+    });
+  }));
+
+  /**
+   * The device's explanation of a rejected login, if the body has one (an
+   * HTML page doesn't). A body that doesn't arrive loses only the
+   * explanation, not the rejection.
+   * @param {Response} resp - the final 401
+   * @returns {Promise<LoginStatus|null>}
+   */
+  const readLoginStatus = async (resp) => {
+    try {
+      return parseLoginStatus(await network(() => readTextStart(resp, MAX_LOGIN_BODY_BYTES)));
+    } catch (err) {
+      if (err instanceof NetworkError) return null;
+      throw err;
+    }
   };
 
-  const cached = digestSessions.get(credKey);
-  let resp = await send(cached ? authorize(cached) : null);
+  /**
+   * Mark these credentials rejected, with the device's explanation, and
+   * return the error to throw.
+   * @param {Response} resp - the final 401
+   * @returns {Promise<AuthError>}
+   */
+  const rejection = async (resp) => {
+    /** @type {LoginStatus|null} */
+    let status = null;
+    try {
+      status = await readLoginStatus(resp);
+    } finally {
+      // Also if the caller gave up meanwhile: the device has judged the credentials
+      markRejected(credKey, status);
+    }
+    return new AuthError(status);
+  };
 
-  if (resp.status === 401) {
-    const session = createDigestSession(resp.headers.get('WWW-Authenticate'));
-    const nonceExpired = cached && (
-      session.challenge.nonce !== cached.challenge.nonce || /^true$/i.test(session.challenge.stale ?? ''));
-    if (cached && !nonceExpired) throw reject();
+  /**
+   * Answer the challenge in `challenge` as the one retry for these
+   * credentials, while every other request that needs one waits for it.
+   * @param {Response} challenge - a 401
+   * @returns {Promise<Response>} the device's answer, never a 401
+   * @throws {AuthError} the retry got a 401 too
+   */
+  const retry = async (challenge) => {
+    const session = createDigestSession(challenge.headers.get('WWW-Authenticate'));
+    /** @type {(value: void) => void} */
+    let settle = () => {};
+    const pending = new Promise(resolve => { settle = resolve; });
+    retries.set(credKey, pending);
+    try {
+      const resp = await send(authorize(session));
+      if (resp.status === 401) throw await rejection(resp);
+      digestSessions.set(credKey, session);
+      return resp;
+    } finally {
+      // Before the waiting requests resume, so none of them finds this retry again
+      if (retries.get(credKey) === pending) retries.delete(credKey);
+      settle();
+    }
+  };
 
-    // First contact, or the cached nonce expired — retry with the new challenge.
-    digestSessions.set(credKey, session);
-    resp = await send(authorize(session));
-    if (resp.status === 401) throw reject();
+  // Credentials another request is retrying right now may be about to be
+  // rejected: wait for the verdict rather than send them again
+  for (let pending = retries.get(credKey); pending; pending = retries.get(credKey)) await waitFor(pending);
+  throwIfRejected(credKey);
+
+  let used = digestSessions.get(credKey) ?? null;
+  let resp = await send(used ? authorize(used) : null);
+  let resent = false;
+  while (resp.status === 401) {
+    const pending = retries.get(credKey);
+    if (pending) {
+      await waitFor(pending);
+      continue;
+    }
+    throwIfRejected(credKey);
+    const current = digestSessions.get(credKey);
+    if (current && current !== used && !resent) {
+      // Another request has answered a newer challenge with these credentials since: use it
+      used = current;
+      resent = true;
+      resp = await send(authorize(current));
+    } else {
+      resp = await retry(resp);
+    }
   }
 
   if (!resp.ok) {
@@ -431,4 +622,31 @@ export async function digestFetch(config, method, urlPath, body = null, { signal
   const readBody = () => (isImage ? resp.arrayBuffer() : resp.text());
   const data = await network(readBody);
   return { status: resp.status, headers: resp.headers, data };
+}
+
+/**
+ * Read the start of a response body as text, at most `maxBytes`, then stop
+ * the download: only the start can explain a rejected login, and whatever
+ * answers at the device's address could send any amount.
+ * @param {Response} resp
+ * @param {number} maxBytes
+ * @returns {Promise<string>}
+ */
+async function readTextStart(resp, maxBytes) {
+  if (!resp.body) return '';
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let text = '';
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value.subarray(0, maxBytes - size), { stream: true });
+    size += value.byteLength;
+    if (size >= maxBytes) {
+      await reader.cancel();
+      break;
+    }
+  }
+  return text + decoder.decode();
 }

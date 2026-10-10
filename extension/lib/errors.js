@@ -10,6 +10,10 @@
  * or TimeoutError, never AuthError (lib/digest-auth.js), so a slow or
  * unreachable device can't trip the guard against failed logins.
  *
+ * A rejected login may explain itself too (parseLoginStatus): whether the
+ * device has locked this computer out, and for how long, or how many
+ * attempts are left before it does.
+ *
  * Bodies are parsed as plain text rather than with DOMParser: ResponseStatus
  * is a flat document, and the transport also runs in the Node tests.
  */
@@ -229,10 +233,64 @@ export function parseResponseStatus(text) {
   return status && (status.statusCode !== null || status.subStatusCode !== null) ? status : null;
 }
 
+/**
+ * What a device says about a login: the answer to GET /ISAPI/Security/userCheck
+ * (the explicit login Hikvision's web UI and SDK use), or the XML body of a
+ * rejected login's 401. Each field is undefined when the body doesn't have
+ * it; an HTML 401 page, which is what most requests get, has none.
+ * @typedef {object} LoginStatus
+ * @property {number} [statusValue] - userCheck's verdict: 200 accepted, 401 rejected
+ * @property {string} [subStatusCode] - the specific reason, e.g. "maxSessionUserLink"
+ * @property {boolean} [locked] - lockStatus: true for "lock", false for "unlock". The device
+ *   refuses every login from this computer while locked, the right password included.
+ * @property {number} [unlockSeconds] - unlockTime: seconds until the device accepts logins again
+ * @property {number} [attemptsLeft] - retryLoginTime: failed logins left before the device locks
+ */
+
+/**
+ * Read a LoginStatus from a userCheck answer or a 401 body, matching elements
+ * by local name like the web UI does (userCheck's own fields, or a
+ * ResponseStatus's subStatusCode), so any namespace or prefix works.
+ * @param {string} text - response body
+ * @returns {LoginStatus|null} null for anything but an XML document with one of the fields
+ * @example
+ * parseLoginStatus('<userCheck><statusValue>401</statusValue><lockStatus>lock</lockStatus><unlockTime>1500</unlockTime></userCheck>')
+ * // → {statusValue: 401, locked: true, unlockSeconds: 1500}, the other fields undefined
+ */
+export function parseLoginStatus(text) {
+  const body = String(text ?? '').trim();
+  const root = XML_ROOT.exec(body)?.[1];
+  if (!root || root.toLowerCase() === 'html') return null;
+
+  const lockStatus = xmlField(body, 'lockStatus');
+  /** @type {LoginStatus} */
+  const status = {
+    statusValue: toCount(xmlField(body, 'statusValue')),
+    subStatusCode: xmlField(body, 'subStatusCode') ?? undefined,
+    locked: lockStatus === 'lock' ? true : lockStatus === 'unlock' ? false : undefined,
+    unlockSeconds: toCount(xmlField(body, 'unlockTime')),
+    attemptsLeft: toCount(xmlField(body, 'retryLoginTime')),
+  };
+  const known = Object.values(status).some(value => value !== undefined);
+  return known ? status : null;
+}
+
 /* ── Internals ──────────────────────────────────────────────────────────── */
 
 /** A document whose root element is ResponseStatus, after any XML declaration or comments. */
 const RESPONSE_STATUS_ROOT = /^(?:<\?[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<(?:[\w.-]+:)?ResponseStatus[\s/>]/;
+
+/** Any XML document: captures the root element's local name, after any XML declaration or comments. */
+const XML_ROOT = /^(?:<\?[\s\S]*?\?>\s*|<!--[\s\S]*?-->\s*)*<(?:[\w.-]+:)?([\w.-]+)[\s/>]/;
+
+/**
+ * A whole non-negative number, as the device writes counts and durations.
+ * @param {string|null} text
+ * @returns {number|undefined}
+ */
+function toCount(text) {
+  return text !== null && /^\d+$/.test(text) ? Number(text) : undefined;
+}
 
 /**
  * @param {string} body

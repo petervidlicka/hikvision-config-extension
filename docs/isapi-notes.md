@@ -228,3 +228,38 @@ Hikvision's own clients (web UI 30 s per request, iVMS 3–30 s to connect).
 The limit includes downloading the body, so full-size JPEGs (main stream,
 stored pictures, stills from recordings) get 10 s and sub-stream frames 5 s:
 an 8 MP frame of about 1.5 MB takes about 6 s over a 2 Mbps remote link.
+
+## Logins and lockout
+
+The device locks a computer (by IP address) out after a few failed logins,
+typically for about 30 minutes, and while it is locked the right password is
+refused too, also for iVMS and the web UI on that computer. The threshold
+isn't readable on the DS-7604NI (`/ISAPI/Security/illegalLoginLock` answers
+403 `notSupport`).
+
+On V4.75 every 401 carries a fresh nonce with `stale="FALSE"`, so a 401 for
+an expired nonce and one for a wrong password look the same; only answering
+the new challenge tells them apart, and that answer is another failed login
+if the password is wrong. The device accepts a nonce it issued again later,
+also on another connection, with a rising `nc`. So `digestFetch` lets one
+request per credentials make that retry while the others wait for it, then
+send with the challenge it proved, or fail without sending: a password changed
+on the device costs each request already on its way one failed login, plus one
+for the retry. Credentials the device rejected are never sent again until
+the user presses Connect, and Connect and disconnect drop the cached
+challenges, so Connect starts from an unauthenticated challenge (which costs
+no attempt).
+
+Connect logs in with `GET /ISAPI/Security/userCheck` first, like the web UI in
+Digest mode and HCNetSDK (the DS-7604NI has `isSupportUserCheck`), then reads
+`/ISAPI/System/deviceInfo`. An accepted userCheck answers `<statusValue>200`;
+older firmware answers HTTP 200 with `<statusValue>401</statusValue>` for a
+wrong password, which counts as a rejection. A device without userCheck
+(404, 403 `notSupport`) leaves the check to deviceInfo. Unauthenticated 401s
+are an HTML page, but a rejected *credentialed* userCheck can explain itself
+in XML (`statusValue`, `lockStatus` lock/unlock, `unlockTime` in seconds,
+`retryLoginTime` = attempts left, `subStatusCode`), which the web UI turns into
+"locked, try again in N min" or "N attempts left". `AuthError` carries the
+same (`locked`, `unlockSeconds`, `attemptsLeft`) when a 401 body has them.
+Not verified on the DS-7604NI, since it costs a failed login: whether V4.75
+sends that body, and whether it does for paths other than userCheck.

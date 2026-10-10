@@ -12,7 +12,9 @@
   clicking through UI changes without a device. Run `npm run harness`.
 
   In the console, `mockDevice` exposes requests and saved XML; set
-  `mockDevice.rejectAuth = true` to simulate a password change on the device,
+  `mockDevice.rejectAuth = true` to simulate a password change on the device
+  (add `mockDevice.loginLock = {lockStatus: 'lock', unlockTime: 1800, retryLoginTime: 0}`
+  to see the lock message at Connect),
   `mockDevice.unreachable = true` for a wrong IP address,
   `mockDevice.writeStatus = {statusCode: 7, statusString: 'Reboot Required', subStatusCode: 'rebootRequired'}`
   for a save that needs a reboot, or add an error answer to
