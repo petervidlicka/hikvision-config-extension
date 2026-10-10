@@ -183,8 +183,10 @@ export class WriteRollbackError extends Error {
  * Only when the device clearly answered "not here": HTTP 404, 403 notSupport
  * or invalidOperation, or 400 badXmlContent or badParameters (this NVR
  * answers a snapshot URL form it doesn't use with 400 badXmlContent), and a
- * 403 or 400 without a body to say otherwise. Everything else stops the
- * fallback and reaches the user:
+ * 403 or 400 without a body to say otherwise. A write the device answers
+ * with HTTP 200 but a notSupport or invalidOperation status (see
+ * checkWriteResponse in lib/isapi.js) counts the same as the 403. Everything
+ * else stops the fallback and reaches the user:
  * - AuthError: each further attempt is a failed login towards the lockout
  * - lowPrivilege: every candidate would be refused the same way
  * - NetworkError, TimeoutError, aborts: nothing is answering, and more
@@ -203,6 +205,7 @@ export function isFallbackError(err) {
   const reason = err.reason;
   switch (err.httpStatus) {
     case 404: return true;
+    case 200: return reason === 'notSupport' || reason === 'invalidOperation';
     case 403: return reason === null || reason === 'notSupport' || reason === 'invalidOperation';
     case 400: return reason === null || reason === 'badXmlContent' || reason === 'badParameters';
     default: return false;

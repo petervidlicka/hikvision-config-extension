@@ -134,6 +134,9 @@ describe('isFallbackError', () => {
     expect(isFallbackError(errorFor(400, HIKVISION_BAD_CONTENT))).toBe(true);
     expect(isFallbackError(errorFor(400, PSIA_BAD_CONTENT))).toBe(true);
     expect(isFallbackError(errorFor(400, statusBody(6, 'badParameters')))).toBe(true);
+    // A write the device refuses inside an HTTP 200 (checkWriteResponse), e.g. a DELETE it can't do
+    expect(isFallbackError(errorFor(200, HIKVISION_NOT_SUPPORT))).toBe(true);
+    expect(isFallbackError(errorFor(200, statusBody(4, 'invalidOperation')))).toBe(true);
   });
 
   it('stops on anything that would fail the same way again', () => {
@@ -143,6 +146,8 @@ describe('isFallbackError', () => {
     expect(isFallbackError(errorFor(503, statusBody(2, 'deviceBusy')))).toBe(false);
     expect(isFallbackError(errorFor(500, statusBody(3, 'deviceError')))).toBe(false);
     expect(isFallbackError(errorFor(400, statusBody(5, 'badXmlFormat')))).toBe(false);
+    expect(isFallbackError(errorFor(200, HIKVISION_BAD_CONTENT))).toBe(false);
+    expect(isFallbackError(errorFor(200, statusBody(4, 'lowPrivilege')))).toBe(false);
     expect(isFallbackError(new AuthError('rejected'))).toBe(false);
     expect(isFallbackError(new TimeoutError({ method: 'GET', path: '/a', address, timeoutMs: 5000 }))).toBe(false);
     expect(isFallbackError(new NetworkError({ method: 'GET', path: '/a', address }))).toBe(false);

@@ -20,7 +20,9 @@ import {
 import {
   buildCalendarXml, buildSearchXml, parseCalendar, parsePictures, parseRecordings, parseSearchPage, searchMatchKey, toDeviceTime,
 } from './playback.js';
-import { childElement, childElements, childText, cloneXml, findDescendant, parseXml, serializeXml } from './xml.js';
+import {
+  childElement, childElements, childText, cloneXml, findDescendant, parseXml, parseXmlOrNull, serializeXml,
+} from './xml.js';
 
 /** @typedef {import('./config-xml.js').AlarmOutput} AlarmOutput */
 /** @typedef {import('./config-xml.js').DeviceRect} DeviceRect */
@@ -49,8 +51,14 @@ export const MAX_SEARCH_REQUESTS = 40;
 export const TIMEOUT_MS = Object.freeze({
   /** Connect: the whole deviceInfo request, including the Digest challenge round trip */
   connect: 8000,
-  /** One JPEG: a frame that times out just lets a live feed move on to the next */
+  /** One sub-stream (SD) JPEG: a frame that times out just lets a live feed move on to the next */
   picture: 5000,
+  /**
+   * One full-size JPEG: a main-stream (HD) frame, a stored picture or a still
+   * from a recording. The limit covers downloading it too, and an 8 MP frame
+   * of about 1.5 MB takes about 6 s over a 2 Mbps remote link.
+   */
+  fullPicture: 10000,
   /** Other reads */
   read: 10000,
   /** POST: recording and picture searches, where the device searches its disks */
@@ -58,6 +66,9 @@ export const TIMEOUT_MS = Object.freeze({
   /** PUT and DELETE: the device may take a while to apply a change */
   write: 20000,
 });
+
+/** A sub-stream (SD) snapshot: stream ID channel × 100 + 2. */
+const SUB_STREAM_PICTURE = /\/Streaming\/channels\/\d+02\/picture(?:\?|$)/;
 
 /**
  * Time limit for a request whose caller doesn't set one.
@@ -67,7 +78,9 @@ export const TIMEOUT_MS = Object.freeze({
  */
 export function defaultTimeoutMs(method, path) {
   switch (method.toUpperCase()) {
-    case 'GET': return path.includes('/picture') ? TIMEOUT_MS.picture : TIMEOUT_MS.read;
+    case 'GET':
+      if (!path.includes('/picture')) return TIMEOUT_MS.read;
+      return SUB_STREAM_PICTURE.test(path) ? TIMEOUT_MS.picture : TIMEOUT_MS.fullPicture;
     case 'POST': return TIMEOUT_MS.search;
     default: return TIMEOUT_MS.write;
   }
@@ -281,6 +294,11 @@ export const Isapi = {
    * the bare channel ID for firmware that uses that. A busy device, an
    * unavailable camera (503) or a timeout ends the attempt for this frame
    * rather than trying every URL each time.
+   *
+   * When no URL has the frame, the first URL's error is the one thrown: it
+   * is the stream the user asked for. The bare channel ID is only a guess,
+   * and the DS-7604NI answers it with 400 badXmlContent, which would explain
+   * nothing.
    * @param {DeviceConfig} config
    * @param {string} channelId
    * @param {'main'|'sub'} [stream]
@@ -290,17 +308,18 @@ export const Isapi = {
   async getSnapshot(config, channelId, stream = 'main', options = {}) {
     const ids = stream === 'sub' ? [`${channelId}02`, `${channelId}01`] : [`${channelId}01`];
     ids.push(channelId);
-    let lastError;
+    /** @type {unknown} */
+    let firstError;
     for (const id of ids) {
       try {
         const resp = await this.request(config, 'GET', `/ISAPI/Streaming/channels/${id}/picture`, null, options);
         return new Blob([resp.data], { type: 'image/jpeg' });
       } catch (err) {
         if (!isFallbackError(err)) throw err;
-        lastError = err;
+        firstError ??= err;
       }
     }
-    throw lastError;
+    throw firstError;
   },
 
   /**
@@ -325,17 +344,25 @@ export const Isapi = {
    * Motion detection capabilities (allowed region types, region and corner
    * limits, sensitivity steps, target types), or null if the device doesn't
    * have them.
+   *
+   * Optional: the editor works with default limits without them, so any
+   * error answer, or a body that isn't XML, gives null rather than failing
+   * the Motion tab. Not only "not here" answers: the DS-7604NI answers 503
+   * serviceUnavailable every time for capability resources it doesn't serve.
+   * No answer at all, or a rejected login, still throws.
    * @param {DeviceConfig} config
    * @param {Pick<Channel, 'id'|'kind'>} channel
    * @returns {Promise<XMLDocument|null>}
    */
   async getMotionCapabilities(config, channel) {
+    let resp;
     try {
-      return await this.getXml(config, `${this.motionDetectionPath(channel)}/capabilities`);
+      resp = await this.request(config, 'GET', `${this.motionDetectionPath(channel)}/capabilities`);
     } catch (err) {
-      if (!isFallbackError(err)) throw err;
+      if (!(err instanceof IsapiError)) throw err;
       return null;
     }
+    return parseXmlOrNull(String(resp.data));
   },
 
   /**

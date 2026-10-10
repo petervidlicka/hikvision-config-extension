@@ -32,8 +32,9 @@ export const GRID_FEED_INTERVAL_MS = 500;
  * scheduled only after the previous one finishes, so a slow device never
  * builds up a queue of overlapping requests.
  *
- * Each request has a time limit (TIMEOUT_MS.picture in lib/isapi.js), so a
- * stalled response costs one frame instead of freezing the feed. Stopping
+ * Each request has a time limit (TIMEOUT_MS.picture for SD, .fullPicture for
+ * HD, in lib/isapi.js), so a stalled response costs one frame instead of
+ * freezing the feed. Stopping
  * aborts the request in flight, so a channel or stream switch doesn't leave
  * the device serving a frame nobody will show.
  *

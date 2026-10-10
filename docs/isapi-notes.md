@@ -208,9 +208,19 @@ A successful PUT or DELETE also returns a ResponseStatus. Like the web UI's
 with HTTP 200.
 
 Endpoint fallbacks share one policy (`isFallbackError`): try the next URL on
-404, 403 `notSupport`/`invalidOperation` and 400 `badXmlContent`/`badParameters`;
+404, 403 `notSupport`/`invalidOperation` and 400 `badXmlContent`/`badParameters`
+(and on a write answered 200 with `notSupport`/`invalidOperation`);
 stop on 401, `lowPrivilege`, timeouts and network errors, and on 503
 `serviceUnavailable`/`deviceBusy` (an empty channel's snapshot answers 503).
 
+503 `serviceUnavailable` ("Device Busy") isn't only "busy, try later": this
+NVR also gives it, every time, for capability resources it doesn't serve
+(`…/privacyMask/regions/capabilities`, `/ISAPI/Event/triggers/capabilities`).
+So a document the extension can do without, such as the motion capabilities,
+counts as absent after any error answer, not only after a "not here" one.
+
 Every request has a time limit (`TIMEOUT_MS` in `lib/isapi.js`), as in
 Hikvision's own clients (web UI 30 s per request, iVMS 3–30 s to connect).
+The limit includes downloading the body, so full-size JPEGs (main stream,
+stored pictures, stills from recordings) get 10 s and sub-stream frames 5 s:
+an 8 MP frame of about 1.5 MB takes about 6 s over a 2 Mbps remote link.

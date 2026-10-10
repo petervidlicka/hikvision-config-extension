@@ -17,11 +17,20 @@ export const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>';
  * @throws {Error} when the device returned something that isn't XML
  */
 export function parseXml(text) {
-  const doc = new DOMParser().parseFromString(text, 'application/xml');
-  if (doc.getElementsByTagName('parsererror').length > 0) {
-    throw new Error('Device returned malformed XML');
-  }
+  const doc = parseXmlOrNull(text);
+  if (!doc) throw new Error('Device returned malformed XML');
   return doc;
+}
+
+/**
+ * Parse an ISAPI response the caller can do without, e.g. an optional
+ * capabilities document: a body that isn't XML gives null, not an error.
+ * @param {string} text
+ * @returns {XMLDocument|null}
+ */
+export function parseXmlOrNull(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  return doc.getElementsByTagName('parsererror').length > 0 ? null : doc;
 }
 
 /**

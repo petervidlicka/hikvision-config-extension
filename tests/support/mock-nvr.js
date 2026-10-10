@@ -258,19 +258,27 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
         '</InputProxyChannelList>');
     }
     if (/^\/ISAPI\/Streaming\/channels\/\d+0[12]\/picture$/.test(p)) {
+      opts.signal?.throwIfAborted();
       device.inFlightSnapshots++;
       device.maxInFlightSnapshots = Math.max(device.maxInFlightSnapshots, device.inFlightSnapshots);
-      // Like a real connection, an aborted request stops occupying the device at once
+      // Like a real connection, an aborted request stops occupying the device
+      // at once. Only while it's in flight: a signal can still fire after the
+      // frame was sent (its time limit, or the feed stopping later).
       await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
+        const settle = () => {
           device.inFlightSnapshots--;
+          opts.signal?.removeEventListener('abort', onAbort);
+        };
+        const timer = setTimeout(() => {
+          settle();
           resolve();
         }, snapshotDelayMs);
-        opts.signal?.addEventListener('abort', () => {
+        const onAbort = () => {
           clearTimeout(timer);
-          device.inFlightSnapshots--;
+          settle();
           reject(opts.signal.reason);
-        });
+        };
+        opts.signal?.addEventListener('abort', onAbort, { once: true });
       });
       return new Response(await frame(), { status: 200 });
     }

@@ -55,10 +55,12 @@ describe('digestFetch against a mock device', () => {
   const device = { password: 'secret', nonce: 'nonce-1', requests: 0, failedLogins: 0 };
   /** Authenticated requests the device never answers, like a stalled NVR. */
   const stalled = [];
+  /** How long each step of /slow takes: the challenge, and the authenticated answer. */
+  const SLOW_STEP_MS = 150;
 
   beforeAll(async () => {
-    server = http.createServer((req, res) => {
-      device.requests++;
+    const handle = (req, res) => {
+      if (req.socket.destroyed) return; // the client gave up while /slow was waiting
       const challenge = () => {
         res.writeHead(401, { 'WWW-Authenticate': `Digest realm="${REALM}", nonce="${device.nonce}", qop="auth", opaque=""` });
         res.end();
@@ -84,6 +86,11 @@ describe('digestFetch against a mock device', () => {
       }
       res.writeHead(200);
       res.end('<ok/>');
+    };
+    server = http.createServer((req, res) => {
+      device.requests++;
+      if (req.url === '/slow') return void setTimeout(() => handle(req, res), SLOW_STEP_MS);
+      handle(req, res);
     });
     await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
     cfg = { host: '127.0.0.1', port: server.address().port, username: 'admin', password: 'secret' };
@@ -175,9 +182,18 @@ describe('digestFetch against a mock device', () => {
   });
 
   it('counts the Digest challenge round trip towards the time limit', async () => {
+    // Each step fits in the limit on its own, but the two together don't
+    const limit = SLOW_STEP_MS + 100;
     const fresh = { ...cfg, username: 'viewer' };
-    await expect(digestFetch(fresh, 'GET', '/hang', null, { timeoutMs: 100 })).rejects.toBeInstanceOf(TimeoutError);
+    const err = await digestFetch(fresh, 'GET', '/slow', null, { timeoutMs: limit }).catch(e => e);
+    expect(err).toBeInstanceOf(TimeoutError);
+    expect(err).toMatchObject({ path: '/slow', timeoutMs: limit });
+    expect(device.requests).toBe(2); // ran out during the authenticated retry, after the challenge
     expect(rejectedCredentials.has(credentialKey(buildBaseUrl(fresh), fresh))).toBe(false);
+
+    // With room for both steps, the same first contact succeeds
+    const other = { ...cfg, username: 'viewer2' };
+    expect((await digestFetch(other, 'GET', '/slow', null, { timeoutMs: 4 * limit })).data).toBe('<ok/>');
   });
 
   it('passes the caller’s abort through unchanged', async () => {

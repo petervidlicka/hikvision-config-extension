@@ -135,12 +135,42 @@ describe('Isapi', () => {
     expect(calls).toEqual(['/ISAPI/Streaming/channels/101/picture', '/ISAPI/Streaming/channels/1/picture']);
   });
 
+  it('explains a missing snapshot with the stream’s answer, not the bare channel ID’s', async () => {
+    // The DS-7604NI answers the bare channel ID with 400 badXmlContent
+    mockDevice({
+      '/ISAPI/Streaming/channels/101/picture': statusRoute(403, 4, 'notSupport'),
+      '/ISAPI/Streaming/channels/1/picture': statusRoute(400, 6, 'badXmlContent'),
+    });
+    const err = await Isapi.getSnapshot(testConfig(), '1').catch(e => e);
+    expect(err).toMatchObject({ path: '/ISAPI/Streaming/channels/101/picture', subStatusCode: 'notSupport' });
+    expect(err.message).toMatch(/doesn’t support this/);
+  });
+
   it('aborts a snapshot when the caller’s signal fires', async () => {
     mockDevice({ '/ISAPI/Streaming/channels/101/picture': { hang: true } });
     const controller = new AbortController();
     const pending = Isapi.getSnapshot(testConfig(), '1', 'main', { signal: controller.signal });
     controller.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('counts the mock NVR’s snapshots in flight only until each one ends', async () => {
+    const device = createMockNvr({ snapshotDelayMs: 20 });
+    vi.stubGlobal('fetch', device.fetch);
+    const config = { host: NVR_HOST, port: 80, username: `user${++configSeq}`, password: 'pw' };
+
+    // A signal that fires after its frame arrived (the feed stopping later) changes nothing
+    const finished = new AbortController();
+    await Isapi.getSnapshot(config, '1', 'sub', { signal: finished.signal });
+    finished.abort();
+    expect(device.inFlightSnapshots).toBe(0);
+
+    const stopped = new AbortController();
+    const pending = Isapi.getSnapshot(config, '1', 'sub', { signal: stopped.signal });
+    await vi.waitFor(() => expect(device.inFlightSnapshots).toBe(1));
+    stopped.abort();
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect([device.inFlightSnapshots, device.maxInFlightSnapshots]).toEqual([0, 1]);
   });
 
   it('loads /privacyMask/regions only when the device has no /privacyMask', async () => {
@@ -159,21 +189,42 @@ describe('Isapi', () => {
     }
   });
 
-  it('applies the policy to channel lists, capabilities and event triggers', async () => {
+  it('applies the policy to channel lists and event triggers', async () => {
     let calls = mockDevice({ '/ISAPI/System/Video/inputs/channels': statusRoute(403, 4, 'lowPrivilege') });
     await expect(Isapi.getChannels(testConfig())).rejects.toBeInstanceOf(IsapiError);
     expect(calls).toEqual(['/ISAPI/System/Video/inputs/channels']);
 
-    const channel = { id: '1', kind: 'digital' };
-    const caps = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/capabilities';
-    mockDevice({ [caps]: statusRoute(403, 4, 'notSupport') });
-    expect(await Isapi.getMotionCapabilities(testConfig(), channel)).toBeNull();
-    mockDevice({ [caps]: statusRoute(503, 2, 'deviceBusy') });
-    await expect(Isapi.getMotionCapabilities(testConfig(), channel)).rejects.toMatchObject({ subStatusCode: 'deviceBusy' });
-
     calls = mockDevice({ '/ISAPI/Event/triggers/VMD-1': statusRoute(503, 2, 'deviceBusy') });
     await expect(Isapi.getEventTrigger(testConfig(), '1')).rejects.toMatchObject({ httpStatus: 503 });
     expect(calls).toEqual(['/ISAPI/Event/triggers/VMD-1']);
+  });
+
+  it('opens motion with default limits when the capabilities can’t be read, unless nothing answers', async () => {
+    const channel = { id: '1', kind: 'digital' };
+    const caps = '/ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/capabilities';
+    // The DS-7604NI answers 503 serviceUnavailable, every time, for capabilities it doesn't serve
+    const answers = [
+      statusRoute(403, 4, 'notSupport'), statusRoute(503, 2, 'serviceUnavailable', 'Device Busy'),
+      statusRoute(500, 3, 'deviceError'), { body: '<MotionDetection' },
+    ];
+    for (const route of answers) {
+      mockDevice({ [caps]: route });
+      expect(await Isapi.getMotionCapabilities(testConfig(), channel)).toBeNull();
+    }
+    mockDevice({ [caps]: { body: fixtures.motionCapabilitiesNvr } });
+    expect((await Isapi.getMotionCapabilities(testConfig(), channel))?.documentElement.localName).toBe('MotionDetection');
+
+    mockDevice({ [caps]: { unreachable: true } });
+    await expect(Isapi.getMotionCapabilities(testConfig(), channel)).rejects.toBeInstanceOf(NetworkError);
+    mockDevice({ [caps]: { status: 401, headers: { 'WWW-Authenticate': 'Digest realm="r", nonce="n", qop="auth"' } } });
+    await expect(Isapi.getMotionCapabilities(testConfig(), channel)).rejects.toBeInstanceOf(AuthError);
+    const request = vi.spyOn(Isapi, 'request')
+      .mockRejectedValueOnce(new TimeoutError({ method: 'GET', path: caps, address: '10.9.9.9:80', timeoutMs: TIMEOUT_MS.read }));
+    try {
+      await expect(Isapi.getMotionCapabilities(testConfig(), channel)).rejects.toBeInstanceOf(TimeoutError);
+    } finally {
+      request.mockRestore();
+    }
   });
 
   it('treats any error answer as "no recorded frame", but not a missing answer', async () => {
@@ -242,8 +293,14 @@ describe('Isapi writes', () => {
 
 describe('request time limits', () => {
   it('gives each kind of request its own budget', () => {
-    expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/101/picture')).toBe(TIMEOUT_MS.picture);
-    expect(defaultTimeoutMs('GET', '/picture/Streaming/tracks/103/?name=x')).toBe(TIMEOUT_MS.picture);
+    expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/102/picture')).toBe(TIMEOUT_MS.picture);
+    expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/1202/picture')).toBe(TIMEOUT_MS.picture);
+    // Full-size JPEGs may take seconds to download over a slow link
+    expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/101/picture')).toBe(TIMEOUT_MS.fullPicture);
+    expect(defaultTimeoutMs('GET', '/ISAPI/Streaming/channels/1/picture')).toBe(TIMEOUT_MS.fullPicture);
+    expect(defaultTimeoutMs('GET', '/picture/Streaming/tracks/103/?name=x')).toBe(TIMEOUT_MS.fullPicture);
+    expect(defaultTimeoutMs('GET', '/ISAPI/ContentMgmt/StreamingProxy/channels/101/picture?starttime=x')).toBe(TIMEOUT_MS.fullPicture);
+    expect(TIMEOUT_MS.fullPicture).toBeGreaterThan(TIMEOUT_MS.picture);
     expect(defaultTimeoutMs('GET', '/ISAPI/Event/triggers/VMD-1')).toBe(TIMEOUT_MS.read);
     expect(defaultTimeoutMs('POST', '/ISAPI/ContentMgmt/search')).toBe(TIMEOUT_MS.search);
     expect(defaultTimeoutMs('PUT', '/ISAPI/Event/triggers/VMD-1')).toBe(TIMEOUT_MS.write);
@@ -322,7 +379,8 @@ describe('saving privacy masks', () => {
 
   it('falls back to one PUT that disables unused slots when the regions can’t be deleted', async () => {
     const methodNotAllowed = { httpStatus: 405, statusCode: 4, statusString: 'Invalid Operation', subStatusCode: 'methodNotAllowed' };
-    for (const failure of [notSupport, methodNotAllowed]) {
+    // Also when the device reports notSupport inside an HTTP 200
+    for (const failure of [notSupport, methodNotAllowed, { ...notSupport, httpStatus: 200 }]) {
       const { device, config, original, stored } = await loadNvr();
       device.failures[`DELETE ${path}/regions`] = failure;
       await Isapi.savePrivacyMask(config, path, original, { enabled: true, rects: [top] });
