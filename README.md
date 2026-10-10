@@ -52,3 +52,7 @@ To test against your own device's XML, `tests/capture-fixtures.sh <host>` downlo
 ## Contributing
 
 I haven't bothered adding other administrative functionality simply because I never needed to set it up for my own use case. I am happy to add more features in the future, or feel free to fork this project and send me a Pull Request!
+
+## License
+
+[MIT](LICENSE)

@@ -1,8 +1,9 @@
 {
   "name": "hikvision-config-extension",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "private": true,
   "description": "Chrome extension for configuring Hikvision NVRs and cameras over ISAPI",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "lint": "eslint .",
