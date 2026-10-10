@@ -10,13 +10,15 @@
  * Depends on lib/xml.js.
  */
 
+import { appendElement, childElement, childElements, childText, findDescendant, setChildText, xmlPath } from './xml.js';
+
 /* ── Motion detection ───────────────────────────────────────────────────── */
 
 /**
  * Motion region coordinates are normalized to 0–1000 on both axes, with Y
  * measured from the bottom of the image (Hikvision web UI drawTools.js).
  */
-const MOTION_COORDINATE_SCALE = 1000;
+export const MOTION_COORDINATE_SCALE = 1000;
 
 /**
  * @typedef {object} MotionCapabilities
@@ -29,7 +31,7 @@ const MOTION_COORDINATE_SCALE = 1000;
  */
 
 /** Limits used when the device doesn't publish capabilities. */
-const DEFAULT_MOTION_CAPABILITIES = {
+export const DEFAULT_MOTION_CAPABILITIES = {
   regionTypes: ['region'],
   maxRegions: 4,
   minPoints: 3,
@@ -39,13 +41,13 @@ const DEFAULT_MOTION_CAPABILITIES = {
 };
 
 /** Integer attribute of an element, or `fallback` when missing/invalid. */
-function intAttr(el, name, fallback) {
+export function intAttr(el, name, fallback) {
   const value = parseInt(el?.getAttribute(name), 10);
   return Number.isNaN(value) ? fallback : value;
 }
 
 /** Comma-separated `opt` attribute as a list. */
-function optList(el) {
+export function optList(el) {
   return (el?.getAttribute('opt') || '').split(',').map(s => s.trim()).filter(Boolean);
 }
 
@@ -54,7 +56,7 @@ function optList(el) {
  * @param {XMLDocument|null} doc
  * @returns {MotionCapabilities}
  */
-function readMotionCapabilities(doc) {
+export function readMotionCapabilities(doc) {
   const d = DEFAULT_MOTION_CAPABILITIES;
   if (!doc) return { ...d, sensitivity: { ...d.sensitivity } };
   const root = doc.documentElement;
@@ -89,7 +91,7 @@ function readMotionCapabilities(doc) {
  */
 
 /** Read the RegionCoordinates points under an element. */
-function readCoordinates(el) {
+export function readCoordinates(el) {
   return childElements(childElement(el, 'RegionCoordinatesList'), 'RegionCoordinates').map(c => ({
     x: parseInt(childText(c, 'positionX'), 10) || 0,
     y: parseInt(childText(c, 'positionY'), 10) || 0,
@@ -101,7 +103,7 @@ function readCoordinates(el) {
  * @param {XMLDocument} doc
  * @returns {MotionConfig}
  */
-function readMotionConfig(doc) {
+export function readMotionConfig(doc) {
   const root = doc.documentElement;
   const layout = childElement(root, 'MotionDetectionLayout');
   const sensitivity = parseInt(childText(layout, 'sensitivityLevel'), 10);
@@ -146,7 +148,7 @@ function readMotionConfig(doc) {
  * @param {XMLDocument} doc - edited in place
  * @param {{enabled: boolean, sensitivity: number, dynamicAnalysis: boolean, regions: DevicePoint[][], targetTypes?: string[]}} config
  */
-function applyMotionConfig(doc, config) {
+export function applyMotionConfig(doc, config) {
   const root = doc.documentElement;
   const layout = childElement(root, 'MotionDetectionLayout');
 
@@ -197,7 +199,7 @@ function applyMotionConfig(doc, config) {
 /* ── Privacy mask ───────────────────────────────────────────────────────── */
 
 /** The region list, whether the document is a PrivacyMask or the bare list. */
-function privacyRegionList(doc) {
+export function privacyRegionList(doc) {
   const root = doc.documentElement;
   return root.localName === 'PrivacyMaskRegionList' ? root : childElement(root, 'PrivacyMaskRegionList');
 }
@@ -209,7 +211,7 @@ function privacyRegionList(doc) {
  * @param {XMLDocument} doc
  * @returns {{enabled: boolean, screen: {width: number, height: number}|null, regions: DevicePoint[][]}}
  */
-function readPrivacyMask(doc) {
+export function readPrivacyMask(doc) {
   const root = doc.documentElement;
   const size = childElement(root, 'normalizedScreenSize');
   const width = parseInt(childText(size, 'normalizedScreenWidth'), 10);
@@ -225,7 +227,7 @@ function readPrivacyMask(doc) {
 }
 
 /** Replace a region's coordinates with the four corners of a rectangle. */
-function writeRectangle(regionEl, rect) {
+export function writeRectangle(regionEl, rect) {
   let list = childElement(regionEl, 'RegionCoordinatesList');
   if (!list) list = appendElement(regionEl, 'RegionCoordinatesList');
   list.replaceChildren();
@@ -245,7 +247,7 @@ function writeRectangle(regionEl, rect) {
  * @param {XMLDocument} doc - edited in place
  * @param {{enabled: boolean, rects: {x1: number, y1: number, x2: number, y2: number}[]}} config
  */
-function applyPrivacyMask(doc, config) {
+export function applyPrivacyMask(doc, config) {
   const root = doc.documentElement;
   setChildText(root, 'enabled', config.enabled);
 
@@ -272,7 +274,7 @@ function applyPrivacyMask(doc, config) {
 /* ── Event trigger notifications ────────────────────────────────────────── */
 
 /** The <EventTriggerNotification> elements of a trigger. */
-function triggerNotifications(doc) {
+export function triggerNotifications(doc) {
   return childElements(
     childElement(doc.documentElement, 'EventTriggerNotificationList'),
     'EventTriggerNotification');
@@ -283,7 +285,7 @@ function triggerNotifications(doc) {
  * @param {XMLDocument} doc
  * @returns {Set<string>}
  */
-function readNotificationMethods(doc) {
+export function readNotificationMethods(doc) {
   return new Set(triggerNotifications(doc).map(n => childText(n, 'notificationMethod')));
 }
 
@@ -300,7 +302,7 @@ function readNotificationMethods(doc) {
  * @param {Set<string>} options.enabled - which of those should be on
  * @param {string} options.channelId - for new "record" entries
  */
-function applyNotificationMethods(doc, { managed, enabled, channelId }) {
+export function applyNotificationMethods(doc, { managed, enabled, channelId }) {
   const root = doc.documentElement;
   // Address the channel the same way(s) the trigger itself does
   const channelFields = [

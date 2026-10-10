@@ -8,15 +8,18 @@
  * Depends on lib/digest-auth.js and lib/xml.js.
  */
 
+import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
+import { childElements, childText, parseXml, serializeXml } from './xml.js';
+
 /**
  * Rethrow auth failures so endpoint fallbacks don't retry with credentials
  * the device already rejected (each attempt counts towards its lockout).
  */
-function rethrowAuthError(err) {
+export function rethrowAuthError(err) {
   if (err instanceof AuthError) throw err;
 }
 
-const Isapi = {
+export const Isapi = {
   /**
    * Called once per AuthError. The UI uses this to stop polling and return
    * to the login form.

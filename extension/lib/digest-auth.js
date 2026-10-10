@@ -7,7 +7,7 @@
 
 /* ── Minimal MD5 (RFC 1321) ─────────────────────────────────────────────── */
 
-const md5 = (() => {
+export const md5 = (() => {
   const K = [
     0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,
     0xa8304613,0xfd469501,0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,
@@ -36,7 +36,7 @@ const md5 = (() => {
     return ((x << c) | (x >>> (32 - c))) >>> 0;
   }
 
-  return function md5(input) {
+  return function digest(input) {
     const msg = typeof input === 'string' ? toUTF8(input) : input;
     const origLen = msg.length;
     const bitLen = origLen * 8;
@@ -108,7 +108,7 @@ const md5 = (() => {
  * The device rejected our credentials. Callers must not retry with the same
  * credentials: Hikvision locks the account after a handful of failed logins.
  */
-class AuthError extends Error {
+export class AuthError extends Error {
   constructor(message) {
     super(message);
     this.name = 'AuthError';
@@ -118,13 +118,13 @@ class AuthError extends Error {
 
 /* ── Input validation ───────────────────────────────────────────────────── */
 
-const HOST_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)$/;
+export const HOST_RE = /^(?:\d{1,3}(?:\.\d{1,3}){3}|[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*)$/;
 
 /**
  * Build the device base URL, rejecting anything that isn't a bare host and
  * port so a crafted host value can't redirect requests elsewhere.
  */
-function buildBaseUrl(config) {
+export function buildBaseUrl(config) {
   const host = String(config?.host ?? '');
   const port = Number(config?.port || 80);
   if (!HOST_RE.test(host)) throw new Error(`Invalid host: ${host}`);
@@ -137,7 +137,7 @@ function buildBaseUrl(config) {
 /* ── Digest Auth helpers ────────────────────────────────────────────────── */
 
 /** Parse `key=value` / `key="quoted value"` pairs from one challenge. */
-function parseChallengeParams(str) {
+export function parseChallengeParams(str) {
   const params = {};
   const regex = /(\w+)\s*=\s*(?:"((?:[^"\\]|\\.)*)"|([^\s,]+))/g;
   let match;
@@ -154,7 +154,7 @@ function parseChallengeParams(str) {
  * (realm, nonce, qop, opaque, ...). A device may offer several challenges
  * (e.g. SHA-256 and MD5), which Headers.get() joins with ", ".
  */
-function parseDigestChallenge(header) {
+export function parseDigestChallenge(header) {
   const challenges = header
     .split(/,?\s*(?=Digest\s)/i)
     .filter(s => /^Digest\s/i.test(s))
@@ -173,21 +173,21 @@ function parseDigestChallenge(header) {
  * Pick the qop to use. The server may offer a list ("auth,auth-int");
  * we only implement "auth". No qop means legacy RFC 2069 digest.
  */
-function pickQop(qopParam) {
+export function pickQop(qopParam) {
   if (qopParam === undefined) return null;
   const options = qopParam.split(',').map(s => s.trim().toLowerCase());
   if (options.includes('auth')) return 'auth';
   throw new Error(`Unsupported digest qop: ${qopParam}`);
 }
 
-function randomHex(bytes) {
+export function randomHex(bytes) {
   return Array.from(crypto.getRandomValues(new Uint8Array(bytes)))
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
 }
 
 /** Quote a header parameter value, escaping `"` and `\`. */
-function quote(value) {
+export function quote(value) {
   return `"${String(value).replace(/(["\\])/g, '\\$1')}"`;
 }
 
@@ -195,15 +195,16 @@ function quote(value) {
  * A server challenge we keep reusing until the device rejects it, so each
  * request costs one round trip instead of two. `nc` counts uses of the nonce.
  */
-function createDigestSession(wwwAuthHeader) {
+export function createDigestSession(wwwAuthHeader) {
   const challenge = parseDigestChallenge(wwwAuthHeader || '');
   return { challenge, qop: pickQop(challenge.qop), nc: 0 };
 }
 
 /**
  * Build an HTTP Digest Authorization header value.
+ * @param {string} [cnonce] - client nonce; random unless given (tests pass a fixed one)
  */
-function buildDigestHeader(method, uri, session, username, password) {
+export function buildDigestHeader(method, uri, session, username, password, cnonce = randomHex(16)) {
   const { challenge, qop } = session;
   const ha1 = md5(`${username}:${challenge.realm}:${password}`);
   const ha2 = md5(`${method}:${uri}`);
@@ -218,7 +219,6 @@ function buildDigestHeader(method, uri, session, username, password) {
   if (qop) {
     session.nc += 1;
     const ncStr = session.nc.toString(16).padStart(8, '0');
-    const cnonce = randomHex(16);
     response = md5(`${ha1}:${challenge.nonce}:${ncStr}:${cnonce}:${qop}:${ha2}`);
     parts.push(`qop=${qop}`, `nc=${ncStr}`, `cnonce=${quote(cnonce)}`);
   } else {
@@ -234,16 +234,16 @@ function buildDigestHeader(method, uri, session, username, password) {
 /* ── Session + lockout state ────────────────────────────────────────────── */
 
 /** Cached challenges, keyed by device + credentials. */
-const digestSessions = new Map();
+export const digestSessions = new Map();
 
 /**
  * Credentials the device has already rejected. Requests with these fail
  * immediately instead of hitting the device, so background polling can't
  * burn through the device's failed-login limit.
  */
-const rejectedCredentials = new Set();
+export const rejectedCredentials = new Set();
 
-function credentialKey(baseUrl, config) {
+export function credentialKey(baseUrl, config) {
   return `${baseUrl}|${config.username}|${md5(String(config.password))}`;
 }
 
@@ -251,7 +251,7 @@ function credentialKey(baseUrl, config) {
  * Allow one more attempt with these credentials. Only call this for an
  * explicit user action (pressing Connect), never from automatic retries.
  */
-function forgetRejectedCredentials(config) {
+export function forgetRejectedCredentials(config) {
   rejectedCredentials.delete(credentialKey(buildBaseUrl(config), config));
 }
 
@@ -265,7 +265,7 @@ function forgetRejectedCredentials(config) {
  *
  * @returns {{ status: number, headers: Headers, data: string|ArrayBuffer }}
  */
-async function digestFetch(config, method, urlPath, body = null) {
+export async function digestFetch(config, method, urlPath, body = null) {
   const baseUrl = buildBaseUrl(config);
   const url = `${baseUrl}${urlPath}`;
   const isImage = urlPath.includes('/picture');
