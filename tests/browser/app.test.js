@@ -27,7 +27,12 @@ function canvasPointer() {
     click(fx, fy);
     canvas.dispatchEvent(new MouseEvent('dblclick', at(fx, fy)));
   };
-  return { click, dblclick };
+  const drag = (fx1, fy1, fx2, fy2) => {
+    canvas.dispatchEvent(new MouseEvent('mousedown', at(fx1, fy1)));
+    canvas.dispatchEvent(new MouseEvent('mousemove', at(fx2, fy2)));
+    canvas.dispatchEvent(new MouseEvent('mouseup', at(fx2, fy2)));
+  };
+  return { click, dblclick, drag };
 }
 
 beforeAll(async () => {
@@ -199,6 +204,42 @@ describe('config page', () => {
     expect(path).toBe('/ISAPI/ContentMgmt/InputProxy/channels/2/video/motionDetection');
     expect(body).toContain('<regionType>grid</regionType>');
     expect(body).toContain('<gridMap>800000' + '0'.repeat(102) + '</gridMap>');
+  });
+
+  it('shows stored privacy masks the right way up and saves exactly the drawn ones', async () => {
+    $('configTabs').querySelector('[data-tool="privacy"]').click();
+    await vi.waitFor(() => expect(state.privacyDoc).not.toBeNull());
+    // The NVR stores a mask at the top left and one at the bottom right, both reading enabled=false
+    const { width, height } = dom.canvas;
+    expect(state.privacyRegions.map(r => [r.x / width, r.y / height, r.w / width, r.h / height]))
+      .toEqual([[0, 0, 0.25, 0.25], [0.75, 0.75, 0.25, 0.25]]);
+    expect($('privacyToggle').classList.contains('on')).toBe(true);
+
+    // Delete the bottom-right mask and draw one along the top right
+    $('privacyRegionList').querySelector('[data-delete="1"]').click();
+    canvasPointer().drag(0.5, 0.05, 0.9, 0.2);
+    expect(state.privacyRegions).toHaveLength(2);
+
+    const path = '/ISAPI/ContentMgmt/InputProxy/channels/2/video/privacyMask';
+    const puts = device.puts.length;
+    $('savePrivacyBtn').click();
+    await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+    expect(device.deletes.at(-1)).toBe(`${path}/regions`);
+    const { path: putPath, body } = device.puts.at(-1);
+    expect(putPath).toBe(path);
+    expect([...body.matchAll(/<id>(\d+)<\/id>/g)].map(m => m[1])).toEqual(['1', '2']);
+    // Y counts from the bottom: the new mask spans 5–20 % below the top, positionY ≈ 547–461
+    // (give or take a few units, since pointer events land on whole screen pixels)
+    const ys = [...body.split('<id>2</id>')[1].matchAll(/<positionY>(\d+)</g)].map(m => +m[1]);
+    expect(Math.max(...ys)).toBeCloseTo(547, -1);
+    expect(Math.min(...ys)).toBeCloseTo(461, -1);
+    await vi.waitFor(() => expect(toast()).toBe('Privacy mask saved successfully!'));
+
+    // What the device now stores is exactly what was drawn
+    $('loadPrivacyBtn').click();
+    await vi.waitFor(() => expect(toast()).toBe('Privacy mask config loaded'));
+    expect(state.privacyRegions).toHaveLength(2);
+    expect(state.privacyRegions[1].y / height).toBeCloseTo(0.05, 2);
   });
 
   it('shows the day’s recordings and frames in Playback', async () => {

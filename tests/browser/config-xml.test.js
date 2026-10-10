@@ -4,8 +4,9 @@
 import { describe, expect, it } from 'vitest';
 import { childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import {
-  applyMotionConfig, applyNotificationMethods, decodeGridMap, encodeGridMap, applyPrivacyMask, privacyRegionList, readMotionCapabilities,
-  readMotionConfig, readNotificationMethods, readPrivacyMask, triggerNotifications,
+  DEFAULT_PRIVACY_SCREEN, applyMotionConfig, applyNotificationMethods, canvasRectToPrivacy, decodeGridMap, encodeGridMap,
+  applyPrivacyMask, privacyRegionList, privacyRegionToCanvas, readMotionCapabilities, readMotionConfig,
+  readNotificationMethods, readPrivacyMask, triggerNotifications,
 } from '../../extension/lib/config-xml.js';
 import { fixtures, motionFixtures } from './fixtures.js';
 
@@ -147,38 +148,66 @@ describe('motion grid (grid-only cameras)', () => {
 });
 
 describe('privacy mask', () => {
-  it('returns only enabled regions', () => {
-    const pm = readPrivacyMask(parseXml(fixtures.privacyMask));
-    expect(pm.enabled).toBe(true);
-    expect(pm.regions).toHaveLength(1);
-    expect(pm.regions[0][2]).toEqual({ x: 110, y: 120 });
+  /** [id, enabled, maskType] of each region in the document */
+  const slotsOf = (doc) => childElements(privacyRegionList(doc), 'PrivacyMaskRegion')
+    .map(r => [childText(r, 'id'), childText(r, 'enabled'), childText(r, 'maskType')]);
+
+  it('shows every stored region with an area, whatever its own enabled flag', () => {
+    // The NVR reads every region back with enabled=false, yet masks it
+    const nvr = readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions));
+    expect(nvr.enabled).toBe(true);
+    expect(nvr.regions).toHaveLength(2);
+    expect(nvr.regions[0]).toContainEqual({ x: 176, y: 432 });
+
+    // An unused slot (no coordinates) isn't a mask
+    const camera = readPrivacyMask(parseXml(fixtures.privacyMask));
+    expect(camera.regions).toHaveLength(1);
+    expect(camera.regions[0][2]).toEqual({ x: 110, y: 120 });
   });
 
-  it('fills existing slots and keeps device fields', () => {
-    const doc = parseXml(fixtures.privacyMask);
-    applyPrivacyMask(doc, { enabled: true, rects: [{ x1: 1, y1: 2, x2: 3, y2: 4 }, { x1: 5, y1: 6, x2: 7, y2: 8 }] });
-    const regions = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
-    expect(regions.map(r => [childText(r, 'id'), childText(r, 'enabled'), childText(r, 'maskType')]))
-      .toEqual([['1', 'true', 'gray'], ['2', 'true', 'gray']]);
-    expect(readPrivacyMask(doc).regions[1]).toEqual([{ x: 5, y: 6 }, { x: 7, y: 6 }, { x: 7, y: 8 }, { x: 5, y: 8 }]);
-    expect(serializeXml(doc)).toContain('<normalizedScreenWidth>704</normalizedScreenWidth>');
+  it('skips zero-area regions and reads a bare region list’s switch from its regions', () => {
+    const ns = 'xmlns="http://www.isapi.org/ver20/XMLSchema"';
+    const region = (id, enabled, points) => `<PrivacyMaskRegion><id>${id}</id><enabled>${enabled}</enabled><RegionCoordinatesList>${
+      points.map(([x, y]) => `<RegionCoordinates><positionX>${x}</positionX><positionY>${y}</positionY></RegionCoordinates>`).join('')
+    }</RegionCoordinatesList></PrivacyMaskRegion>`;
+    const list = (...regions) => parseXml(`<PrivacyMaskRegionList ${ns}>${regions.join('')}</PrivacyMaskRegionList>`);
+
+    const flat = readPrivacyMask(list(region(1, 'true', [[0, 0], [0, 0], [0, 0]]), region(2, 'false', [[10, 10], [90, 10], [90, 10]])));
+    expect([flat.enabled, flat.regions]).toEqual([true, []]);
+    expect(readPrivacyMask(list(region(1, 'false', [[0, 0], [50, 50]]))).enabled).toBe(false);
   });
 
-  it('disables unused slots instead of deleting them', () => {
+  it('rebuilds the list with exactly the new rectangles, as the web UI does', () => {
+    const doc = parseXml(fixtures.privacyMaskNvrRegions);
+    applyPrivacyMask(doc, { enabled: true, rects: [{ x1: 0, y1: 576, x2: 704, y2: 432 }] });
+    expect(slotsOf(doc)).toEqual([['1', 'true', null]]);
+    const body = serializeXml(doc);
+    expect(body).toMatch(new RegExp('<PrivacyMaskRegionList[^>]*><PrivacyMaskRegion><id>1</id><enabled>true</enabled>' +
+      '<RegionCoordinatesList><RegionCoordinates><positionX>0</positionX><positionY>576</positionY></RegionCoordinates>'));
+    expect(body).toContain('<normalizedScreenWidth>704</normalizedScreenWidth>');
+    expect(readPrivacyMask(doc).regions).toEqual([[{ x: 0, y: 576 }, { x: 704, y: 576 }, { x: 704, y: 432 }, { x: 0, y: 432 }]]);
+  });
+
+  it('writes the global switch into every region and keeps fields like maskType', () => {
     const doc = parseXml(fixtures.privacyMask);
-    applyPrivacyMask(doc, { enabled: false, rects: [] });
-    const regions = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
-    expect(regions.map(r => childText(r, 'enabled'))).toEqual(['false', 'false']);
+    const rect = { x1: 1, y1: 2, x2: 3, y2: 4 };
+    applyPrivacyMask(doc, { enabled: false, rects: [rect, rect, rect] });
+    expect(slotsOf(doc)).toEqual([['1', 'false', 'gray'], ['2', 'false', 'gray'], ['3', 'false', null]]);
     expect(childText(doc.documentElement, 'enabled')).toBe('false');
+    expect(serializeXml(doc)).not.toContain('xmlns=""');
+
+    applyPrivacyMask(doc, { enabled: true, rects: [] });
+    expect(slotsOf(doc)).toEqual([]);
   });
 
-  it('adds slots in the document namespace when the device has too few', () => {
-    const doc = parseXml(fixtures.privacyMask);
-    const rect = { x1: 0, y1: 0, x2: 10, y2: 10 };
-    applyPrivacyMask(doc, { enabled: true, rects: [rect, rect, rect] });
+  it('can disable and empty unused slots instead, for firmware that can’t delete regions', () => {
+    const doc = parseXml(fixtures.privacyMaskNvrRegions);
+    applyPrivacyMask(doc, { enabled: true, rects: [{ x1: 5, y1: 6, x2: 7, y2: 8 }], unused: 'disable' });
+    expect(slotsOf(doc)).toEqual([['1', 'true', null], ['2', 'false', null]]);
     const regions = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
-    expect(regions.map(r => childText(r, 'id'))).toEqual(['1', '2', '3']);
-    expect(serializeXml(doc)).not.toContain('xmlns=""');
+    expect(childElements(childElements(regions[1], 'RegionCoordinatesList')[0], 'RegionCoordinates')).toHaveLength(0);
+    // A disabled slot keeps no stale coordinates, so it can't reappear as a mask
+    expect(readPrivacyMask(doc).regions).toEqual([[{ x: 5, y: 6 }, { x: 7, y: 6 }, { x: 7, y: 8 }, { x: 5, y: 8 }]]);
   });
 
   it('uses the NVR’s declared screen size and fills an empty list', () => {
@@ -188,6 +217,41 @@ describe('privacy mask', () => {
     const pm = readPrivacyMask(doc);
     expect([pm.enabled, pm.regions.length]).toEqual([true, 1]);
     expect(pm.regions[0][2]).toEqual({ x: 300, y: 200 });
+  });
+});
+
+describe('privacy mask coordinates', () => {
+  const screen = DEFAULT_PRIVACY_SCREEN;
+  const canvas = { width: 640, height: 360 };
+
+  it('measures Y from the bottom: a region at positionY 432–576 is the top quarter', () => {
+    const top = [{ x: 0, y: 576 }, { x: 704, y: 576 }, { x: 704, y: 432 }, { x: 0, y: 432 }];
+    expect(privacyRegionToCanvas(top, screen, canvas)).toEqual({ x: 0, y: 0, w: 640, h: 90 });
+
+    // The NVR fixture: region 1 top-left, region 2 bottom-right
+    const [topLeft, bottomRight] = readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions)).regions;
+    expect(privacyRegionToCanvas(topLeft, screen, canvas)).toEqual({ x: 0, y: 0, w: 160, h: 90 });
+    expect(privacyRegionToCanvas(bottomRight, screen, canvas)).toEqual({ x: 480, y: 270, w: 160, h: 90 });
+  });
+
+  it('saves a rectangle at the top of the canvas near positionY = screen height', () => {
+    expect(canvasRectToPrivacy({ x: 64, y: 0, w: 320, h: 36 }, screen, canvas))
+      .toEqual({ x1: 70, y1: 576, x2: 422, y2: 518 });
+    expect(canvasRectToPrivacy({ x: 0, y: 324, w: 640, h: 36 }, screen, canvas))
+      .toEqual({ x1: 0, y1: 58, x2: 704, y2: 0 });
+  });
+
+  it('round-trips, rounding to whole units and clamping to the screen', () => {
+    const rect = { x: 100, y: 50, w: 200, h: 120 };
+    const device = canvasRectToPrivacy(rect, screen, canvas);
+    expect(Object.values(device).every(Number.isInteger)).toBe(true);
+    const corners = [{ x: device.x1, y: device.y1 }, { x: device.x2, y: device.y2 }];
+    const back = privacyRegionToCanvas(corners, screen, canvas);
+    for (const key of ['x', 'y', 'w', 'h']) expect(back[key]).toBeCloseTo(rect[key], 0);
+
+    // Dragged past the edges of the image
+    expect(canvasRectToPrivacy({ x: -20, y: -10, w: 700, h: 400 }, screen, canvas)).toEqual({ x1: 0, y1: 576, x2: 704, y2: 0 });
+    expect(privacyRegionToCanvas([{ x: -50, y: 700 }, { x: 900, y: -5 }], screen, canvas)).toEqual({ x: 0, y: 0, w: 640, h: 360 });
   });
 });
 

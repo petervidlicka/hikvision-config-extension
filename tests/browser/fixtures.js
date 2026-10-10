@@ -7,11 +7,12 @@ import motionDetection from '../fixtures/motionDetection.xml?raw';
 import motionCapabilitiesNvr from '../fixtures/motionCapabilities-nvr.xml?raw';
 import privacyMask from '../fixtures/privacyMask.xml?raw';
 import privacyMaskNvr from '../fixtures/privacyMask-nvr.xml?raw';
+import privacyMaskNvrRegions from '../fixtures/privacyMask-nvr-regions.xml?raw';
 import eventTrigger from '../fixtures/eventTrigger.xml?raw';
 import eventTriggerNvr from '../fixtures/eventTrigger-nvr.xml?raw';
 
 export const fixtures = {
-  motionDetection, motionCapabilitiesNvr, privacyMask, privacyMaskNvr, eventTrigger, eventTriggerNvr,
+  motionDetection, motionCapabilitiesNvr, privacyMask, privacyMaskNvr, privacyMaskNvrRegions, eventTrigger, eventTriggerNvr,
 };
 
 const captured = import.meta.glob('../fixtures/local/*_motionDetection.xml', { query: '?raw', import: 'default', eager: true });

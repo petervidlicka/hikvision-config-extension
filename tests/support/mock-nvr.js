@@ -3,13 +3,14 @@
  * running the real config page outside the extension. Mirrors the NVR this
  * extension was developed against: IP cameras only (analog channel list
  * returns 403 notSupport), configs via InputProxy, polygon motion regions,
- * and errors and write results as <ResponseStatus> bodies.
+ * privacy masks stored the way the NVR stores them, and errors and write
+ * results as <ResponseStatus> bodies.
  *
  * Used by tests/browser/app.test.js and the manual harness in tests/harness/.
  */
 import motionDetection from '../fixtures/motionDetection.xml?raw';
 import motionCapabilities from '../fixtures/motionCapabilities-nvr.xml?raw';
-import privacyMask from '../fixtures/privacyMask.xml?raw';
+import privacyMaskRegions from '../fixtures/privacyMask-nvr-regions.xml?raw';
 import eventTrigger from '../fixtures/eventTrigger.xml?raw';
 
 export const NVR_HOST = '192.168.0.108';
@@ -57,6 +58,51 @@ export const STATUS = {
   ok: { statusCode: 1, statusString: 'OK', subStatusCode: 'ok' },
 };
 
+/** Direct children of `el` with the given local name. */
+const children = (el, name) => (el ? [...el.children].filter(c => c.localName === name) : []);
+
+/**
+ * Privacy masks per channel, stored the way the DS-7604NI stores them (write
+ * tests on channel 3): a PUT of /privacyMask sets the global <enabled> and
+ * MERGES the regions it sends into the stored ones by id, so a region left
+ * out stays stored; DELETE /privacyMask/regions clears them all; and every
+ * region reads back with <enabled>false</enabled>, whatever was sent. Each
+ * channel starts with the two regions of privacyMask-nvr-regions.xml.
+ */
+function createPrivacyStore() {
+  /** @type {Map<string, XMLDocument>} */
+  const docs = new Map();
+  /** @param {string} path - …/privacyMask */
+  const stored = (path) => {
+    if (!docs.has(path)) docs.set(path, new DOMParser().parseFromString(privacyMaskRegions, 'application/xml'));
+    return docs.get(path);
+  };
+  const regionList = (doc) => children(doc.documentElement, 'PrivacyMaskRegionList')[0];
+  const idOf = (region) => children(region, 'id')[0]?.textContent.trim();
+
+  return {
+    /** The document a GET returns. @param {string} path */
+    read: (path) => new XMLSerializer().serializeToString(stored(path)),
+    /** @param {string} path @param {string} body */
+    put(path, body) {
+      const doc = stored(path);
+      const sent = new DOMParser().parseFromString(body, 'application/xml').documentElement;
+      const enabled = children(sent, 'enabled')[0];
+      if (enabled) children(doc.documentElement, 'enabled')[0].textContent = enabled.textContent;
+      const list = regionList(doc);
+      for (const region of children(children(sent, 'PrivacyMaskRegionList')[0], 'PrivacyMaskRegion')) {
+        const copy = doc.importNode(region, true);
+        for (const flag of children(copy, 'enabled')) flag.textContent = 'false';
+        const existing = children(list, 'PrivacyMaskRegion').find(r => idOf(r) === idOf(region));
+        if (existing) existing.replaceWith(copy);
+        else list.appendChild(copy);
+      }
+    },
+    /** @param {string} path - …/privacyMask */
+    clear: (path) => regionList(stored(path)).replaceChildren(),
+  };
+}
+
 /** A small JPEG frame that changes every call. */
 async function frame() {
   const canvas = new OffscreenCanvas(320, 180);
@@ -95,18 +141,20 @@ function todaysPictures() {
  * replacement; requests to other hosts go to `realFetch`.
  *
  * Tests can make it misbehave: `unreachable` fails every request like a
- * wrong IP address, `failures` answers "METHOD /path" with an error status,
- * and `writeStatus` changes what a successful PUT or DELETE reports (e.g.
- * statusCode 7, reboot required).
+ * wrong IP address, `failures` answers "METHOD /path" with an error status
+ * (only the first `times` requests, when set), and `writeStatus` changes
+ * what a successful PUT or DELETE reports (e.g. statusCode 7, reboot
+ * required). `privacy.read(path)` shows the privacy masks a channel stores.
  * @param {{snapshotDelayMs?: number, realFetch?: typeof fetch}} [options]
  */
 export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) {
   const device = {
     requests: [], puts: [], deletes: [], inFlightSnapshots: 0, maxInFlightSnapshots: 0, rejectAuth: false,
     unreachable: false,
-    /** @type {Record<string, {httpStatus: number, statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string}>} */
+    /** @type {Record<string, {httpStatus: number, statusCode: number, statusString: string, subStatusCode: string, subStatusString?: string, times?: number}>} */
     failures: {},
     writeStatus: STATUS.ok,
+    privacy: createPrivacyStore(),
     /** How picture?starttime= behaves: real stills, the live image whatever the time (like the DS-7604), or no image */
     recordedFrames: /** @type {'real'|'ignoresTime'|'none'} */ ('real'),
   };
@@ -123,13 +171,20 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       return new Response('', { status: 401, headers: { 'WWW-Authenticate': 'Digest realm="r", nonce="n", qop="auth"' } });
     }
     const failure = device.failures[`${method} ${p}`];
-    if (failure) return xml(responseStatusXml(p, failure), failure.httpStatus);
+    if (failure) {
+      if (failure.times !== undefined && --failure.times <= 0) delete device.failures[`${method} ${p}`];
+      return xml(responseStatusXml(p, failure), failure.httpStatus);
+    }
+    // A write the device reports as stored (OK, or OK after a reboot) changes what it stores
+    const stores = device.writeStatus.statusCode === STATUS.ok.statusCode || device.writeStatus.statusCode === 7;
     if (method === 'PUT') {
       device.puts.push({ path: p, body: opts.body });
+      if (stores && p.endsWith('/privacyMask')) device.privacy.put(p, String(opts.body));
       return xml(responseStatusXml(p, device.writeStatus));
     }
     if (method === 'DELETE') {
       device.deletes.push(p);
+      if (stores && p.endsWith('/privacyMask/regions')) device.privacy.clear(p.slice(0, -'/regions'.length));
       return xml(responseStatusXml(p, device.writeStatus));
     }
     if (method === 'POST' && p === '/ISAPI/ContentMgmt/search') {
@@ -174,7 +229,7 @@ export function createMockNvr({ snapshotDelayMs = 50, realFetch = fetch } = {}) 
       return xml(p.includes('/channels/2/') ? motionCapabilities.replace('opt="grid,region"', 'opt="grid"') : motionCapabilities);
     }
     if (p.endsWith('/motionDetection')) return xml(motionDetection);
-    if (p.endsWith('/privacyMask')) return xml(privacyMask);
+    if (p.endsWith('/privacyMask')) return xml(device.privacy.read(p));
     if (/\/Event\/triggers\/VMD-\d+$/.test(p)) return xml(eventTrigger);
     // The DS-7604NI answers any path it doesn't have like this, not with 404
     return xml(responseStatusXml(p, STATUS.notSupport), 403);

@@ -57,6 +57,38 @@ Alarm outputs use `<id>IO-{port}</id>`. IP channels use `<dynOutputIOPortID>`
 unless the device reports `bSupportIOOutputUnify`, in which case they use
 `<outputIOPortID>`.
 
+## Privacy masks
+
+The web UI (`config/image/privacyMask.js`) and write tests on the DS-7604NI
+(firmware V4.75.206, IP channel 3) agree on these:
+
+- **Coordinates** are in the document's `normalizedScreenSize` units (704×576
+  here; the web UI assumes 704×576 when the size is missing), stretched over
+  the whole picture, with Y measured from the **bottom**. A region at
+  `positionY` 432–576 masked the top quarter of the image. The web UI converts
+  with `1 - positionY / height`, like motion regions.
+- **The per-region `<enabled>` flag does nothing on this NVR.** Every stored
+  region reads back with `<enabled>false</enabled>`, and a region sent with
+  `enabled=false` still masks. Only the root `<enabled>` switches masking on
+  and off. The web UI ignores the per-region flag when it loads and writes the
+  root value into every region when it saves. The extension does the same and
+  shows every region that has an area.
+- **PUT `/privacyMask` merges regions by id.** A region left out of the list
+  stays stored and keeps masking, so a PUT alone can't remove a mask.
+- **DELETE `{base}/privacyMask/regions` clears every region** (statusCode 1,
+  with base = `/ISAPI/ContentMgmt/InputProxy/channels/{id}/video` for IP
+  channels). A PUT after it stores exactly its list. The web UI saves this
+  way: its `tamperRegion` request is a DELETE in `websdk.js`, followed by a
+  PUT of the rebuilt list (ids 1..n, each `id`, `enabled`,
+  `RegionCoordinatesList`, no `maskType`).
+
+`Isapi.savePrivacyMask` follows the same sequence. If the PUT fails after the
+DELETE, it PUTs the document as loaded back, so the camera isn't left without
+masks. Firmware that can't DELETE the regions, such as cameras with fixed mask
+slots, answers "not here" or `methodNotAllowed`. For that firmware the
+extension sends a single PUT instead: unused slots are disabled and their
+coordinates emptied, so a deleted mask can't come back.
+
 ## Errors and write results
 
 Error answers carry a `<ResponseStatus>` body (`statusCode`, `statusString`,

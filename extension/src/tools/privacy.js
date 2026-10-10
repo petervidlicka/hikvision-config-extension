@@ -1,14 +1,17 @@
 /**
- * Privacy mask tool: draw rectangular masks over the image.
+ * Privacy mask tool: draw rectangular masks over the image. Device
+ * coordinates (Y from the bottom) are mapped by the helpers in
+ * lib/config-xml.js, and Isapi.savePrivacyMask does the save.
  */
 
-import { applyPrivacyMask, readPrivacyMask } from '../../lib/config-xml.js';
+import {
+  DEFAULT_PRIVACY_SCREEN, canvasRectToPrivacy, privacyRegionToCanvas, readPrivacyMask,
+} from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
 import { loadTool } from './registry.js';
 import { activeChannelInfo, errorMessage, reportSaved, setStatus, showToast } from '../ui.js';
-import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL: Privacy Mask
@@ -151,24 +154,11 @@ export const privacyTool = {
       state.privacyEnabled = pm.enabled;
       byId('privacyToggle').classList.toggle('on', state.privacyEnabled);
 
-      // Use the coordinate space the device declares; otherwise guess between
-      // the 704x576 grid of older firmware and a 0–10000 normalized range
-      const allPoints = pm.regions.flat();
-      state.privacyNormW = pm.screen?.width ?? (allPoints.some(p => p.x > 1000) ? 10000 : 704);
-      state.privacyNormH = pm.screen?.height ?? (allPoints.some(p => p.y > 1000) ? 10000 : 576);
-
-      state.privacyRegions = pm.regions.map(points => {
-        const xs = points.map(p => p.x);
-        const ys = points.map(p => p.y);
-        const minX = Math.min(...xs);
-        const minY = Math.min(...ys);
-        return {
-          x: (minX / state.privacyNormW) * dom.canvas.width,
-          y: (minY / state.privacyNormH) * dom.canvas.height,
-          w: ((Math.max(...xs) - minX) / state.privacyNormW) * dom.canvas.width,
-          h: ((Math.max(...ys) - minY) / state.privacyNormH) * dom.canvas.height,
-        };
-      });
+      // The coordinate space the device declares, else the web UI's default
+      const screen = pm.screen ?? DEFAULT_PRIVACY_SCREEN;
+      state.privacyNormW = screen.width;
+      state.privacyNormH = screen.height;
+      state.privacyRegions = pm.regions.map(points => privacyRegionToCanvas(points, screen, dom.canvas));
 
       updateRegionList();
       redraw();
@@ -187,23 +177,17 @@ export const privacyTool = {
       return;
     }
 
-    // Use the same coordinate scale that was detected on load
-    const normW = state.privacyNormW;
-    const normH = state.privacyNormH;
-    const doc = cloneXml(state.privacyDoc);
+    // The same coordinate space as on load
+    const screen = { width: state.privacyNormW, height: state.privacyNormH };
+    const mask = {
+      enabled: state.privacyEnabled,
+      rects: state.privacyRegions.map(reg => canvasRectToPrivacy(reg, screen, dom.canvas)),
+    };
 
     setStatus('Saving privacy mask config...');
     try {
-      applyPrivacyMask(doc, {
-        enabled: state.privacyEnabled,
-        rects: state.privacyRegions.map(reg => ({
-          x1: (reg.x / dom.canvas.width) * normW,
-          y1: (reg.y / dom.canvas.height) * normH,
-          x2: ((reg.x + reg.w) / dom.canvas.width) * normW,
-          y2: ((reg.y + reg.h) / dom.canvas.height) * normH,
-        })),
-      });
-      const result = await Isapi.putXml(state.config, /** @type {string} */ (state.privacyPath), doc);
+      const { doc, result } = await Isapi.savePrivacyMask(
+        state.config, /** @type {string} */ (state.privacyPath), state.privacyDoc, mask);
       state.privacyDoc = doc;
       reportSaved('Privacy mask', result);
     } catch (err) {

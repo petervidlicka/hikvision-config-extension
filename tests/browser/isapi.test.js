@@ -4,10 +4,11 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AuthError } from '../../extension/lib/digest-auth.js';
-import { IsapiError, NetworkError, TimeoutError } from '../../extension/lib/errors.js';
+import { IsapiError, NetworkError, TimeoutError, WriteRollbackError } from '../../extension/lib/errors.js';
+import { readPrivacyMask } from '../../extension/lib/config-xml.js';
 import { Isapi, TIMEOUT_MS, defaultTimeoutMs } from '../../extension/lib/isapi.js';
 import { childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
-import { STATUS, responseStatusXml } from '../support/mock-nvr.js';
+import { NVR_HOST, STATUS, createMockNvr, responseStatusXml } from '../support/mock-nvr.js';
 
 /**
  * Replace fetch with a router keyed by path, or by "METHOD path" for one
@@ -258,3 +259,105 @@ describe('request time limits', () => {
   });
 });
 
+describe('saving privacy masks', () => {
+  const channel = { id: '3', kind: 'digital' };
+  const path = '/ISAPI/ContentMgmt/InputProxy/channels/3/video/privacyMask';
+  const top = { x1: 0, y1: 576, x2: 704, y2: 432 };
+  const notSupport = { httpStatus: 403, ...STATUS.notSupport };
+  const badContent = { httpStatus: 400, statusCode: 6, statusString: 'Invalid XML Content', subStatusCode: 'badXmlContent' };
+
+  /** The mock NVR (privacy masks merge by id, as on the real one), loaded with its two stored masks. */
+  async function loadNvr() {
+    const device = createMockNvr();
+    vi.stubGlobal('fetch', device.fetch);
+    const config = { host: NVR_HOST, port: 80, username: `user${++configSeq}`, password: 'pw' };
+    const loaded = await Isapi.getPrivacyMask(config, channel);
+    expect(readPrivacyMask(loaded.doc).regions).toHaveLength(2);
+    device.requests.length = 0;
+    const stored = () => readPrivacyMask(parseXml(device.privacy.read(path)));
+    return { device, config, original: loaded.doc, stored };
+  }
+
+  it('deletes the stored regions, then PUTs exactly the new list', async () => {
+    const { device, config, original, stored } = await loadNvr();
+    const { doc, result } = await Isapi.savePrivacyMask(config, path, original, { enabled: true, rects: [top] });
+
+    expect(device.requests).toEqual([`DELETE ${path}/regions`, `PUT ${path}`]);
+    expect(device.puts[0].body).toMatch(/<PrivacyMaskRegion><id>1<\/id><enabled>true<\/enabled><RegionCoordinatesList>/);
+    expect(stored().regions).toEqual([[{ x: 0, y: 576 }, { x: 704, y: 576 }, { x: 704, y: 432 }, { x: 0, y: 432 }]]);
+    expect(readPrivacyMask(doc).regions).toEqual(stored().regions);
+    expect(result).toEqual({ rebootRequired: false });
+    expect(readPrivacyMask(original).regions).toHaveLength(2); // the loaded document is left alone
+
+    // Removing every mask leaves none stored
+    await Isapi.savePrivacyMask(config, path, doc, { enabled: false, rects: [] });
+    expect([stored().enabled, stored().regions]).toEqual([false, []]);
+  });
+
+  it('puts the loaded masks back when the new list is refused after the delete', async () => {
+    const { device, config, original, stored } = await loadNvr();
+    device.failures[`PUT ${path}`] = { ...badContent, times: 1 };
+    const err = await Isapi.savePrivacyMask(config, path, original, { enabled: true, rects: [top] }).catch(e => e);
+
+    expect(err).toBeInstanceOf(IsapiError);
+    expect(err).toMatchObject({ method: 'PUT', subStatusCode: 'badXmlContent' });
+    expect(device.requests).toEqual([`DELETE ${path}/regions`, `PUT ${path}`, `PUT ${path}`]);
+    expect(device.puts.at(-1).body).toBe(serializeXml(original));
+    expect(stored().regions).toEqual(readPrivacyMask(original).regions);
+  });
+
+  it('says the masks may be gone when putting them back fails too', async () => {
+    const { device, config, original, stored } = await loadNvr();
+    device.failures[`PUT ${path}`] = { ...badContent, times: 2 };
+    const err = await Isapi.savePrivacyMask(config, path, original, { enabled: true, rects: [top] }).catch(e => e);
+
+    expect(err).toBeInstanceOf(WriteRollbackError);
+    expect(err.cause).toBeInstanceOf(IsapiError);
+    expect(err.rollbackError).toBeInstanceOf(IsapiError);
+    expect(err.message).toMatch(/^The device rejected the settings that were sent as invalid\..*Putting the previous privacy masks back failed too \(.*\), so the camera may have no privacy masks now\. Save them again\.$/);
+    expect(stored().regions).toEqual([]);
+  });
+
+  it('falls back to one PUT that disables unused slots when the regions can’t be deleted', async () => {
+    const methodNotAllowed = { httpStatus: 405, statusCode: 4, statusString: 'Invalid Operation', subStatusCode: 'methodNotAllowed' };
+    for (const failure of [notSupport, methodNotAllowed]) {
+      const { device, config, original, stored } = await loadNvr();
+      device.failures[`DELETE ${path}/regions`] = failure;
+      await Isapi.savePrivacyMask(config, path, original, { enabled: true, rects: [top] });
+
+      expect(device.requests).toEqual([`DELETE ${path}/regions`, `PUT ${path}`]);
+      const body = device.puts[0].body;
+      expect(body.match(/<PrivacyMaskRegion\b/g)).toHaveLength(2);
+      expect(body).toMatch(/<id>2<\/id>\s*<enabled>false<\/enabled>\s*<RegionCoordinatesList><\/RegionCoordinatesList>/);
+      // Slot 2 was overwritten by id, so only the new mask has an area
+      expect(stored().regions).toHaveLength(1);
+    }
+  });
+
+  it('leaves the masks alone when the delete fails for another reason', async () => {
+    const { device, config, original, stored } = await loadNvr();
+    device.failures[`DELETE ${path}/regions`] = { httpStatus: 503, statusCode: 2, statusString: 'Device Busy', subStatusCode: 'deviceBusy' };
+    await expect(Isapi.savePrivacyMask(config, path, original, { enabled: true, rects: [top] }))
+      .rejects.toMatchObject({ method: 'DELETE', subStatusCode: 'deviceBusy' });
+    expect(device.requests).toEqual([`DELETE ${path}/regions`]);
+    expect(stored().regions).toHaveLength(2);
+  });
+
+  it('reports a reboot the delete or the PUT asks for', async () => {
+    const { device, config, original } = await loadNvr();
+    device.writeStatus = { statusCode: 7, statusString: 'Reboot Required', subStatusCode: 'rebootRequired' };
+    const { result } = await Isapi.savePrivacyMask(config, path, original, { enabled: true, rects: [top] });
+    expect(result).toEqual({ rebootRequired: true });
+  });
+
+  it('PUTs a bare region list back to /regions without deleting', async () => {
+    const regionsPath = `${path}/regions`;
+    const calls = mockDevice({ [`PUT ${regionsPath}`]: { body: responseStatusXml(regionsPath, STATUS.ok) } });
+    const original = parseXml('<PrivacyMaskRegionList xmlns="http://www.isapi.org/ver20/XMLSchema"><PrivacyMaskRegion><id>1</id><enabled>true</enabled>' +
+      '<RegionCoordinatesList><RegionCoordinates><positionX>0</positionX><positionY>0</positionY></RegionCoordinates>' +
+      '<RegionCoordinates><positionX>100</positionX><positionY>100</positionY></RegionCoordinates></RegionCoordinatesList></PrivacyMaskRegion></PrivacyMaskRegionList>');
+    const { doc } = await Isapi.savePrivacyMask(testConfig(), regionsPath, original, { enabled: true, rects: [top, top] });
+    expect(calls).toEqual([regionsPath]);
+    expect(readPrivacyMask(doc)).toMatchObject({ enabled: true, regions: [expect.any(Array), expect.any(Array)] });
+  });
+});

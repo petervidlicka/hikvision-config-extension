@@ -3,9 +3,10 @@
  *
  * Every apply* function edits the document the device returned and changes
  * only the fields the UI controls. Anything else — firmware-specific fields,
- * notification methods we don't expose, disabled mask slots — is sent back
- * exactly as received. Coordinates here are raw device units; mapping to
- * canvas pixels is the UI's job.
+ * notification methods we don't expose, a mask slot's maskType — is sent
+ * back exactly as received. Coordinates in documents are raw device units;
+ * the privacy mask helpers also map them to and from canvas pixels, because
+ * that mapping (Y from the bottom) is easy to get wrong in the UI.
  *
  * Depends on lib/xml.js.
  */
@@ -309,6 +310,29 @@ function writeTargetTypes(layout, targetTypes) {
 /* ── Privacy mask ───────────────────────────────────────────────────────── */
 
 /**
+ * The coordinate space to assume when a PrivacyMask document doesn't declare
+ * its normalizedScreenSize: the 704×576 grid Hikvision's web UI falls back to
+ * (privacyMask.js), and the one the DS-7604NI declares.
+ */
+export const DEFAULT_PRIVACY_SCREEN = Object.freeze({ width: 704, height: 576 });
+
+/**
+ * A width and height, e.g. a document's normalizedScreenSize or a canvas.
+ * @typedef {{width: number, height: number}} Size
+ */
+
+/**
+ * A rectangle on the drawn image in pixels, Y=0 at the top, as the privacy
+ * tool keeps it.
+ * @typedef {{x: number, y: number, w: number, h: number}} PixelRect
+ */
+
+/**
+ * A mask rectangle in device units, given by two opposite corners.
+ * @typedef {{x1: number, y1: number, x2: number, y2: number}} DeviceRect
+ */
+
+/**
  * The region list, whether the document is a PrivacyMask or the bare list.
  * @param {XMLDocument} doc
  * @returns {Element|null}
@@ -319,28 +343,114 @@ export function privacyRegionList(doc) {
 }
 
 /**
- * Read a PrivacyMask (or PrivacyMaskRegionList) document. Only enabled
- * regions are returned; disabled slots stay in the document for the save.
- * `screen` is the coordinate space the device declares, when it does.
+ * Read a PrivacyMask (or bare PrivacyMaskRegionList) document.
+ *
+ * Every region with an area is a mask, whatever its own <enabled>: the
+ * DS-7604NI reads every stored region back with enabled=false yet still
+ * masks it, and Hikvision's web UI ignores the per-region flag as well.
+ * Empty or zero-area slots (unused slots on fixed-slot cameras) are skipped.
+ *
+ * `enabled` is the document's global switch. A bare region list has none, so
+ * there it reports whether any region is enabled — the flag a save writes to
+ * each region. `screen` is the coordinate space the device declares, when it
+ * does (see DEFAULT_PRIVACY_SCREEN otherwise).
  * @param {XMLDocument} doc
- * @returns {{enabled: boolean, screen: {width: number, height: number}|null, regions: DevicePoint[][]}}
+ * @returns {{enabled: boolean, screen: Size|null, regions: DevicePoint[][]}}
  */
 export function readPrivacyMask(doc) {
   const root = doc.documentElement;
   const size = childElement(root, 'normalizedScreenSize');
   const width = intText(size, 'normalizedScreenWidth');
   const height = intText(size, 'normalizedScreenHeight');
+  const slots = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
+  const globalFlag = childText(root, 'enabled');
   return {
-    enabled: childText(root, 'enabled') === 'true',
+    enabled: globalFlag !== null
+      ? globalFlag === 'true'
+      : slots.some(r => childText(r, 'enabled') === 'true'),
     screen: width > 0 && height > 0 ? { width, height } : null,
-    regions: childElements(privacyRegionList(doc), 'PrivacyMaskRegion')
-      .filter(r => childText(r, 'enabled') === 'true')
-      .map(readCoordinates)
-      .filter(points => points.length >= 2),
+    regions: slots.map(readCoordinates).filter(hasArea),
   };
 }
 
-/** @typedef {{x1: number, y1: number, x2: number, y2: number}} DeviceRect */
+/**
+ * Smallest box around a region's points.
+ * @param {DevicePoint[]} points
+ */
+function boundingBox(points) {
+  const xs = points.map(p => p.x);
+  const ys = points.map(p => p.y);
+  return { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+}
+
+/**
+ * Whether the points enclose an area: an unused slot has no points, or all
+ * of them at one spot.
+ * @param {DevicePoint[]} points
+ */
+function hasArea(points) {
+  if (points.length < 2) return false;
+  const box = boundingBox(points);
+  return box.maxX > box.minX && box.maxY > box.minY;
+}
+
+/**
+ * @param {number} value
+ * @param {number} min
+ * @param {number} max
+ */
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * Where a stored privacy mask appears on the image, as a canvas rectangle.
+ *
+ * Privacy coordinates are in the document's normalizedScreenSize units,
+ * stretched over the whole image, with Y measured from the BOTTOM: on the
+ * DS-7604NI a region at positionY 432–576 masks the top quarter of the
+ * picture. The canvas has Y=0 at the top, so Y is flipped. The tool edits
+ * rectangles, so a polygon becomes its bounding box.
+ * @param {DevicePoint[]} points - one region, as readPrivacyMask returns it
+ * @param {Size} screen - the document's normalizedScreenSize, or DEFAULT_PRIVACY_SCREEN
+ * @param {Size} canvas - canvas size in pixels
+ * @returns {PixelRect}
+ * @example
+ * privacyRegionToCanvas([{x: 0, y: 432}, {x: 704, y: 576}], {width: 704, height: 576}, {width: 1408, height: 1152})
+ * // → {x: 0, y: 0, w: 1408, h: 288}: the top quarter
+ */
+export function privacyRegionToCanvas(points, screen, canvas) {
+  const box = boundingBox(points.map(p => ({
+    x: clamp(p.x, 0, screen.width),
+    y: clamp(p.y, 0, screen.height),
+  })));
+  return {
+    x: (box.minX / screen.width) * canvas.width,
+    y: (1 - box.maxY / screen.height) * canvas.height,
+    w: ((box.maxX - box.minX) / screen.width) * canvas.width,
+    h: ((box.maxY - box.minY) / screen.height) * canvas.height,
+  };
+}
+
+/**
+ * A rectangle drawn on the canvas as the device rectangle to save: the
+ * inverse of privacyRegionToCanvas, rounded to whole units and clamped to
+ * the screen. Y counts from the bottom, so y1 (the top edge) is the larger.
+ * @param {PixelRect} rect
+ * @param {Size} screen - the document's normalizedScreenSize, or DEFAULT_PRIVACY_SCREEN
+ * @param {Size} canvas - canvas size in pixels
+ * @returns {DeviceRect}
+ * @example
+ * canvasRectToPrivacy({x: 0, y: 0, w: 1408, h: 288}, {width: 704, height: 576}, {width: 1408, height: 1152})
+ * // → {x1: 0, y1: 576, x2: 704, y2: 432}
+ */
+export function canvasRectToPrivacy(rect, screen, canvas) {
+  /** @param {number} px */
+  const toX = px => clamp(Math.round((px / canvas.width) * screen.width), 0, screen.width);
+  /** @param {number} py */
+  const toY = py => clamp(Math.round((1 - py / canvas.height) * screen.height), 0, screen.height);
+  return { x1: toX(rect.x), y1: toY(rect.y), x2: toX(rect.x + rect.w), y2: toY(rect.y + rect.h) };
+}
 
 /**
  * Replace a region's coordinates with the four corners of a rectangle.
@@ -359,36 +469,81 @@ export function writeRectangle(regionEl, rect) {
   }
 }
 
+/** Children of a PrivacyMaskRegion that applyPrivacyMask writes itself. */
+const PRIVACY_REGION_FIELDS = new Set(['id', 'enabled', 'RegionCoordinatesList']);
+
 /**
- * Write privacy mask rectangles into the device's document. Rectangles fill
- * the device's existing region slots in order; leftover slots are disabled
- * rather than deleted, and new slots are added only when needed.
+ * What to do with region slots no rectangle needs (see applyPrivacyMask).
+ * @typedef {'remove'|'disable'} UnusedPrivacySlots
+ */
+
+/**
+ * Write privacy mask rectangles into the device's document. Like Hikvision's
+ * web UI, each region's <enabled> is set to the global switch.
+ *
+ * `unused` decides what happens to region slots no rectangle needs:
+ * - "remove" (default): the list is rebuilt to hold exactly the rectangles,
+ *   ids 1..n, in the web UI's element order (id, enabled,
+ *   RegionCoordinatesList). Other children of the slot a region takes over,
+ *   e.g. maskType, are kept. Use it only after the stored regions have been
+ *   deleted: the DS-7604NI merges a PUT into its stored regions by id, so a
+ *   region left out of the list would stay stored and keep masking.
+ * - "disable": for firmware that can't delete regions (fixed slots). Every
+ *   slot stays in place; slots without a rectangle are disabled and their
+ *   coordinates emptied, as such cameras show an unused slot. Emptying them
+ *   matters because readPrivacyMask shows a region whatever its own flag, and
+ *   because the NVR masks a disabled region anyway.
  *
  * @param {XMLDocument} doc - edited in place
- * @param {{enabled: boolean, rects: DeviceRect[]}} config
+ * @param {{enabled: boolean, rects: DeviceRect[], unused?: UnusedPrivacySlots}} config
  */
-export function applyPrivacyMask(doc, config) {
+export function applyPrivacyMask(doc, { enabled, rects, unused = 'remove' }) {
   const root = doc.documentElement;
-  setChildText(root, 'enabled', config.enabled);
+  setChildText(root, 'enabled', enabled);
 
-  let list = privacyRegionList(doc);
-  if (!list) list = appendElement(root, 'PrivacyMaskRegionList');
+  const list = privacyRegionList(doc) ?? appendElement(root, 'PrivacyMaskRegionList');
   const slots = childElements(list, 'PrivacyMaskRegion');
 
-  config.rects.forEach((rect, i) => {
+  if (unused === 'remove') {
+    list.replaceChildren(...rects.map((rect, i) => buildPrivacyRegion(list, i + 1, enabled, rect, slots[i])));
+    return;
+  }
+
+  rects.forEach((rect, i) => {
     let region = slots[i];
     if (!region) {
       region = appendElement(list, 'PrivacyMaskRegion');
       appendElement(region, 'id', i + 1);
-      appendElement(region, 'enabled', 'true');
+      appendElement(region, 'enabled', enabled);
     }
-    setChildText(region, 'enabled', true);
+    setChildText(region, 'enabled', enabled);
     writeRectangle(region, rect);
   });
-
-  for (const unused of slots.slice(config.rects.length)) {
-    setChildText(unused, 'enabled', false);
+  for (const slot of slots.slice(rects.length)) {
+    setChildText(slot, 'enabled', false);
+    childElement(slot, 'RegionCoordinatesList')?.replaceChildren();
   }
+}
+
+/**
+ * A new PrivacyMaskRegion in the list's namespace, keeping the fields we
+ * don't manage (e.g. maskType) from the slot it replaces.
+ * @param {Element} list
+ * @param {number} id
+ * @param {boolean} enabled
+ * @param {DeviceRect} rect
+ * @param {Element|undefined} previous
+ * @returns {Element}
+ */
+function buildPrivacyRegion(list, id, enabled, rect, previous) {
+  const region = list.ownerDocument.createElementNS(list.namespaceURI, 'PrivacyMaskRegion');
+  appendElement(region, 'id', id);
+  appendElement(region, 'enabled', enabled);
+  writeRectangle(region, rect);
+  for (const extra of Array.from(previous?.children ?? [])) {
+    if (!PRIVACY_REGION_FIELDS.has(extra.localName)) region.appendChild(extra.cloneNode(true));
+  }
+  return region;
 }
 
 /* ── Event trigger notifications ────────────────────────────────────────── */

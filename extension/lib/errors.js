@@ -158,6 +158,25 @@ export class TimeoutError extends NetworkError {
 }
 
 /**
+ * A save that takes more than one request failed partway, and putting the
+ * device back as it was failed too, so it may now have neither the old nor
+ * the new settings. The message tells the user what may be lost and what to
+ * do; `cause` is the error that failed the save, `rollbackError` the one that
+ * failed the restore.
+ */
+export class WriteRollbackError extends Error {
+  /**
+   * @param {string} message - user-facing: what may be lost, and what to do
+   * @param {{cause: unknown, rollbackError: unknown}} init
+   */
+  constructor(message, { cause, rollbackError }) {
+    super(message, { cause });
+    this.name = 'WriteRollbackError';
+    this.rollbackError = rollbackError;
+  }
+}
+
+/**
  * Shared fallback policy: may an endpoint fallback try its next candidate
  * after this error?
  *

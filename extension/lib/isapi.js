@@ -9,18 +9,21 @@
  * one policy (isFallbackError in lib/errors.js): move on only when the device
  * answered "not here", stop on anything that would fail the same way again.
  *
- * Depends on lib/digest-auth.js, lib/errors.js and lib/xml.js.
+ * Depends on lib/config-xml.js, lib/digest-auth.js, lib/errors.js and lib/xml.js.
  */
 
+import { applyPrivacyMask } from './config-xml.js';
 import { AuthError, digestFetch, forgetRejectedCredentials } from './digest-auth.js';
 import {
-  IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, isFallbackError, parseResponseStatus,
+  IsapiError, STATUS_OK, STATUS_REBOOT_REQUIRED, TimeoutError, WriteRollbackError, isFallbackError, parseResponseStatus,
 } from './errors.js';
 import {
   SEARCH_PAGE_SIZE, buildCalendarXml, buildSearchXml, parseCalendar, parsePictureResult, parseSearchResult, toDeviceTime,
 } from './playback.js';
-import { childElements, childText, parseXml, serializeXml } from './xml.js';
+import { childElements, childText, cloneXml, parseXml, serializeXml } from './xml.js';
 
+/** @typedef {import('./config-xml.js').DeviceRect} DeviceRect */
+/** @typedef {import('./config-xml.js').UnusedPrivacySlots} UnusedPrivacySlots */
 /** @typedef {import('./digest-auth.js').DeviceConfig} DeviceConfig */
 /** @typedef {import('./digest-auth.js').DigestResponse} DigestResponse */
 /** @typedef {import('./digest-auth.js').RequestOptions} RequestOptions */
@@ -90,6 +93,19 @@ export function checkWriteResponse(method, path, resp) {
     return { rebootRequired: false };
   }
   throw new IsapiError({ method, path, httpStatus: resp.status, status });
+}
+
+/**
+ * Whether a failed DELETE means the device can't delete this resource at
+ * all: a "not here" answer under the shared policy (isFallbackError), or a
+ * method the resource doesn't allow (HTTP 405, methodNotAllowed). Nothing
+ * was deleted then, so a save can go ahead another way.
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function cannotDelete(err) {
+  return isFallbackError(err) ||
+    (err instanceof IsapiError && (err.httpStatus === 405 || err.reason === 'methodNotAllowed'));
 }
 
 /**
@@ -326,6 +342,90 @@ export const Isapi = {
       if (!isFallbackError(err)) throw err;
       const path = `${base}/regions`;
       return { doc: await this.getXml(config, path), path };
+    }
+  },
+
+  /**
+   * Save privacy masks the way the device's own web UI does: DELETE every
+   * stored region ({path}/regions), then PUT the document holding exactly
+   * the new regions. Two requests because the DS-7604NI merges a PUT into
+   * its stored regions by id — a region left out stays stored — and masks a
+   * region whatever its own <enabled>, so neither leaving a mask out nor
+   * disabling it removes it.
+   *
+   * If the PUT fails after the DELETE succeeded, the document as loaded is
+   * PUT back so the camera isn't left without masks, and the PUT's error is
+   * thrown.
+   *
+   * Firmware that can't DELETE the regions (a "not here" answer, e.g.
+   * cameras with fixed mask slots) gets a single PUT instead, which keeps
+   * every slot and disables and empties the unused ones, as this extension
+   * saved before. The failed DELETE changed nothing, and on such firmware
+   * disabling a slot is the only way to remove a mask, so failing the save
+   * would only leave the user unable to change masks at all. A bare
+   * PrivacyMaskRegionList (getPrivacyMask's fallback to {base}/regions) goes
+   * back to its own path the same way, without a DELETE.
+   *
+   * @param {DeviceConfig} config
+   * @param {string} path - where getPrivacyMask loaded the document from
+   * @param {XMLDocument} original - the document as loaded; not modified
+   * @param {{enabled: boolean, rects: DeviceRect[]}} mask - device units, e.g. from canvasRectToPrivacy
+   * @returns {Promise<{doc: XMLDocument, result: WriteResult}>} the document the device now has, and whether it needs a reboot
+   * @throws {WriteRollbackError} when restoring the loaded masks after a failed PUT failed too
+   * @throws {IsapiError|NetworkError|AuthError} the request that failed, when the device was left as it was
+   */
+  async savePrivacyMask(config, path, original, mask) {
+    /** @param {UnusedPrivacySlots} unused */
+    const edited = unused => {
+      const doc = cloneXml(original);
+      applyPrivacyMask(doc, { ...mask, unused });
+      return doc;
+    };
+    /** One PUT that disables leftover slots: for when regions can't be deleted first */
+    const putInPlace = async () => {
+      const doc = edited('disable');
+      return { doc, result: await this.putXml(config, path, doc) };
+    };
+
+    if (original.documentElement.localName === 'PrivacyMaskRegionList') return putInPlace();
+
+    let deleted;
+    try {
+      deleted = await this.deleteResource(config, `${path}/regions`);
+    } catch (err) {
+      if (!cannotDelete(err)) throw err;
+      return putInPlace();
+    }
+
+    const doc = edited('remove');
+    try {
+      const result = await this.putXml(config, path, doc);
+      return { doc, result: { rebootRequired: deleted.rebootRequired || result.rebootRequired } };
+    } catch (err) {
+      await this.restorePrivacyMask(config, path, original, err);
+      throw err;
+    }
+  },
+
+  /**
+   * PUT the masks as loaded back after a save cleared them but failed to
+   * write the new ones.
+   * @param {DeviceConfig} config
+   * @param {string} path
+   * @param {XMLDocument} original
+   * @param {unknown} saveError - why the save failed
+   * @returns {Promise<void>}
+   * @throws {WriteRollbackError} when the restore fails too
+   */
+  async restorePrivacyMask(config, path, original, saveError) {
+    try {
+      await this.putXml(config, path, original);
+    } catch (rollbackError) {
+      const reason = (/** @type {unknown} */ e) => (e instanceof Error ? e.message : String(e)).replace(/\.$/, '');
+      throw new WriteRollbackError(
+        `${reason(saveError)}. Putting the previous privacy masks back failed too (${reason(rollbackError)}), ` +
+        'so the camera may have no privacy masks now. Save them again.',
+        { cause: saveError, rollbackError });
     }
   },
 
