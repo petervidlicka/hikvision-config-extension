@@ -339,10 +339,15 @@ export function readMotionConfig(doc) {
  * so their regions are shown read-only rather than saved at a guessed scale.
  *
  * The grid when the capabilities offer only it. Without capabilities (or a
- * regionType list in them), the grid whenever the document has one, as the
- * web UI falls back to: saving polygons switches the camera to region mode
- * and zeroes its gridMap, which on a grid-only camera would wipe the real
- * detection area. Polygons then only for a document without a grid.
+ * regionType list in them) the web UI follows the document's own regionType:
+ * its grid editor for "grid", its ROI editor for "region", nothing for
+ * "none". So the grid only for a document in grid mode (or stating no mode)
+ * that has one; saving polygons would switch such a camera to region mode
+ * and zero its gridMap, which on a grid-only camera wipes the real detection
+ * area. A document with a grid in any other mode is shown read-only: a
+ * camera in region mode keeps its gridMap zeroed, and editing that grid
+ * would switch it to grid mode with nowhere to detect. Polygons only for a
+ * document without a grid, which has nothing else to edit.
  * @param {MotionCapabilities} caps
  * @param {MotionConfig} md - the loaded document
  * @returns {MotionEditMode}
@@ -352,8 +357,8 @@ export function motionEditMode(caps, md) {
     (md.screen.width === MOTION_COORDINATE_SCALE && md.screen.height === MOTION_COORDINATE_SCALE);
   const types = caps.regionTypes;
   if (!types.length) {
-    if (md.grid) return 'grid';
-    return usualScale ? 'region' : 'readonly';
+    if (!md.grid) return usualScale ? 'region' : 'readonly';
+    return md.regionType === null || md.regionType === 'grid' ? 'grid' : 'readonly';
   }
   if (types.includes('region') && types.includes('grid')) return usualScale ? 'region' : 'readonly';
   return types.includes('grid') && md.grid ? 'grid' : 'readonly';

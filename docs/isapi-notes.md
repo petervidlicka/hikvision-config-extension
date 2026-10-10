@@ -381,12 +381,18 @@ for PAL or 15 for NTSC, sensitivity 0–5).
   asks an IP camera's InputProxy URL first, next to its motion config, then
   the System one (`Isapi.getMotionCapabilities`). The DS-7604NI serves the
   same document at both, and either can answer 503 now and then.
-- **Without capabilities** the web UI keeps its grid editor and hides the
-  sensitivity slider. The extension also edits the grid whenever the motion
-  document has `Grid` granularity and a `gridMap`, and polygons only for a
-  document without a grid (`motionEditMode`): saving polygons sets
-  `regionType` region and zeroes `gridMap`, which on a grid-only camera would
-  wipe the detection area.
+- **Without capabilities** the web UI hides the sensitivity slider and
+  follows the motion document's own `regionType` (`bSupportMulRegion` stays
+  false): its grid editor for `grid`, whose save changes only `gridMap`; its
+  legacy ROI editor for `region` (below); no editor for `none`. The extension
+  edits the grid when the document has `Grid` granularity and a `gridMap` and
+  its `regionType` is `grid` or missing (`motionEditMode`): saving polygons
+  sets `regionType` region and zeroes `gridMap`, which on a grid-only camera
+  would wipe the detection area. A document with a grid in any other mode,
+  such as polygons saved in region mode (`gridMap` zeroed), is shown
+  read-only and its area sent back as loaded: editing that grid would switch
+  the camera to grid mode with nowhere to detect. Polygons only for a
+  document without a grid.
 - **Sensitivity levels**: `sensitivityLevel@min/max/step` in the capabilities,
   else in `…/motionDetection/layout/capabilities` (the web UI's `motionCapa`,
   where it always reads them; 0–100 step 20 on the DS-7604NI). With neither,

@@ -819,6 +819,45 @@ describe('config page', () => {
     expect($('sensitivityNote').style.display).toBe('none');
   });
 
+  it('shows a camera in region mode read-only when no capabilities answer, and sends its area back as stored', async () => {
+    const busy = { httpStatus: 503, ...STATUS.serviceUnavailable };
+    const caps = [
+      'GET /ISAPI/ContentMgmt/InputProxy/channels/1/video/motionDetection/capabilities',
+      'GET /ISAPI/System/Video/inputs/channels/1/motionDetection/capabilities',
+    ];
+    // Polygons saved in region mode: regionType region and a zeroed gridMap
+    const gridMap = fixtures.motionDetectionNvr.match(/<gridMap>([^<]+)</)[1];
+    const zeroed = '0'.repeat(gridMap.length);
+    device.motionDocs['1'] = fixtures.motionDetectionNvr
+      .replace('<regionType>grid</regionType>', '<regionType>region</regionType>').replace(gridMap, zeroed);
+    try {
+      for (const key of caps) device.failures[key] = busy;
+      await reloadMotion();
+      expect(state.motionMode).toBe('readonly');
+      expect($('motionGridInstructions').style.display).toBe('none');
+      expect($('motionReadOnlyNote').style.display).toBe('');
+      expect($('motionReadOnlyNote').textContent).toContain('Load from Device to ask again');
+      expect(state.motionRegions.map(r => r.points.length)).toEqual([5]);
+
+      // Only switching detection off: the camera keeps its polygons and region mode
+      $('motionToggle').click();
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      const { body } = device.puts.at(-1);
+      expect(body).toContain('<enabled>false</enabled>');
+      expect(body).toContain('<regionType>region</regionType>');
+      expect(body).toContain(`<gridMap>${zeroed}</gridMap>`);
+      const regionList = (xml) => /<RegionList[\s\S]*<\/RegionList>/.exec(xml)?.[0];
+      expect(regionList(body)).toBe(regionList(device.motionDocs['1']));
+    } finally {
+      for (const key of caps) delete device.failures[key];
+      delete device.motionDocs['1'];
+    }
+    await reloadMotion();
+    expect(state.motionMode).toBe('region');
+  });
+
   it('shows the regions read-only on a camera that offers region mode without the grid, and saves the rest', async () => {
     device.motionCaps['1'] = fixtures.motionCapabilitiesNvr.replace('opt="grid,region"', 'opt="region"');
     try {

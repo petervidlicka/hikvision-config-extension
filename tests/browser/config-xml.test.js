@@ -264,12 +264,39 @@ describe('motion detection', () => {
     }
   });
 
-  it('edits the grid when the capabilities can’t be read and the camera has one, as the web UI does', () => {
+  it('edits the grid when the capabilities can’t be read and the camera is in grid mode, as the web UI does', () => {
     const none = readMotionCapabilities(null);
     expect(motionEditMode(none, readMotionConfig(parseXml(fixtures.motionDetectionNvr)))).toBe('grid');
+    const noMode = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace(/<regionType>[^<]*<\/regionType>/, '')));
+    expect(noMode.regionType).toBeNull();
+    expect(motionEditMode(none, noMode)).toBe('grid');
     // No grid in the document: polygons are all there is to edit
     const noGrid = fixtures.motionDetectionNvr.replace(/<Grid>[\s\S]*?<\/Grid>/, '').replace(/<gridMap>[^<]*<\/gridMap>/, '');
     expect(motionEditMode(none, readMotionConfig(parseXml(noGrid)))).toBe('region');
+  });
+
+  it('shows a camera in region mode read-only when the capabilities can’t be read, and sends its area back', () => {
+    // Polygons saved in region mode, by us or the web UI: regionType region, gridMap zeroed.
+    // The web UI would use its ROI editor here; editing the zeroed grid would switch the
+    // camera to grid mode with nowhere to detect
+    const gridMap = /<gridMap>([^<]*)<\/gridMap>/.exec(fixtures.motionDetectionNvr)?.[1] ?? '';
+    const inRegionMode = fixtures.motionDetectionNvr
+      .replace('<regionType>grid</regionType>', '<regionType>region</regionType>')
+      .replace(gridMap, '0'.repeat(gridMap.length));
+    const doc = parseXml(inRegionMode);
+    const md = readMotionConfig(doc);
+    expect(md.grid?.cells.flat().some(Boolean)).toBe(false);
+    expect(motionEditMode(readMotionCapabilities(null), md)).toBe('readonly');
+    // Nor a grid the camera doesn't use at all
+    const off = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace('<regionType>grid</regionType>', '<regionType>none</regionType>')));
+    expect(motionEditMode(readMotionCapabilities(null), off)).toBe('readonly');
+
+    applyMotionConfig(doc, { mode: 'readonly', enabled: false, dynamicAnalysis: true, regions: [] });
+    const body = serializeXml(doc);
+    expect(body).toContain('<regionType>region</regionType>');
+    expect(body).toContain(`<gridMap>${'0'.repeat(gridMap.length)}</gridMap>`);
+    expect(/<RegionList[\s\S]*<\/RegionList>/.exec(body)?.[0]).toBe(/<RegionList[\s\S]*<\/RegionList>/.exec(inRegionMode)?.[0]);
+    expect(body).toContain('<enabled>false</enabled>');
   });
 });
 

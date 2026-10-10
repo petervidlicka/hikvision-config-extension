@@ -68,8 +68,8 @@ export const motionTool = {
       Up to <span id="motionMaxRegions">4</span> regions, <span id="motionPointRange">4–10</span> corners each.
     </div>
     <div class="instructions" id="motionReadOnlyNote" style="display:none">
-      Editing regions isn’t supported for this camera yet. Its regions are shown as stored,
-      and saving keeps them as they are.
+      <span id="motionReadOnlyReason">Editing regions isn’t supported for this camera yet.</span>
+      Its regions are shown as stored, and saving keeps them as they are.
     </div>
     <div class="instructions" id="motionGridInstructions" style="display:none">
       This camera uses a detection grid.
@@ -485,6 +485,10 @@ function applyCapabilities() {
   byId('motionRegionInstructions').style.display = mode === 'region' ? '' : 'none';
   byId('motionGridInstructions').style.display = mode === 'grid' ? '' : 'none';
   byId('motionReadOnlyNote').style.display = mode === 'readonly' ? '' : 'none';
+  // Without capabilities this may be a passing failure (the DS-7604NI answers 503 now and then)
+  byId('motionReadOnlyReason').textContent = caps.regionTypes.length
+    ? 'Editing regions isn’t supported for this camera yet.'
+    : 'The camera didn’t say how its regions can be edited: Load from Device to ask again.';
   byId('motionRegionList').style.display = mode === 'grid' ? 'none' : '';
   // Nothing to clear when the regions can't be edited
   const clearGroup = byId('clearMotionRegionsBtn').parentElement;
