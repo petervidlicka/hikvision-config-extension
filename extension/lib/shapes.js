@@ -13,7 +13,7 @@
  * what the user aims at in pixels (closing a polygon, a double-click's
  * repeated corner, a rectangle too small to keep); device units are
  * lib/config-xml.js's business. The geometry checks (a point in a polygon,
- * an outline that crosses itself) work in any of these units.
+ * an outline that crosses itself or spans no area) work in any of these units.
  *
  * Pure; no imports.
  */
@@ -153,6 +153,25 @@ export function isSimplePolygon(polygon) {
     }
   }
   return true;
+}
+
+/**
+ * Whether a polygon's corners span an area: at least three of them don't lie
+ * on one line. Corners all on one line, or all on one spot, are no region at
+ * all; isSimplePolygon refuses them too (their edges overlap), and this
+ * tells that case apart from edges that cross, so the user hears what is
+ * actually wrong. Works in any units, like isSimplePolygon; exact with whole
+ * device units.
+ * @param {ImagePoint[]} polygon - its corners in order
+ * @returns {boolean}
+ * @example
+ * hasArea([{x: 0, y: 0}, {x: 5, y: 5}, {x: 10, y: 10}]) // → false: one line
+ * hasArea([{x: 0, y: 0}, {x: 1, y: 1}, {x: 1, y: 0}, {x: 0, y: 1}]) // → true, though not simple
+ */
+export function hasArea(polygon) {
+  const [a] = polygon;
+  const b = a && polygon.find(p => p.x !== a.x || p.y !== a.y);
+  return !!b && polygon.some(c => turn(a, b, c) !== 0);
 }
 
 /**

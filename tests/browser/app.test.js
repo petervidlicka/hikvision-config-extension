@@ -754,6 +754,11 @@ describe('config page', () => {
     click(0.3, 0.05);
     expect(toast()).toBe('Edges of a region must not cross');
     expect(state.drawingPoints).toHaveLength(9);
+    // …also when double-clicked: the region stays open rather than closing without it
+    $('toast').textContent = '';
+    dblclick(0.3, 0.05);
+    expect(toast()).toBe('Edges of a region must not cross');
+    expect([state.drawingPoints.length, state.motionRegions.length]).toEqual([9, 0]);
     click(0.1, 0.4);
     expect(state.drawingPoints).toHaveLength(0);
     expect(state.motionRegions.map(r => r.points.length)).toEqual([10]);
@@ -770,6 +775,34 @@ describe('config page', () => {
     } finally {
       delete device.motionDocs['1'];
     }
+  });
+
+  it('says a region with no area has none, when closing one and before saving a stored one', async () => {
+    const { click, dblclick } = canvasPointer();
+    $('clearMotionRegionsBtn').click();
+    click(0.1, 0.6); click(0.2, 0.6); click(0.3, 0.6); dblclick(0.4, 0.6);
+    expect(toast()).toBe('The corners of a region must not all lie on one line');
+    expect([state.drawingPoints.length, state.motionRegions.length]).toEqual([4, 0]);
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+
+    // A placeholder region stored with every corner on one spot
+    device.motionDocs['1'] = motionDocWith([[[100, 900], [400, 900], [400, 600], [100, 600]], [[0, 0], [0, 0], [0, 0], [0, 0]]]);
+    try {
+      await reloadMotion();
+      expect(state.motionRegions.map(r => r.points.length)).toEqual([4, 4]);
+      const puts = device.puts.length;
+      $('saveMotionBtn').click();
+      expect(toast()).toBe('Region 2 has no area: delete or redraw it before saving');
+      expect(device.puts).toHaveLength(puts);
+      // Deleting it lets the rest be saved
+      $('motionRegionList').querySelector('[data-delete-motion="1"]').click();
+      $('saveMotionBtn').click();
+      await vi.waitFor(() => expect(device.puts).toHaveLength(puts + 1));
+      expect(device.puts.at(-1).body).toContain('<RegionList size="1">');
+    } finally {
+      delete device.motionDocs['1'];
+    }
+    await reloadMotion();
   });
 
   it('edits the grid when no capabilities answer, keeping the stored sensitivity unless the camera gives its levels', async () => {

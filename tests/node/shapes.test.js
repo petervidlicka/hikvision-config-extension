@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  isSimplePolygon, pixelDistance, pointInPolygon, rectContains, rectFromCorners, rectToPixels, toPixels,
+  hasArea, isSimplePolygon, pixelDistance, pointInPolygon, rectContains, rectFromCorners, rectToPixels, toPixels,
 } from '../../extension/lib/shapes.js';
 
 /** Frame sizes the canvas takes on the DS-7604NI: live still, HD still, stored picture. */
@@ -118,6 +118,18 @@ describe('shapes on the picture', () => {
       expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 0], [10, 10], [0, 10], [0, 0]))).toBe(true);
       expect(isSimplePolygon(corners([0, 0], [10, 0], [10, 0]))).toBe(false);
       expect(isSimplePolygon([])).toBe(false);
+    });
+
+    it('tells an outline with no area from one whose edges cross', () => {
+      // Corners all on one line, or all on one spot: not simple, and no area either
+      for (const flat of [corners([0, 0], [5, 0], [10, 0]), corners([0, 0], [4, 4], [10, 10], [7, 7]),
+        corners([0, 0], [0, 0], [0, 0], [0, 0]), corners([3, 3]), []]) {
+        expect([isSimplePolygon(flat), hasArea(flat)]).toEqual([false, false]);
+      }
+      // A bow-tie, even one whose halves cancel out, and a spike on a square have an area
+      expect(hasArea(corners([0, 0], [10, 10], [10, 0], [0, 10]))).toBe(true);
+      expect(hasArea(corners([0, 0], [10, 0], [10, 10], [10, 5], [0, 10]))).toBe(true);
+      expect(hasArea(corners([0, 0], [0, 0], [10, 0], [10, 0], [5, 1]))).toBe(true);
     });
 
     it('gives the same answer in any units', () => {

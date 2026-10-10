@@ -458,6 +458,9 @@ for PAL or 15 for NTSC, sensitivity 0–5).
   `deviceError`, and nothing was stored. The extension refuses a crossing,
   touching or overlapping outline (`isSimplePolygon` in `lib/shapes.js`) when
   a region is closed and, for stored regions, on save, but accepts such a U.
+  An outline whose corners all lie on one line or one spot (`hasArea`) is
+  refused with its own message, so a stored placeholder region is reported
+  as having no area, to delete or redraw, rather than as crossing.
 
 Because every save reads back as grid, a document can't tell whether its
 `gridMap` came from its polygons or was edited as a grid elsewhere, e.g. in

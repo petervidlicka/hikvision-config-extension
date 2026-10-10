@@ -12,7 +12,7 @@ import {
   readMotionConfig, snapSensitivity,
 } from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
-import { isSimplePolygon, pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
+import { hasArea, isSimplePolygon, pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
 import { loadTool, saveTarget } from './registry.js';
@@ -31,6 +31,8 @@ const CLOSE_DISTANCE_PX = 12;
 const SAME_CORNER_PX = 4;
 /** Why a region can't be closed or saved: Hikvision's web UI refuses such regions too. */
 const CROSSING_EDGES = 'Edges of a region must not cross';
+/** Why a region can't be closed: its corners all lie on one line (or one spot), so it covers nothing. */
+const NO_AREA = 'The corners of a region must not all lie on one line';
 
 /** @satisfies {Tool} */
 export const motionTool = {
@@ -267,7 +269,11 @@ export const motionTool = {
   },
 
   onDblClick(pos, e) {
-    if (state.drawingPoints.length > 0) closePolygon();
+    // Only when the double-click's own corner went in: at the corner limit,
+    // one that would make the edges cross is taken back, and the region then
+    // stays open rather than closing without the corner the user placed
+    const last = state.drawingPoints[state.drawingPoints.length - 1];
+    if (last && pixelDistance(pos, last, dom.canvas) < SAME_CORNER_PX) closePolygon();
   },
 
   async load({ from, stale }) {
@@ -334,9 +340,12 @@ export const motionTool = {
 
     // Regions loaded from the device are checked here; drawn ones were when they closed
     const regions = state.motionRegions.map(reg => imageToMotionRegion(reg.points));
-    const crossing = regions.findIndex(points => !isSimplePolygon(points));
-    if (state.motionMode === 'region' && crossing >= 0) {
-      showToast(`${CROSSING_EDGES}: redraw region ${crossing + 1} before saving`, 'error');
+    const invalid = regions.findIndex(points => !isSimplePolygon(points));
+    if (state.motionMode === 'region' && invalid >= 0) {
+      const n = invalid + 1;
+      showToast(hasArea(regions[invalid])
+        ? `${CROSSING_EDGES}: redraw region ${n} before saving`
+        : `Region ${n} has no area: delete or redraw it before saving`, 'error');
       return;
     }
 
@@ -440,8 +449,8 @@ function updateRegionList() {
 /**
  * Finish the polygon being drawn. It stays open, to be finished another way
  * or cancelled (Esc), when it has too few corners (the device rejects
- * regions below its minimum) or when its edges cross, checked in the device
- * units it will be saved in.
+ * regions below its minimum), covers no area, or its edges cross, checked
+ * in the device units it will be saved in.
  * @returns {boolean} whether it closed
  */
 function closePolygon() {
@@ -450,8 +459,9 @@ function closePolygon() {
     showToast(`A detection region needs at least ${minPoints} corners`, 'error');
     return false;
   }
-  if (!isSimplePolygon(imageToMotionRegion(state.drawingPoints))) {
-    showToast(CROSSING_EDGES, 'error');
+  const corners = imageToMotionRegion(state.drawingPoints);
+  if (!isSimplePolygon(corners)) {
+    showToast(hasArea(corners) ? CROSSING_EDGES : NO_AREA, 'error');
     return false;
   }
   state.motionRegions.push({ points: [...state.drawingPoints] });
