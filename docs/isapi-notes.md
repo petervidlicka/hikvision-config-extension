@@ -428,7 +428,15 @@ for PAL or 15 for NTSC, sensitivity 0–5).
   such as polygons saved in region mode (`gridMap` zeroed), is shown
   read-only and its area sent back as loaded: editing that grid would switch
   the camera to grid mode with nowhere to detect. Polygons only for a
-  document without a grid.
+  document without a grid. On the DS-7604NI this also happens when both
+  capability URLs answer 503, since its motion documents always read back in
+  grid mode with a `gridMap`. A grid save then sends `regionType` grid, the
+  edited `gridMap` and the stored polygons unchanged, in a `RegionList`
+  without `size` as loaded: the shape that merges regions by id (below).
+  Whether the NVR then keeps those polygons next to the edited grid, or
+  rasterizes them over it, is untested. If it keeps them, the next load with
+  capabilities shows the old polygons, and saving them replaces the edited
+  grid with their area.
 - **Sensitivity levels**: `sensitivityLevel@min/max/step` in the capabilities,
   else in `…/motionDetection/layout/capabilities` (the web UI's `motionCapa`,
   where it always reads them; 0–100 step 20 on the DS-7604NI). The layout's
@@ -496,11 +504,12 @@ for PAL or 15 for NTSC, sensitivity 0–5).
 
 Because every save reads back as grid, a document can't tell whether its
 `gridMap` came from its polygons or was edited as a grid elsewhere, e.g. in
-iVMS. On the DS-7604NI every channel's grid matches its polygons. Whether the
-NVR keeps the old polygons after a grid edit over the private SDK is
-untested; if it does, the extension (like the web UI, which also draws the
-stored polygons and overwrites the grid on save) shows those polygons, and a
-save replaces the grid with their area.
+iVMS, or in the extension's own grid editor when no capabilities answered
+(above). On the DS-7604NI every channel's grid matches its polygons. Whether
+the NVR keeps the old polygons after a grid edit over the private SDK, or
+after such a grid save, is untested; if it does, the extension (like the
+web UI, which also draws the stored polygons and overwrites the grid on save)
+shows those polygons, and a save replaces the grid with their area.
 
 ### Coordinates
 
@@ -781,6 +790,9 @@ Unverified, each described in its section above:
   ~1 s snapshot refresh is the cameras' I-frame interval.
 - Region-only (legacy ROI) motion: its coordinate scale and Y direction.
 - Whether the NVR keeps stale polygons after a grid edit in iVMS.
+- What the NVR does with the stored polygons when the extension saves its
+  grid after both motion capability URLs answered 503: keeps them next to the
+  edited grid, or rasterizes them over it.
 - Standalone cameras: bare `whiteLight`/`audio` action names, and privacy
   masks in fixed slots without DELETE.
 - A hybrid DVR's channel numbering, a device that requires SHA-256 Digest,
