@@ -174,8 +174,9 @@ describe('config page', () => {
     const since = device.urls.length;
     $('streamBtnHd').click();
     expect(chromeStub.store.local.streamType).toBe('main');
-    // The NVR's plain HD still is the same 704×576 as SD, so it is asked for the main stream's size
-    await vi.waitFor(() => expect(dom.videoFeed.naturalWidth).toBe(1920), { timeout: 5000 });
+    // The NVR's plain HD still is the same 704×576 as SD, so it is asked for the main stream's size.
+    // The frame's size is known once it decodes, its layout (aspect, canvas) once its onload has run.
+    await vi.waitFor(() => expect([dom.videoFeed.naturalWidth, dom.canvas.width]).toEqual([1920, 1920]), { timeout: 5000 });
     expect(device.urls.slice(since).filter(u => u.includes('/picture')).slice(0, 2)).toEqual([
       'GET /ISAPI/Streaming/channels/101/picture',
       'GET /ISAPI/Streaming/channels/101/picture?videoResolutionWidth=2688&videoResolutionHeight=1520',
