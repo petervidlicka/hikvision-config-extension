@@ -1,8 +1,8 @@
 /**
  * Hikvision Config Tool — Chrome Extension UI
  *
- * All NVR communication goes through chrome.runtime.sendMessage() to the
- * background service worker, which handles Digest auth and ISAPI calls.
+ * Talks to the NVR directly through lib/isapi.js (Digest auth + ISAPI);
+ * extension pages with host permission aren't subject to CORS.
  *
  * Configuration tools (motion detection, privacy mask, etc.) are registered
  * via ToolRegistry.register(). New tools can be added without modifying
@@ -22,10 +22,10 @@ const state = {
   drawCurrent: null,
   paintValue: true,
   // Video
-  snapshotInterval: null,
+  stopSnapshotFeed: null, // stops the single-view snapshot loop
   // 4-cam grid view
   viewMode: 'single', // 'single' or 'grid'
-  gridSnapIntervals: [],
+  gridFeedStops: [null, null, null, null], // per-cell snapshot loop stoppers
   gridCellChannels: [null, null, null, null],
   // Section navigation
   activeSection: 'liveview', // 'liveview' or 'config'
@@ -120,26 +120,6 @@ const ToolRegistry = {
 
 // ─── Utility Functions ──────────────────────────────────────────────────────
 
-/** Send a message to the background service worker. */
-function sendMsg(msg) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(msg, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-      } else if (!response) {
-        reject(new Error('No response from background'));
-      } else if (!response.success) {
-        const err = new Error(response.error || 'Unknown error');
-        err.code = response.code;
-        if (err.code === 'AUTH_FAILED') handleAuthFailure();
-        reject(err);
-      } else {
-        resolve(response);
-      }
-    });
-  });
-}
-
 /**
  * The device rejected our credentials mid-session (password changed, device
  * reset, account locked). Stop every feed immediately — each further request
@@ -152,10 +132,20 @@ function handleAuthFailure() {
   dom.passInput.value = '';
   showToast('The device rejected the login. Re-enter the password to reconnect.', 'error');
 }
+Isapi.onAuthFailure = handleAuthFailure;
+
+/**
+ * The active channel with its kind, which decides the ISAPI URL family.
+ * @returns {{id: string, name: string, kind: 'analog'|'digital'}}
+ */
+function activeChannelInfo() {
+  return state.channels.find(ch => ch.id === state.activeChannel)
+    ?? { id: state.activeChannel, name: '', kind: 'analog' };
+}
 
 /** Display name for a channel, falling back to its number. */
 function channelLabel(ch) {
-  return ch.name || ch.inputPort || `Channel ${ch.id}`;
+  return ch.name || `Channel ${ch.id}`;
 }
 
 function showToast(msg, type = 'info') {
@@ -169,10 +159,16 @@ function setStatus(text, right = '') {
   dom.statusRight.textContent = right;
 }
 
-/** Stop all 4-cam grid snapshot intervals. */
+/** Stop all 4-cam grid snapshot loops. */
 function stopAllGridFeeds() {
-  state.gridSnapIntervals.forEach(id => id && clearInterval(id));
-  state.gridSnapIntervals = [null, null, null, null];
+  state.gridFeedStops.forEach(stop => stop?.());
+  state.gridFeedStops = [null, null, null, null];
+}
+
+/** Stop the single-view snapshot loop. */
+function stopSnapshotFeed() {
+  state.stopSnapshotFeed?.();
+  state.stopSnapshotFeed = null;
 }
 
 function getCanvasPos(e) {
@@ -213,8 +209,8 @@ ToolRegistry.register({
       <div class="toggle" id="motionToggle"></div>
     </div>
     <div class="slider-group">
-      <label>Sensitivity <span id="sensitivityVal">50</span></label>
-      <input type="range" id="sensitivitySlider" min="0" max="100" value="50" />
+      <label>Sensitivity <span id="sensitivityVal">40</span></label>
+      <input type="range" id="sensitivitySlider" min="0" max="100" step="20" value="40" />
     </div>
     <div class="toggle-row">
       <span>Dynamic Analysis</span>
@@ -223,14 +219,15 @@ ToolRegistry.register({
     <div class="target-detection-row" id="targetDetectionRow">
       <label class="target-label">Detection Target</label>
       <div class="target-checkboxes">
-        <label class="target-checkbox"><input type="checkbox" id="detectHuman" /> Person</label>
-        <label class="target-checkbox"><input type="checkbox" id="detectVehicle" /> Vehicle</label>
+        <label class="target-checkbox" id="detectHumanLabel"><input type="checkbox" id="detectHuman" /> Person</label>
+        <label class="target-checkbox" id="detectVehicleLabel"><input type="checkbox" id="detectVehicle" /> Vehicle</label>
       </div>
     </div>
     <div class="instructions">
       <strong>Click</strong> to place vertices and draw a detection region.
       <strong>Double-click</strong> or click near the start to close the shape.
-      <strong>Right-click</strong> a region to delete it. Max 8 regions.
+      <strong>Right-click</strong> a region to delete it.
+      Up to <span id="motionMaxRegions">4</span> regions, <span id="motionPointRange">4–10</span> corners each.
     </div>
     <div class="legend">
       <div class="legend-item">
@@ -254,22 +251,20 @@ ToolRegistry.register({
     return {
       motionRegions: [],
       drawingPoints: [],
-      motionNormW: 0,
-      motionNormH: 0,
+      motionCaps: readMotionCapabilities(null), // device limits, refreshed on load
       motionEnabled: false,
-      sensitivity: 50,
+      sensitivity: 40,
       dynamicAnalysis: false,
       detectHuman: false,
       detectVehicle: false,
-      rawMotionXml: null,
+      motionDoc: null, // device XML from the last load; saves edit a copy
     };
   },
 
   resetState() {
     state.motionRegions = [];
     state.drawingPoints = [];
-    // Reset coordinate space on channel switch so next load re-detects correctly
-    // but keep normW/H across channels on same NVR session (handled in load via sticky logic)
+    state.motionDoc = null;
   },
 
   draw(ctx, canvas) {
@@ -349,29 +344,59 @@ ToolRegistry.register({
       return;
     }
 
-    // Left click: place vertex or close polygon
-    if (state.drawingPoints.length >= 2) {
-      const first = state.drawingPoints[0];
-      const dist = Math.hypot(pos.x - first.x, pos.y - first.y);
-      if (dist < 12) {
-        // Close polygon — clicked near start vertex
-        if (state.drawingPoints.length >= 3) {
-          state.motionRegions.push({ points: [...state.drawingPoints] });
-          this._updateRegionList();
-        }
-        state.drawingPoints = [];
-        redraw();
-        return;
-      }
-    }
+    const pts = state.drawingPoints;
 
-    if (state.motionRegions.length >= 8 && state.drawingPoints.length === 0) {
-      showToast('Maximum 8 detection regions allowed', 'error');
+    // Clicking near the start vertex closes the polygon
+    if (pts.length >= 2 && Math.hypot(pos.x - pts[0].x, pos.y - pts[0].y) < 12) {
+      this._closePolygon();
       return;
     }
 
-    state.drawingPoints.push({ x: pos.x, y: pos.y });
+    if (state.motionRegions.length >= state.motionCaps.maxRegions && pts.length === 0) {
+      showToast(`This camera allows at most ${state.motionCaps.maxRegions} detection regions`, 'error');
+      return;
+    }
+
+    // The clicks of a double-click land on the same spot — don't add duplicate corners
+    const last = pts[pts.length - 1];
+    if (last && Math.hypot(pos.x - last.x, pos.y - last.y) < 4) return;
+
+    pts.push({ x: pos.x, y: pos.y });
+    if (pts.length >= state.motionCaps.maxPoints) {
+      this._closePolygon();
+      return;
+    }
     redraw();
+  },
+
+  /**
+   * Finish the polygon being drawn. Too few corners keeps it open — the
+   * device rejects regions below its minimum.
+   */
+  _closePolygon() {
+    const { minPoints } = state.motionCaps;
+    if (state.drawingPoints.length < minPoints) {
+      showToast(`A detection region needs at least ${minPoints} corners`, 'error');
+      return;
+    }
+    state.motionRegions.push({ points: [...state.drawingPoints] });
+    state.drawingPoints = [];
+    this._updateRegionList();
+    redraw();
+  },
+
+  /** Apply the device's limits to the panel controls. */
+  _applyCapabilities() {
+    const caps = state.motionCaps;
+    const slider = document.getElementById('sensitivitySlider');
+    slider.min = caps.sensitivity.min;
+    slider.max = caps.sensitivity.max;
+    slider.step = caps.sensitivity.step;
+    document.getElementById('motionMaxRegions').textContent = caps.maxRegions;
+    document.getElementById('motionPointRange').textContent = `${caps.minPoints}–${caps.maxPoints}`;
+    document.getElementById('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';
+    document.getElementById('detectVehicleLabel').style.display = caps.targetTypes.includes('vehicle') ? '' : 'none';
+    document.getElementById('targetDetectionRow').style.display = caps.targetTypes.length ? '' : 'none';
   },
 
   onMouseMove(pos, e) {
@@ -386,109 +411,48 @@ ToolRegistry.register({
   },
 
   onDblClick(pos, e) {
-    // Double-click: close the polygon if we have enough points
-    if (state.drawingPoints.length >= 3) {
-      state.motionRegions.push({ points: [...state.drawingPoints] });
-      this._updateRegionList();
-    }
-    state.drawingPoints = [];
-    redraw();
+    if (state.drawingPoints.length > 0) this._closePolygon();
   },
 
   async load() {
     if (!state.config || !state.activeChannel) return;
+    const channel = activeChannelInfo();
     setStatus('Loading motion detection config...');
     try {
-      const data = await sendMsg({
-        action: 'getMotionDetection',
-        config: state.config,
-        channelId: state.activeChannel,
-      });
+      const [doc, capsDoc] = await Promise.all([
+        Isapi.getXml(state.config, Isapi.motionDetectionPath(channel)),
+        Isapi.getMotionCapabilities(state.config, channel),
+      ]);
+      state.motionDoc = doc;
+      state.motionCaps = readMotionCapabilities(capsDoc);
+      this._applyCapabilities();
+      const md = readMotionConfig(doc);
 
-      const md = data.motionDetection;
-      state.rawMotionXml = data.rawXml;
-      console.log('[Motion] Raw XML:', data.rawXml);
-
-      state.motionEnabled = md.enabled === 'true';
+      state.motionEnabled = md.enabled;
       document.getElementById('motionToggle').classList.toggle('on', state.motionEnabled);
 
-      // Parse sensitivity from MotionDetectionLayout
-      let sensLayout = md.MotionDetectionLayout;
-      if (Array.isArray(sensLayout)) sensLayout = sensLayout[0];
-      if (sensLayout) {
-        const sens = parseInt(sensLayout.sensitivityLevel) || 50;
-        state.sensitivity = sens;
-        document.getElementById('sensitivitySlider').value = sens;
-        document.getElementById('sensitivityVal').textContent = sens;
+      if (md.sensitivity !== null) {
+        state.sensitivity = md.sensitivity;
+        document.getElementById('sensitivitySlider').value = md.sensitivity;
+        document.getElementById('sensitivityVal').textContent = md.sensitivity;
       }
 
-      // Parse region coordinates — stored in MotionDetectionLayout.layout.RegionList.Region
-      state.motionRegions = [];
-      let regions = sensLayout?.layout?.RegionList?.Region;
-      if (regions) {
-        if (!Array.isArray(regions)) regions = [regions];
+      // Device coordinates are 0–1000 with Y=0 at the bottom; the canvas has Y=0 at the top
+      const scale = MOTION_COORDINATE_SCALE;
+      state.motionRegions = md.regions.map(points => ({
+        points: points.map(p => ({
+          x: (p.x / scale) * dom.canvas.width,
+          y: (1 - p.y / scale) * dom.canvas.height,
+        })),
+      }));
+      state.drawingPoints = [];
 
-        // Detect coordinate scale from observed max values.
-        // Use sticky expansion — all cameras on the same NVR share one coordinate space,
-        // so we never shrink normW/H between channel loads (only reset on disconnect).
-        const allXs = [];
-        const allYs = [];
-        regions.forEach(reg => {
-          let coords = reg.RegionCoordinatesList?.RegionCoordinates;
-          if (!Array.isArray(coords)) coords = coords ? [coords] : [];
-          coords.forEach(c => {
-            allXs.push(parseInt(c.positionX) || 0);
-            allYs.push(parseInt(c.positionY) || 0);
-          });
-        });
-        const detectedW = allXs.length ? Math.max(...allXs) : 0;
-        const detectedH = allYs.length ? Math.max(...allYs) : 0;
-        if (detectedW > (state.motionNormW || 0)) state.motionNormW = detectedW;
-        if (detectedH > (state.motionNormH || 0)) state.motionNormH = detectedH;
-        if (!state.motionNormW) state.motionNormW = 10000;
-        if (!state.motionNormH) state.motionNormH = 10000;
-        console.log('[Motion] Coordinate space:', state.motionNormW, 'x', state.motionNormH, '(detected:', detectedW, 'x', detectedH, ')');
-
-        regions.forEach(reg => {
-          let coords = reg.RegionCoordinatesList?.RegionCoordinates;
-          if (!Array.isArray(coords)) coords = coords ? [coords] : [];
-          if (coords.length >= 3) {
-            // Hikvision Y=0 is at the bottom of the image (math convention).
-            // Flip Y so device bottom → canvas bottom, device top → canvas top.
-            const points = coords.map(c => ({
-              x: ((parseInt(c.positionX) || 0) / state.motionNormW) * dom.canvas.width,
-              y: (1 - (parseInt(c.positionY) || 0) / state.motionNormH) * dom.canvas.height,
-            }));
-            state.motionRegions.push({ points });
-          }
-        });
-        console.log('[Motion] Loaded', state.motionRegions.length, 'region(s)');
-      } else {
-        console.log('[Motion] No RegionList found in layout');
-      }
-
-      // Dynamic analysis / target detection (SMD)
-      state.dynamicAnalysis = md.enableDynamicAnalysis === 'true';
+      state.dynamicAnalysis = md.dynamicAnalysis;
       document.getElementById('dynamicAnalysisToggle').classList.toggle('on', state.dynamicAnalysis);
-
-      // Parse target detection — may be nested under MotionDetectionLayout or top-level
-      state.detectHuman = false;
-      state.detectVehicle = false;
-      const parseTargets = (obj) => {
-        if (!obj) return;
-        const targets = obj.TargetDetection?.detectionTarget;
-        if (!targets) return;
-        const list = Array.isArray(targets) ? targets : [targets];
-        for (const t of list) {
-          if (t.targetType === 'human') state.detectHuman = t.enabled === 'true';
-          if (t.targetType === 'vehicle') state.detectVehicle = t.enabled === 'true';
-        }
-      };
-      parseTargets(md);
-      if (sensLayout) parseTargets(sensLayout);
+      state.detectHuman = md.targetTypes.includes('human');
+      state.detectVehicle = md.targetTypes.includes('vehicle');
       document.getElementById('detectHuman').checked = state.detectHuman;
       document.getElementById('detectVehicle').checked = state.detectVehicle;
-      console.log('[Motion] Dynamic analysis:', state.dynamicAnalysis, '| Detect human:', state.detectHuman, '| Detect vehicle:', state.detectVehicle);
 
       this._updateRegionList();
       redraw();
@@ -502,58 +466,48 @@ ToolRegistry.register({
 
   async save() {
     if (!state.config || !state.activeChannel) return;
-
-    const sensitivity = document.getElementById('sensitivitySlider').value;
-    const normW = state.motionNormW;
-    const normH = state.motionNormH;
-
-    // Build the updated RegionList XML matching the native app's format exactly.
-    // Flip Y back to device convention: Y=0 at bottom (math), Y=normH at top.
-    // Native app uses: <RegionList size="N"> and <Region xmlns=""> (empty namespace override).
-    let regionListXml = `<RegionList size="${state.motionRegions.length}">`;
-    state.motionRegions.forEach((reg, i) => {
-      let coordsXml = '';
-      reg.points.forEach(p => {
-        const px = Math.round((p.x / dom.canvas.width) * normW);
-        const py = Math.round((1 - p.y / dom.canvas.height) * normH);
-        coordsXml += `<RegionCoordinates><positionX>${px}</positionX><positionY>${py}</positionY></RegionCoordinates>`;
-      });
-      regionListXml += `<Region xmlns=""><id>${i + 1}</id><RegionCoordinatesList>${coordsXml}</RegionCoordinatesList></Region>`;
-    });
-    regionListXml += '</RegionList>';
-
-    // Patch the raw XML from the device — preserving its structure, namespace,
-    // gridMap, and timing values. We match the native app's save behaviour exactly.
-    let xml = state.rawMotionXml;
-    xml = xml.replace(/<enabled>[^<]*<\/enabled>/, `<enabled>${state.motionEnabled}</enabled>`);
-    xml = xml.replace(/<sensitivityLevel>[^<]*<\/sensitivityLevel>/, `<sensitivityLevel>${sensitivity}</sensitivityLevel>`);
-
-    // Switch to region mode — device ignores RegionList when regionType is "grid"
-    xml = xml.replace(/<regionType>[^<]*<\/regionType>/, '<regionType>region</regionType>');
-
-    // Clear gridMap — native app zeroes it out when saving in region mode
-    xml = xml.replace(/<gridMap>([^<]*)<\/gridMap>/, (_, hex) => `<gridMap>${'0'.repeat(hex.length)}</gridMap>`);
-
-    // Replace the RegionList block with updated polygon coordinates
-    // Handle both plain <RegionList> and <RegionList size="..."> from previous saves
-    xml = xml.replace(/<RegionList[^>]*>[\s\S]*?<\/RegionList>/, regionListXml);
-
-    // Update enableDynamicAnalysis only if the device already has this field
-    if (xml.includes('<enableDynamicAnalysis>')) {
-      xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${state.dynamicAnalysis}</enableDynamicAnalysis>`);
+    if (!state.motionDoc) {
+      showToast('Load the settings from the device before saving', 'error');
+      return;
     }
-    // Note: person/vehicle target detection is stored via a different ISAPI endpoint,
-    // not in the motionDetection XML — the native app uses <targetType xmlns=""> as an empty element
+    const caps = state.motionCaps;
+    if (!caps.regionTypes.includes('region')) {
+      showToast('This camera only supports grid-based motion areas, which the extension cannot edit yet', 'error');
+      return;
+    }
+    if (state.drawingPoints.length > 0) {
+      showToast('Finish or cancel (Esc) the region you are drawing first', 'error');
+      return;
+    }
 
-    console.log('[Motion] Saving XML:', xml);
+    // Snap to the device's sensitivity steps (e.g. 0, 20, … 100)
+    const { min, max, step } = caps.sensitivity;
+    const rawSensitivity = Number(document.getElementById('sensitivitySlider').value);
+    const sensitivity = Math.min(max, Math.max(min, min + Math.round((rawSensitivity - min) / step) * step));
+
+    const scale = MOTION_COORDINATE_SCALE;
+    const toDevice = v => Math.min(scale, Math.max(0, Math.round(v * scale)));
+    // Edit a copy so a failed save leaves the loaded config intact
+    const doc = state.motionDoc.cloneNode(true);
+
     setStatus('Saving motion detection config...');
     try {
-      await sendMsg({
-        action: 'putMotionDetection',
-        config: state.config,
-        channelId: state.activeChannel,
-        xml,
+      applyMotionConfig(doc, {
+        enabled: state.motionEnabled,
+        sensitivity,
+        dynamicAnalysis: state.dynamicAnalysis,
+        // Flip Y back to the device convention (Y=0 at the bottom)
+        regions: state.motionRegions.map(reg => reg.points.map(p => ({
+          x: toDevice(p.x / dom.canvas.width),
+          y: toDevice(1 - p.y / dom.canvas.height),
+        }))),
+        targetTypes: caps.targetTypes.length
+          ? caps.targetTypes.filter(t => (t === 'human' && state.detectHuman) || (t === 'vehicle' && state.detectVehicle))
+          : undefined,
       });
+
+      await Isapi.putXml(state.config, Isapi.motionDetectionPath(activeChannelInfo()), doc);
+      state.motionDoc = doc;
       showToast('Motion detection saved successfully!', 'success');
       setStatus('Config saved', `Channel ${state.activeChannel}`);
     } catch (err) {
@@ -666,11 +620,15 @@ ToolRegistry.register({
       privacyRegions: [],
       privacyNormW: 704,
       privacyNormH: 576,
+      privacyDoc: null,
+      privacyPath: null,
     };
   },
 
   resetState() {
     state.privacyRegions = [];
+    state.privacyDoc = null;
+    state.privacyPath = null;
     state.privacyNormW = 704;
     state.privacyNormH = 576;
   },
@@ -749,61 +707,32 @@ ToolRegistry.register({
     if (!state.config || !state.activeChannel) return;
     setStatus('Loading privacy mask config...');
     try {
-      const data = await sendMsg({
-        action: 'getPrivacyMask',
-        config: state.config,
-        channelId: state.activeChannel,
+      const { doc, path } = await Isapi.getPrivacyMask(state.config, activeChannelInfo());
+      state.privacyDoc = doc;
+      state.privacyPath = path;
+      const pm = readPrivacyMask(doc);
+
+      state.privacyEnabled = pm.enabled;
+      document.getElementById('privacyToggle').classList.toggle('on', state.privacyEnabled);
+
+      // Use the coordinate space the device declares; otherwise guess between
+      // the 704x576 grid of older firmware and a 0–10000 normalized range
+      const allPoints = pm.regions.flat();
+      state.privacyNormW = pm.screen?.width ?? (allPoints.some(p => p.x > 1000) ? 10000 : 704);
+      state.privacyNormH = pm.screen?.height ?? (allPoints.some(p => p.y > 1000) ? 10000 : 576);
+
+      state.privacyRegions = pm.regions.map(points => {
+        const xs = points.map(p => p.x);
+        const ys = points.map(p => p.y);
+        const minX = Math.min(...xs);
+        const minY = Math.min(...ys);
+        return {
+          x: (minX / state.privacyNormW) * dom.canvas.width,
+          y: (minY / state.privacyNormH) * dom.canvas.height,
+          w: ((Math.max(...xs) - minX) / state.privacyNormW) * dom.canvas.width,
+          h: ((Math.max(...ys) - minY) / state.privacyNormH) * dom.canvas.height,
+        };
       });
-
-      const pm = data.privacyMask;
-      if (pm) {
-        state.privacyEnabled = pm.enabled === 'true';
-        document.getElementById('privacyToggle').classList.toggle('on', state.privacyEnabled);
-
-        state.privacyRegions = [];
-        let regions = pm.PrivacyMaskRegionList?.PrivacyMaskRegion;
-        if (regions) {
-          if (!Array.isArray(regions)) regions = [regions];
-
-          // Detect coordinate normalization scale from raw values
-          const allXs = [];
-          const allYs = [];
-          regions.forEach(reg => {
-            if (reg.RegionCoordinatesList) {
-              let coords = reg.RegionCoordinatesList.RegionCoordinates;
-              if (!Array.isArray(coords)) coords = coords ? [coords] : [];
-              coords.forEach(c => {
-                allXs.push(parseInt(c.positionX) || 0);
-                allYs.push(parseInt(c.positionY) || 0);
-              });
-            }
-          });
-          state.privacyNormW = (allXs.length && Math.max(...allXs) > 1000) ? 10000 : 704;
-          state.privacyNormH = (allYs.length && Math.max(...allYs) > 1000) ? 10000 : 576;
-
-          regions.forEach(reg => {
-            if (reg.enabled === 'true' && reg.RegionCoordinatesList) {
-              let coords = reg.RegionCoordinatesList.RegionCoordinates;
-              if (!Array.isArray(coords)) coords = coords ? [coords] : [];
-              if (coords.length >= 2) {
-                const xs = coords.map(c => parseInt(c.positionX) || 0);
-                const ys = coords.map(c => parseInt(c.positionY) || 0);
-                const minX = Math.min(...xs);
-                const maxX = Math.max(...xs);
-                const minY = Math.min(...ys);
-                const maxY = Math.max(...ys);
-
-                state.privacyRegions.push({
-                  x: (minX / state.privacyNormW) * dom.canvas.width,
-                  y: (minY / state.privacyNormH) * dom.canvas.height,
-                  w: ((maxX - minX) / state.privacyNormW) * dom.canvas.width,
-                  h: ((maxY - minY) / state.privacyNormH) * dom.canvas.height,
-                });
-              }
-            }
-          });
-        }
-      }
 
       this._updateRegionList();
       redraw();
@@ -817,59 +746,29 @@ ToolRegistry.register({
 
   async save() {
     if (!state.config || !state.activeChannel) return;
+    if (!state.privacyDoc) {
+      showToast('Load the settings from the device before saving', 'error');
+      return;
+    }
 
     // Use the same coordinate scale that was detected on load
     const normW = state.privacyNormW;
     const normH = state.privacyNormH;
-
-    let regionsXml = '';
-    state.privacyRegions.forEach((reg, i) => {
-      const x1 = Math.round((reg.x / dom.canvas.width) * normW);
-      const y1 = Math.round((reg.y / dom.canvas.height) * normH);
-      const x2 = Math.round(((reg.x + reg.w) / dom.canvas.width) * normW);
-      const y2 = Math.round(((reg.y + reg.h) / dom.canvas.height) * normH);
-
-      regionsXml += `
-    <PrivacyMaskRegion>
-      <id>${i + 1}</id>
-      <enabled>true</enabled>
-      <RegionCoordinatesList>
-        <RegionCoordinates>
-          <positionX>${x1}</positionX>
-          <positionY>${y1}</positionY>
-        </RegionCoordinates>
-        <RegionCoordinates>
-          <positionX>${x2}</positionX>
-          <positionY>${y1}</positionY>
-        </RegionCoordinates>
-        <RegionCoordinates>
-          <positionX>${x2}</positionX>
-          <positionY>${y2}</positionY>
-        </RegionCoordinates>
-        <RegionCoordinates>
-          <positionX>${x1}</positionX>
-          <positionY>${y2}</positionY>
-        </RegionCoordinates>
-      </RegionCoordinatesList>
-    </PrivacyMaskRegion>`;
-    });
-
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<PrivacyMask version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
-  <enabled>${state.privacyEnabled}</enabled>
-  <PrivacyMaskRegionList>
-    ${regionsXml}
-  </PrivacyMaskRegionList>
-</PrivacyMask>`;
+    const doc = state.privacyDoc.cloneNode(true);
 
     setStatus('Saving privacy mask config...');
     try {
-      await sendMsg({
-        action: 'putPrivacyMask',
-        config: state.config,
-        channelId: state.activeChannel,
-        xml,
+      applyPrivacyMask(doc, {
+        enabled: state.privacyEnabled,
+        rects: state.privacyRegions.map(reg => ({
+          x1: (reg.x / dom.canvas.width) * normW,
+          y1: (reg.y / dom.canvas.height) * normH,
+          x2: ((reg.x + reg.w) / dom.canvas.width) * normW,
+          y2: ((reg.y + reg.h) / dom.canvas.height) * normH,
+        })),
       });
+      await Isapi.putXml(state.config, state.privacyPath, doc);
+      state.privacyDoc = doc;
       showToast('Privacy mask saved successfully!', 'success');
       setStatus('Config saved', `Channel ${state.activeChannel}`);
     } catch (err) {
@@ -967,13 +866,13 @@ ToolRegistry.register({
     EVENT_ACTIONS.forEach(a => { eventActions[a.key] = false; });
     return {
       eventActions,
-      eventTriggersRawXml: null,
+      eventTriggerDoc: null,
     };
   },
 
   resetState() {
     EVENT_ACTIONS.forEach(a => { state.eventActions[a.key] = false; });
-    state.eventTriggersRawXml = null;
+    state.eventTriggerDoc = null;
     // Reset toggle UI
     EVENT_ACTIONS.forEach(a => {
       const el = document.getElementById(`eventToggle_${a.key}`);
@@ -993,35 +892,12 @@ ToolRegistry.register({
     if (!state.config || !state.activeChannel) return;
     setStatus('Loading event actions...');
     try {
-      const data = await sendMsg({
-        action: 'getEventTriggers',
-        config: state.config,
-        channelId: state.activeChannel,
-      });
+      const doc = await Isapi.getEventTrigger(state.config, state.activeChannel);
+      state.eventTriggerDoc = doc;
+      const methods = readNotificationMethods(doc);
 
-      state.eventTriggersRawXml = data.rawXml;
-
-      // Reset all toggles first
-      EVENT_ACTIONS.forEach(a => { state.eventActions[a.key] = false; });
-
-      // Parse which actions are enabled
-      const trigger = data.eventTrigger;
-      if (trigger) {
-        let notifications = trigger.EventTriggerNotificationList?.EventTriggerNotification;
-        if (notifications) {
-          if (!Array.isArray(notifications)) notifications = [notifications];
-          notifications.forEach(n => {
-            const method = n.notificationMethod;
-            const action = EVENT_ACTIONS.find(a => a.method === method);
-            if (action) {
-              state.eventActions[action.key] = true;
-            }
-          });
-        }
-      }
-
-      // Update toggle UI
       EVENT_ACTIONS.forEach(a => {
+        state.eventActions[a.key] = methods.has(a.method);
         const el = document.getElementById(`eventToggle_${a.key}`);
         if (el) el.classList.toggle('on', state.eventActions[a.key]);
       });
@@ -1036,44 +912,22 @@ ToolRegistry.register({
 
   async save() {
     if (!state.config || !state.activeChannel) return;
+    if (!state.eventTriggerDoc) {
+      showToast('Load the settings from the device before saving', 'error');
+      return;
+    }
 
-    // Build notification list XML from enabled toggles
-    let notificationsXml = '';
-    EVENT_ACTIONS.forEach(a => {
-      if (!state.eventActions[a.key]) return;
-
-      let extra = '';
-      if (a.method === 'record') {
-        extra = `\n        <notificationRecurrence>beginning</notificationRecurrence>\n        <videoInputID>${state.activeChannel}</videoInputID>`;
-      } else if (a.method === 'IO') {
-        extra = `\n        <outputIOPortID>1</outputIOPortID>`;
-      }
-
-      notificationsXml += `
-      <EventTriggerNotification>
-        <id>${a.method}</id>
-        <notificationMethod>${a.method}</notificationMethod>${extra}
-      </EventTriggerNotification>`;
+    const doc = state.eventTriggerDoc.cloneNode(true);
+    applyNotificationMethods(doc, {
+      managed: EVENT_ACTIONS.map(a => a.method),
+      enabled: new Set(EVENT_ACTIONS.filter(a => state.eventActions[a.key]).map(a => a.method)),
+      channelId: state.activeChannel,
     });
-
-    const xml = `<?xml version="1.0" encoding="UTF-8"?>
-<EventTrigger version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
-  <id>VMD-${state.activeChannel}</id>
-  <eventType>VMD</eventType>
-  <eventDescription>Video Motion Detection</eventDescription>
-  <videoInputChannelID>${state.activeChannel}</videoInputChannelID>
-  <EventTriggerNotificationList>${notificationsXml}
-  </EventTriggerNotificationList>
-</EventTrigger>`;
 
     setStatus('Saving event actions...');
     try {
-      await sendMsg({
-        action: 'putEventTriggers',
-        config: state.config,
-        channelId: state.activeChannel,
-        xml,
-      });
+      await Isapi.putXml(state.config, Isapi.eventTriggerPath(state.activeChannel), doc);
+      state.eventTriggerDoc = doc;
       showToast('Event actions saved successfully!', 'success');
       setStatus('Config saved', `Channel ${state.activeChannel}`);
     } catch (err) {
@@ -1410,12 +1264,11 @@ async function connect() {
   setStatus('Connecting to ' + host + '...');
 
   try {
-    const data = await sendMsg({ action: 'testConnection', config: state.config });
+    const dev = await Isapi.getDeviceInfo(state.config);
     saveConnectionDetails(host, port, username, password);
 
     state.connected = true;
     dom.statusDot.classList.add('connected');
-    const dev = data.device;
     dom.deviceInfo.textContent =
       `${dev.deviceName || dev.model || 'Device'} • FW ${dev.firmwareVersion || 'N/A'}`;
 
@@ -1454,8 +1307,9 @@ function saveConnectionDetails(host, port, username, password) {
 
 function disconnect() {
   // Stop all feeds
-  if (state.snapshotInterval) clearInterval(state.snapshotInterval);
+  stopSnapshotFeed();
   stopAllGridFeeds();
+  clearFrame(dom.videoFeed);
 
   // Reset state
   state.connected = false;
@@ -1469,9 +1323,6 @@ function disconnect() {
 
   // Reset tool state
   ToolRegistry.getAll().forEach(t => t.resetState());
-  // Reset NVR coordinate space so a new connection re-detects from scratch
-  state.motionNormW = 0;
-  state.motionNormH = 0;
 
   // Collapse config section
   state.configExpanded = false;
@@ -1496,9 +1347,7 @@ function disconnect() {
 
 async function loadChannels() {
   try {
-    const data = await sendMsg({ action: 'getChannels', config: state.config });
-
-    state.channels = data.channels;
+    state.channels = await Isapi.getChannels(state.config);
     dom.channelList.innerHTML = '';
 
     state.channels.forEach((ch, i) => {
@@ -1636,37 +1485,85 @@ function switchToLiveViewSingle() {
 
 // ─── Video Feed ─────────────────────────────────────────────────────────────
 
+/** Minimum time between snapshot requests for one feed. */
+const SNAPSHOT_INTERVAL_MS = 1000;
+
+/**
+ * Poll snapshots for a channel, one request at a time: the next request is
+ * scheduled only after the previous one finishes, so a slow device never
+ * builds up a queue of overlapping requests.
+ *
+ * @param {string} channelId
+ * @param {object} handlers
+ * @param {(blob: Blob) => void} handlers.onFrame
+ * @param {(err: Error) => void} [handlers.onError]
+ * @returns {() => void} stops the loop
+ */
+function createSnapshotLoop(channelId, { onFrame, onError }) {
+  let stopped = false;
+  let timer = null;
+
+  const tick = async () => {
+    const started = performance.now();
+    try {
+      const blob = await Isapi.getSnapshot(state.config, channelId);
+      if (!stopped) onFrame(blob);
+    } catch (err) {
+      if (stopped) return;
+      onError?.(err);
+      // handleAuthFailure has already stopped everything; don't reschedule
+      if (err instanceof AuthError) return;
+    }
+    if (!stopped) {
+      timer = setTimeout(tick, Math.max(0, SNAPSHOT_INTERVAL_MS - (performance.now() - started)));
+    }
+  };
+
+  tick();
+  return () => {
+    stopped = true;
+    clearTimeout(timer);
+  };
+}
+
+/**
+ * Show a JPEG blob in an <img>, releasing the previous frame's object URL.
+ * Object URLs avoid re-encoding every frame as a base64 data URL.
+ */
+function showFrame(img, blob) {
+  const previous = img.dataset.objectUrl;
+  const url = URL.createObjectURL(blob);
+  img.dataset.objectUrl = url;
+  img.src = url;
+  if (previous) URL.revokeObjectURL(previous);
+}
+
+/** Clear an <img> that was showing frames from showFrame(). */
+function clearFrame(img) {
+  if (img.dataset.objectUrl) URL.revokeObjectURL(img.dataset.objectUrl);
+  delete img.dataset.objectUrl;
+  img.removeAttribute('src');
+}
+
 function startSnapshotFeed(channelId) {
-  if (state.snapshotInterval) clearInterval(state.snapshotInterval);
+  stopSnapshotFeed();
 
   dom.noFeed.style.display = 'none';
   dom.canvasWrapper.style.display = 'block';
 
   let frameCount = 0;
-
-  const fetchSnapshot = async () => {
-    try {
-      const data = await sendMsg({
-        action: 'getSnapshot',
-        config: state.config,
-        channelId,
-      });
-
-      dom.videoFeed.onload = () => {
-        resizeCanvas();
-        redraw();
-        frameCount++;
-      };
-      dom.videoFeed.src = data.dataUrl;
-    } catch (err) {
-      if (frameCount === 0) {
-        setStatus('Failed to get video feed: ' + err.message);
-      }
-    }
+  dom.videoFeed.onload = () => {
+    resizeCanvas();
+    redraw();
+    frameCount++;
   };
 
-  fetchSnapshot();
-  state.snapshotInterval = setInterval(fetchSnapshot, 1000);
+  state.stopSnapshotFeed = createSnapshotLoop(channelId, {
+    onFrame: blob => showFrame(dom.videoFeed, blob),
+    onError: err => {
+      if (frameCount === 0) setStatus('Failed to get video feed: ' + err.message);
+    },
+  });
   setStatus('Streaming snapshots', `Channel ${channelId}`);
 }
 
@@ -1674,10 +1571,8 @@ function startSnapshotFeed(channelId) {
 // ─── 4-Camera Grid View ──────────────────────────────────────────────────────
 
 function startGridCellFeed(cellIdx, channelId) {
-  if (state.gridSnapIntervals[cellIdx]) {
-    clearInterval(state.gridSnapIntervals[cellIdx]);
-    state.gridSnapIntervals[cellIdx] = null;
-  }
+  state.gridFeedStops[cellIdx]?.();
+  state.gridFeedStops[cellIdx] = null;
 
   const cell = document.querySelectorAll('.grid-cell')[cellIdx];
   if (!cell) return;
@@ -1686,7 +1581,7 @@ function startGridCellFeed(cellIdx, channelId) {
   const noFeed = cell.querySelector('.grid-no-feed');
 
   img.classList.remove('loaded');
-  img.src = '';
+  clearFrame(img);
 
   if (!channelId) {
     cell.classList.remove('is-loading');
@@ -1698,25 +1593,14 @@ function startGridCellFeed(cellIdx, channelId) {
   cell.classList.add('is-loading');
   noFeed.style.display = 'none';
 
-  const fetchSnap = async () => {
-    try {
-      const data = await sendMsg({
-        action: 'getSnapshot',
-        config: state.config,
-        channelId,
-      });
-      img.onload = () => {
-        cell.classList.remove('is-loading');
-        img.classList.add('loaded');
-      };
-      img.src = data.dataUrl;
-    } catch {
-      // Keep showing loading state until next successful frame
-    }
+  img.onload = () => {
+    cell.classList.remove('is-loading');
+    img.classList.add('loaded');
   };
-
-  fetchSnap();
-  state.gridSnapIntervals[cellIdx] = setInterval(fetchSnap, 1000);
+  // On errors, keep showing the loading state until the next successful frame
+  state.gridFeedStops[cellIdx] = createSnapshotLoop(channelId, {
+    onFrame: blob => showFrame(img, blob),
+  });
 }
 
 function switchToGridView() {
@@ -1727,7 +1611,7 @@ function switchToGridView() {
 
   state.viewMode = 'grid';
 
-  if (state.snapshotInterval) clearInterval(state.snapshotInterval);
+  stopSnapshotFeed();
 
   dom.canvasContainer.style.display = 'none';
   dom.gridView.style.display = 'grid';

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<PrivacyMask version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<enabled>false</enabled>
+<normalizedScreenSize>
+<normalizedScreenWidth>704</normalizedScreenWidth>
+<normalizedScreenHeight>576</normalizedScreenHeight>
+</normalizedScreenSize>
+<PrivacyMaskRegionList version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+</PrivacyMaskRegionList>
+</PrivacyMask>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<EventTrigger version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>VMD-1</id>
+<eventType>VMD</eventType>
+<eventDescription>VMD Event trigger Information</eventDescription>
+<videoInputChannelID>1</videoInputChannelID>
+<dynVideoInputChannelID>1</dynVideoInputChannelID>
+<EventTriggerNotificationList>
+<EventTriggerNotification>
+<id>record-1</id>
+<notificationMethod>record</notificationMethod>
+<notificationRecurrence>beginning</notificationRecurrence>
+<videoInputID>1</videoInputID>
+<dynVideoInputID>1</dynVideoInputID>
+</EventTriggerNotification>
+<EventTriggerNotification>
+<id>IO-2</id>
+<notificationMethod>IO</notificationMethod>
+<notificationRecurrence>beginning</notificationRecurrence>
+<outputIOPortID>2</outputIOPortID>
+</EventTriggerNotification>
+<EventTriggerNotification>
+<id>FTP</id>
+<notificationMethod>FTP</notificationMethod>
+<notificationRecurrence>beginning</notificationRecurrence>
+</EventTriggerNotification>
+</EventTriggerNotificationList>
+</EventTrigger>
