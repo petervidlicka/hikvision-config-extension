@@ -1,6 +1,8 @@
-# Hikvision Config Extension
+# NVR Config Tool
 
 A lightweight Chrome extension designed to help you view live camera feeds and easily configure your Hikvision Network Video Recorder (NVR) directly from your browser.
+
+> An independent, unofficial tool. Not affiliated with, endorsed or sponsored by Hangzhou Hikvision Digital Technology Co., Ltd. "Hikvision" is a trademark of its owner and is used here only to describe which devices the tool works with.
 
 ## The Story Behind It
 
@@ -61,4 +63,4 @@ I haven't bothered adding other administrative functionality simply because I ne
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). Provided "as is", without warranty of any kind.
