@@ -2,6 +2,7 @@
  * Entry point of the config page (app.html).
  */
 
+import { parseDateKey } from '../lib/device-time.js';
 import { Isapi } from '../lib/isapi.js';
 import { bindCanvasEvents, redraw, resizeCanvas } from './canvas.js';
 import { connect, disconnect, handleAuthFailure, loadSavedCredentials } from './connection.js';
@@ -12,7 +13,7 @@ import { motionTool } from './tools/motion.js';
 import { privacyTool } from './tools/privacy.js';
 import { ToolRegistry, initToolRegistry, switchTool, toggleConfig } from './tools/registry.js';
 import { switchSection, switchToGridView, switchToLiveViewSingle, toggleMaximizeCell } from './views.js';
-import { setStreamType } from './feed.js';
+import { setStreamType, syncFeedsWithVisibility } from './feed.js';
 import { initialPlaybackState, renderTimeline, seekFromClick, setDate, setFilter, setSpeed, shiftDate, skip, togglePlay } from './playback.js';
 
 /** Wire up the page: buttons, keyboard shortcuts and window events. */
@@ -33,8 +34,8 @@ function bindAppEvents() {
   const dateInput = byId('pbDateInput', HTMLInputElement);
   byId('pbDateLabel').addEventListener('click', () => dateInput.showPicker());
   dateInput.addEventListener('change', () => {
-    const [y, m, d] = dateInput.value.split('-').map(Number);
-    if (y && m && d) setDate(new Date(y, m - 1, d));
+    const day = parseDateKey(dateInput.value);
+    if (day) setDate(day);
   });
   byId('pbFilter', HTMLSelectElement).addEventListener('change', (e) => {
     setFilter(/** @type {HTMLSelectElement} */ (e.target).value === 'events' ? 'events' : 'all');
@@ -73,6 +74,9 @@ function bindAppEvents() {
   dom.passInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') connect();
   });
+
+  // No live feed asks the device for frames while nobody can see them
+  document.addEventListener('visibilitychange', syncFeedsWithVisibility);
 
   window.addEventListener('resize', () => {
     resizeCanvas();

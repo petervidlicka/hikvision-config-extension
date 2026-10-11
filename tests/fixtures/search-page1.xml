@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic, camera-style (isapi.org namespace, std-cgi record types CMR and VideoMotion), for parsing record kinds the DS-7604NI never returns: it records on a schedule only ("timing"; see search-nvr-*.xml). -->
 <CMSearchResult version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
 <searchID>{C1A4C2D0-0000-0000-0000-000000000001}</searchID>
 <responseStatus>true</responseStatus>

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic, camera-style: notificationRecurrence on every entry, a relay of the device's own (IO-2, outputIOPortID), both input ids, and an FTP action the extension doesn't manage. The DS-7604NI stores no notificationRecurrence and has no relay of its own; its triggers are eventTrigger-nvr*.xml. -->
 <EventTrigger version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
 <id>VMD-1</id>
 <eventType>VMD</eventType>

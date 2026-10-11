@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<IOProxyOutputPortList version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<IOProxyOutputPort>
+<id>301</id>
+<IODescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<userName>admin</userName>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.4</ipAddress>
+<managePortNo>8000</managePortNo>
+<innerIOPortID>1</innerIOPortID>
+</IODescriptor>
+<PowerOnState>
+<defaultState>low</defaultState>
+<outputState>pulse</outputState>
+<pulseDuration>5000</pulseDuration>
+</PowerOnState>
+<name></name>
+</IOProxyOutputPort>
+<IOProxyOutputPort>
+<id>401</id>
+<IODescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<userName>admin</userName>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.3</ipAddress>
+<managePortNo>8000</managePortNo>
+<innerIOPortID>1</innerIOPortID>
+</IODescriptor>
+<PowerOnState>
+<defaultState>low</defaultState>
+<outputState>pulse</outputState>
+<pulseDuration>5000</pulseDuration>
+</PowerOnState>
+<name></name>
+</IOProxyOutputPort>
+</IOProxyOutputPortList>

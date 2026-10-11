@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic: a sparse day list whose ids aren't the days of the month, so parsing must read dayOfMonth, and a recorded day without recordType. The DS-7604NI lists every day of the month with id = dayOfMonth (calendar-nvr.xml). -->
 <trackDailyDistribution version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
 <dayList>
 <day><id>1</id><dayOfMonth>1</dayOfMonth><record>false</record></day>

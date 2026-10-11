@@ -2,16 +2,23 @@
  * Reading and editing the device config documents behind each tool.
  */
 import { describe, expect, it } from 'vitest';
-import { childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
+import { childElement, childElements, childText, parseXml, serializeXml } from '../../extension/lib/xml.js';
 import {
-  applyMotionConfig, applyNotificationMethods, decodeGridMap, encodeGridMap, applyPrivacyMask, privacyRegionList, readMotionCapabilities,
-  readMotionConfig, readNotificationMethods, readPrivacyMask, triggerNotifications,
+  DEFAULT_PRIVACY_SCREEN, alarmOutputNotification, applyMotionConfig, applyNotifications, decodeGridMap,
+  encodeGridMap, applyPrivacyMask, hasNotification, imageRectToPrivacy, imageToMotionRegion, lightAudioNotification,
+  mergeTargetTypes, methodNotification, motionEditMode, motionRegionToImage, privacyRegionList, privacyRegionToImage,
+  readAlarmOutputs, readLightAudioChannels, readMotionCapabilities, readMotionConfig, readMotionTriggerCap,
+  readNotificationMethods, readPrivacyMask, readSensitivityRange, recordNotification, resolveEventActions, snapSensitivity,
+  triggerNotifications,
 } from '../../extension/lib/config-xml.js';
 import { fixtures, motionFixtures } from './fixtures.js';
 
 /**
  * The regex-based motion save from v1.5.0. Its output was verified against
- * a real NVR, so the DOM-based save must produce the same document.
+ * a real NVR, so the DOM-based save must produce the same document — except
+ * that Dynamic Analysis now goes in <enableHighlight>, the motion field the
+ * NVR's web UI writes (v1.5.0 wrote enableDynamicAnalysis, which is face
+ * detection's and absent from motion documents).
  */
 function legacyMotionSave(rawXml, { enabled, sensitivity, dynamicAnalysis, regions }) {
   let regionListXml = `<RegionList size="${regions.length}">`;
@@ -30,9 +37,7 @@ function legacyMotionSave(rawXml, { enabled, sensitivity, dynamicAnalysis, regio
   xml = xml.replace(/<regionType>[^<]*<\/regionType>/, '<regionType>region</regionType>');
   xml = xml.replace(/<gridMap>([^<]*)<\/gridMap>/, (_, hex) => `<gridMap>${'0'.repeat(hex.length)}</gridMap>`);
   xml = xml.replace(/<RegionList[^>]*>[\s\S]*?<\/RegionList>/, regionListXml);
-  if (xml.includes('<enableDynamicAnalysis>')) {
-    xml = xml.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, `<enableDynamicAnalysis>${dynamicAnalysis}</enableDynamicAnalysis>`);
-  }
+  xml = xml.replace(/<enableHighlight>[^<]*<\/enableHighlight>/, `<enableHighlight>${dynamicAnalysis}</enableHighlight>`);
   return xml;
 }
 
@@ -43,9 +48,38 @@ const regionListMarkup = (xml) => /<RegionList[\s\S]*?<\/RegionList>/.exec(xml)[
 describe('motion detection', () => {
   it('reads the device document', () => {
     const md = readMotionConfig(parseXml(fixtures.motionDetection));
-    expect([md.enabled, md.sensitivity, md.dynamicAnalysis, md.detectHuman, md.detectVehicle])
-      .toEqual([true, 60, false, true, false]);
+    expect([md.enabled, md.sensitivity, md.dynamicAnalysis, md.supportsDynamicAnalysis, md.targetTypes])
+      .toEqual([true, 60, false, true, []]);
     expect(md.regions).toEqual([[{ x: 100, y: 900 }, { x: 600, y: 900 }, { x: 600, y: 300 }, { x: 100, y: 300 }]]);
+  });
+
+  it('reads the NVR’s document, Dynamic Analysis from enableHighlight', () => {
+    const md = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    expect([md.enabled, md.sensitivity, md.dynamicAnalysis, md.supportsDynamicAnalysis]).toEqual([true, 40, true, true]);
+    expect([md.targetTypes, md.detectHuman, md.detectVehicle]).toEqual([['human'], true, false]);
+    expect(md.regions).toEqual([[{ x: 651, y: 684 }, { x: 751, y: 701 }, { x: 952, y: 544 }, { x: 850, y: 147 }, { x: 616, y: 486 }]]);
+  });
+
+  it('shows Dynamic Analysis only when the document has enableHighlight', () => {
+    const without = fixtures.motionDetectionNvr.replace(/<enableHighlight>[^<]*<\/enableHighlight>\n/, '');
+    expect(readMotionConfig(parseXml(without)).supportsDynamicAnalysis).toBe(false);
+    // The face-detection field of a similar name is not the motion setting
+    const faceField = fixtures.motionDetectionNvr.replace(/enableHighlight/g, 'enableDynamicAnalysis');
+    expect(readMotionConfig(parseXml(faceField))).toMatchObject({ dynamicAnalysis: false, supportsDynamicAnalysis: false });
+  });
+
+  it('writes Dynamic Analysis to enableHighlight in either mode, never adding it', () => {
+    const base = { enabled: true, sensitivity: 40, regions: [] };
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    applyMotionConfig(doc, { ...base, dynamicAnalysis: false });
+    expect(serializeXml(doc)).toContain('<enableHighlight>false</enableHighlight>');
+    const grid = readMotionConfig(doc).grid;
+    applyMotionConfig(doc, { ...base, dynamicAnalysis: true, mode: 'grid', grid });
+    expect(serializeXml(doc)).toContain('<enableHighlight>true</enableHighlight>');
+
+    const without = parseXml(fixtures.motionDetectionNvr.replace(/<enableHighlight>[^<]*<\/enableHighlight>/, ''));
+    applyMotionConfig(without, { ...base, dynamicAnalysis: true });
+    expect(serializeXml(without)).not.toMatch(/enableHighlight|enableDynamicAnalysis/);
   });
 
   it('reads the target from layout targetType', () => {
@@ -80,6 +114,22 @@ describe('motion detection', () => {
     expect(serializeXml(doc)).toContain('<RegionList size="0"></RegionList>');
   });
 
+  it('saves fewer regions in the form that makes the NVR replace its list, not merge by id', () => {
+    const twoRegions = [
+      [{ x: 0, y: 1000 }, { x: 500, y: 1000 }, { x: 500, y: 0 }],
+      [{ x: 500, y: 1000 }, { x: 1000, y: 1000 }, { x: 1000, y: 0 }],
+    ];
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: true, regions: twoRegions });
+    applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: true, regions: twoRegions.slice(0, 1) });
+    const body = serializeXml(doc);
+    // regionType=region, a zeroed gridMap and RegionList@size are what the NVR needs to drop region 2
+    expect(body).toContain('<regionType>region</regionType>');
+    expect(body).toMatch(/<gridMap>0+<\/gridMap>/);
+    expect(regionListMarkup(body)).toMatch(/^<RegionList size="1"><Region xmlns=""><id>1<\/id>/);
+    expect(childElements(doc.getElementsByTagNameNS('*', 'RegionList')[0], 'Region')).toHaveLength(1);
+  });
+
   it('writes the detection target list', () => {
     const base = { enabled: true, sensitivity: 40, dynamicAnalysis: false, regions: [] };
     const doc = parseXml(fixtures.motionDetection);
@@ -97,6 +147,22 @@ describe('motion detection', () => {
     expect(serializeXml(doc)).toContain('</layout><targetType xmlns="">human</targetType></MotionDetectionLayout>');
   });
 
+  it('saves the ticked targets and keeps the ones the panel has no checkbox for, in the capabilities’ order', () => {
+    const caps = ['human', 'vehicle', 'nonMotorVehicle'];
+    expect(mergeTargetTypes(caps, ['nonMotorVehicle', 'human'], { human: false, vehicle: true })).toEqual(['vehicle', 'nonMotorVehicle']);
+    expect(mergeTargetTypes(caps, ['human'], { human: true, vehicle: true })).toEqual(['human', 'vehicle']);
+    expect(mergeTargetTypes(caps, [], { human: false, vehicle: false })).toEqual([]);
+    // A target the camera had on that its capabilities don't list goes last
+    expect(mergeTargetTypes(['human', 'vehicle'], ['animal', 'human'], { human: true, vehicle: true }))
+      .toEqual(['human', 'vehicle', 'animal']);
+
+    // Written back in place: what the panel didn't touch reads back the same
+    const doc = parseXml(fixtures.motionDetectionNvr.replace('<targetType>human</targetType>', '<targetType>nonMotorVehicle,human</targetType>'));
+    const targetTypes = mergeTargetTypes(caps, readMotionConfig(doc).targetTypes, { human: true, vehicle: false });
+    applyMotionConfig(doc, { enabled: true, sensitivity: 40, dynamicAnalysis: true, regions: [], targetTypes });
+    expect(serializeXml(doc)).toContain('<targetType>human,nonMotorVehicle</targetType>');
+  });
+
   it('reads NVR capabilities, with defaults when there are none', () => {
     expect(readMotionCapabilities(parseXml(fixtures.motionCapabilitiesNvr))).toEqual({
       regionTypes: ['grid', 'region'],
@@ -106,7 +172,177 @@ describe('motion detection', () => {
       sensitivity: { min: 0, max: 100, step: 20 },
       targetTypes: ['human', 'vehicle'],
     });
-    expect(readMotionCapabilities(null).maxRegions).toBe(4);
+    // Without capabilities, only the region limits of Hikvision's web UI; nothing else is assumed
+    expect(readMotionCapabilities(null)).toEqual({
+      regionTypes: [], maxRegions: 4, minPoints: 3, maxPoints: 10, sensitivity: null, targetTypes: [],
+    });
+  });
+
+  it('takes the sensitivity levels from the layout capabilities when the capabilities lack them', () => {
+    const layout = parseXml(fixtures.motionLayoutCapabilitiesNvr);
+    expect(readSensitivityRange(layout)).toEqual({ min: 0, max: 100, step: 20 });
+    expect(readMotionCapabilities(null, layout).sensitivity).toEqual({ min: 0, max: 100, step: 20 });
+    const withoutLevels = parseXml(fixtures.motionCapabilitiesNvr.replace(/<sensitivityLevel[^>]*>/, '<sensitivityLevel>'));
+    expect(readMotionCapabilities(withoutLevels).sensitivity).toBeNull();
+    expect(readMotionCapabilities(withoutLevels, layout)).toMatchObject({
+      regionTypes: ['grid', 'region'], sensitivity: { min: 0, max: 100, step: 20 },
+    });
+    // The capabilities' own levels come first
+    const own = parseXml(fixtures.motionCapabilitiesNvr.replace('step="20"', 'step="10"'));
+    expect(readMotionCapabilities(own, layout).sensitivity).toEqual({ min: 0, max: 100, step: 10 });
+    // Levels without a step take any whole number; without min or max they're unknown
+    expect(readSensitivityRange(parseXml('<L><sensitivityLevel min="0" max="5">3</sensitivityLevel></L>')))
+      .toEqual({ min: 0, max: 5, step: 1 });
+    expect(readSensitivityRange(parseXml('<L><sensitivityLevel max="100">3</sensitivityLevel></L>'))).toBeNull();
+    expect(readSensitivityRange(null)).toBeNull();
+  });
+
+  it('takes the layout’s own sensitivity levels before any other level in the document', () => {
+    // A per-region level earlier in the document, with other steps or none at all
+    const layoutLevels = '<MotionDetectionLayout><sensitivityLevel min="0" max="100" step="20">40</sensitivityLevel></MotionDetectionLayout>';
+    for (const earlier of ['<sensitivityLevel min="0" max="100">50</sensitivityLevel>', '<sensitivityLevel>3</sensitivityLevel>']) {
+      const caps = parseXml(`<MotionDetection><MotionDetectionRegionList><MotionDetectionRegion>${earlier}` +
+        `</MotionDetectionRegion></MotionDetectionRegionList>${layoutLevels}</MotionDetection>`);
+      expect(readSensitivityRange(caps)).toEqual({ min: 0, max: 100, step: 20 });
+    }
+    // The layout capabilities' root is the layout
+    expect(readSensitivityRange(parseXml('<MotionDetectionLayout><RegionList><sensitivityLevel min="0" max="5"/></RegionList>' +
+      '<sensitivityLevel min="0" max="100" step="20">40</sensitivityLevel></MotionDetectionLayout>'))).toEqual({ min: 0, max: 100, step: 20 });
+    // No levels in the layout: the first level elsewhere that states min and max
+    expect(readSensitivityRange(parseXml('<MotionDetection><A><sensitivityLevel>3</sensitivityLevel></A>' +
+      '<B><sensitivityLevel min="1" max="6"/></B></MotionDetection>'))).toEqual({ min: 1, max: 6, step: 1 });
+  });
+
+  it('takes the corners and targets from the layout capabilities when the capabilities can’t be read', () => {
+    expect(readMotionCapabilities(null, parseXml(fixtures.motionLayoutCapabilitiesNvr))).toEqual({
+      regionTypes: [], maxRegions: 4, minPoints: 4, maxPoints: 10, sensitivity: { min: 0, max: 100, step: 20 }, targetTypes: ['human', 'vehicle'],
+    });
+    // Layout capabilities that state none of them leave the defaults
+    expect(readMotionCapabilities(null, parseXml('<MotionDetectionLayout><sensitivityLevel>40</sensitivityLevel></MotionDetectionLayout>')))
+      .toEqual(readMotionCapabilities(null));
+  });
+
+  it('snaps a sensitivity to the nearest level the camera accepts', () => {
+    const levels = { min: 0, max: 100, step: 20 };
+    expect([0, 9, 10, 37, 50, 99, 140, -5].map(v => snapSensitivity(v, levels))).toEqual([0, 0, 20, 40, 60, 100, 100, 0]);
+    expect(snapSensitivity(3, { min: 1, max: 5, step: 2 })).toBe(3);
+  });
+
+  it('sends the stored sensitivity back unchanged when none is given', () => {
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    applyMotionConfig(doc, { enabled: true, dynamicAnalysis: true, regions: [] });
+    expect(serializeXml(doc)).toContain('<sensitivityLevel>40</sensitivityLevel>');
+  });
+
+  it('edits polygons where the camera offers them, else its grid, whatever regionType it stores', () => {
+    const nvr = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    const caps = readMotionCapabilities(parseXml(fixtures.motionCapabilitiesNvr));
+    expect(nvr.regionType).toBe('grid'); // as the DS-7604NI reads back after a polygon save
+    expect(motionEditMode(caps, nvr)).toBe('region');
+    expect(motionEditMode({ ...caps, regionTypes: ['grid'] }, nvr)).toBe('grid');
+  });
+
+  it('edits polygons only where the camera offers region and grid, and shows other regions read-only', () => {
+    const nvr = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    const caps = readMotionCapabilities(parseXml(fixtures.motionCapabilitiesNvr));
+    // Region without grid is the legacy ROI mode, whose scale isn't known for sure
+    expect(motionEditMode({ ...caps, regionTypes: ['region'] }, nvr)).toBe('readonly');
+    // Grid only, but the document has no grid to edit
+    const noGrid = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace(/<gridMap>[^<]*<\/gridMap>/, '')));
+    expect(motionEditMode({ ...caps, regionTypes: ['grid'] }, noGrid)).toBe('readonly');
+
+    // A document in another coordinate space than 0–1000
+    const roi = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace('<regionType>grid</regionType>',
+      '<regionType>region</regionType><normalizedScreenSize><normalizedScreenWidth>704</normalizedScreenWidth>' +
+      '<normalizedScreenHeight>576</normalizedScreenHeight></normalizedScreenSize>')));
+    expect(roi.screen).toEqual({ width: 704, height: 576 });
+    expect(motionEditMode(caps, roi)).toBe('readonly');
+    expect(motionEditMode(readMotionCapabilities(null), { ...roi, grid: null })).toBe('readonly');
+    // …but its grid is still the grid
+    expect(motionEditMode({ ...caps, regionTypes: ['grid'] }, roi)).toBe('grid');
+    // Declaring 1000 changes nothing; one dimension left out counts as 1000
+    const declared = (xml) => readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace('<regionType>grid</regionType>', xml)));
+    expect(motionEditMode(caps, declared('<normalizedScreenWidth>1000</normalizedScreenWidth><normalizedScreenHeight>1000</normalizedScreenHeight>')))
+      .toBe('region');
+    expect(declared('<normalizedScreenHeight>576</normalizedScreenHeight>').screen).toEqual({ width: 1000, height: 576 });
+    expect(nvr.screen).toBeNull();
+  });
+
+  it('shows regions of another coordinate space where they are, Y from the bottom', () => {
+    expect(motionRegionToImage([{ x: 0, y: 576 }, { x: 352, y: 144 }, { x: 800, y: -1 }], { width: 704, height: 576 }))
+      .toEqual([{ x: 0, y: 0 }, { x: 0.5, y: 0.75 }, { x: 1, y: 1 }]);
+  });
+
+  it('sends a read-only area back as loaded, with the other settings', () => {
+    const doc = parseXml(fixtures.motionDetectionNvr);
+    const area = (xml) => [/<regionType>[^<]*</, /<gridMap>[^<]*</, /<RegionList[\s\S]*<\/RegionList>/].map(re => re.exec(xml)?.[0]);
+    const before = area(serializeXml(doc));
+    applyMotionConfig(doc, {
+      mode: 'readonly', enabled: false, sensitivity: 60, dynamicAnalysis: false, targetTypes: ['vehicle'],
+      regions: [[{ x: 0, y: 0 }, { x: 1000, y: 0 }, { x: 1000, y: 1000 }]],
+    });
+    const body = serializeXml(doc);
+    expect(area(body)).toEqual(before);
+    for (const field of ['<enabled>false</enabled>', '<sensitivityLevel>60</sensitivityLevel>',
+      '<enableHighlight>false</enableHighlight>', '<targetType>vehicle</targetType>']) {
+      expect(body).toContain(field);
+    }
+  });
+
+  it('edits the grid when the capabilities can’t be read and the camera is in grid mode, as the web UI does', () => {
+    const none = readMotionCapabilities(null);
+    expect(motionEditMode(none, readMotionConfig(parseXml(fixtures.motionDetectionNvr)))).toBe('grid');
+    const noMode = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace(/<regionType>[^<]*<\/regionType>/, '')));
+    expect(noMode.regionType).toBeNull();
+    expect(motionEditMode(none, noMode)).toBe('grid');
+    // No grid in the document: polygons are all there is to edit
+    const noGrid = fixtures.motionDetectionNvr.replace(/<Grid>[\s\S]*?<\/Grid>/, '').replace(/<gridMap>[^<]*<\/gridMap>/, '');
+    expect(motionEditMode(none, readMotionConfig(parseXml(noGrid)))).toBe('region');
+  });
+
+  it('shows a camera in region mode read-only when the capabilities can’t be read, and sends its area back', () => {
+    // Polygons saved in region mode, by us or the web UI: regionType region, gridMap zeroed.
+    // The web UI would use its ROI editor here; editing the zeroed grid would switch the
+    // camera to grid mode with nowhere to detect
+    const gridMap = /<gridMap>([^<]*)<\/gridMap>/.exec(fixtures.motionDetectionNvr)?.[1] ?? '';
+    const inRegionMode = fixtures.motionDetectionNvr
+      .replace('<regionType>grid</regionType>', '<regionType>region</regionType>')
+      .replace(gridMap, '0'.repeat(gridMap.length));
+    const doc = parseXml(inRegionMode);
+    const md = readMotionConfig(doc);
+    expect(md.grid?.cells.flat().some(Boolean)).toBe(false);
+    expect(motionEditMode(readMotionCapabilities(null), md)).toBe('readonly');
+    // Nor a grid the camera doesn't use at all
+    const off = readMotionConfig(parseXml(fixtures.motionDetectionNvr.replace('<regionType>grid</regionType>', '<regionType>none</regionType>')));
+    expect(motionEditMode(readMotionCapabilities(null), off)).toBe('readonly');
+
+    applyMotionConfig(doc, { mode: 'readonly', enabled: false, dynamicAnalysis: true, regions: [] });
+    const body = serializeXml(doc);
+    expect(body).toContain('<regionType>region</regionType>');
+    expect(body).toContain(`<gridMap>${'0'.repeat(gridMap.length)}</gridMap>`);
+    expect(/<RegionList[\s\S]*<\/RegionList>/.exec(body)?.[0]).toBe(/<RegionList[\s\S]*<\/RegionList>/.exec(inRegionMode)?.[0]);
+    expect(body).toContain('<enabled>false</enabled>');
+  });
+});
+
+describe('motion region coordinates', () => {
+  it('measures Y from the bottom: positionY 1000 is the top of the picture', () => {
+    expect(motionRegionToImage([{ x: 0, y: 1000 }, { x: 250, y: 750 }, { x: 1000, y: 0 }]))
+      .toEqual([{ x: 0, y: 0 }, { x: 0.25, y: 0.25 }, { x: 1, y: 1 }]);
+    expect(imageToMotionRegion([{ x: 0, y: 0 }, { x: 0.25, y: 0.25 }, { x: 1, y: 1 }]))
+      .toEqual([{ x: 0, y: 1000 }, { x: 250, y: 750 }, { x: 1000, y: 0 }]);
+  });
+
+  it('gives back the device’s own coordinates for a region loaded and saved unchanged', () => {
+    const [region] = readMotionConfig(parseXml(fixtures.motionDetectionNvr)).regions;
+    expect(imageToMotionRegion(motionRegionToImage(region))).toEqual(region);
+  });
+
+  it('rounds to whole units and clamps to the picture', () => {
+    expect(imageToMotionRegion([{ x: 0.12345, y: 0.6789 }])).toEqual([{ x: 123, y: 321 }]);
+    // Dragged past the edges, or stored out of range
+    expect(imageToMotionRegion([{ x: -0.1, y: 1.2 }, { x: 1.5, y: -0.3 }])).toEqual([{ x: 0, y: 0 }, { x: 1000, y: 1000 }]);
+    expect(motionRegionToImage([{ x: -20, y: 1200 }])).toEqual([{ x: 0, y: 0 }]);
   });
 });
 
@@ -126,11 +362,10 @@ describe('motion grid (grid-only cameras)', () => {
     expect(encodeGridMap(decodeGridMap(deviceMap, 18, 22), 22)).toBe(deviceMap);
   });
 
-  it('reads the grid and dynamic-analysis support from the config', () => {
-    const md = readMotionConfig(parseXml(fixtures.motionDetection));
-    expect([md.regionType, md.grid?.rows, md.grid?.cols, md.supportsDynamicAnalysis]).toEqual(['grid', 18, 22, true]);
-    const nvr = readMotionConfig(parseXml(fixtures.motionDetection.replace(/<enableDynamicAnalysis>[^<]*<\/enableDynamicAnalysis>/, '')));
-    expect(nvr.supportsDynamicAnalysis).toBe(false);
+  it('reads the grid from the config', () => {
+    const md = readMotionConfig(parseXml(fixtures.motionDetectionNvr));
+    expect([md.regionType, md.grid?.rows, md.grid?.cols]).toEqual(['grid', 18, 22]);
+    expect(encodeGridMap(md.grid.cells, 22)).toBe(deviceMap);
   });
 
   it('saves only the grid in grid mode', () => {
@@ -147,38 +382,93 @@ describe('motion grid (grid-only cameras)', () => {
 });
 
 describe('privacy mask', () => {
-  it('returns only enabled regions', () => {
-    const pm = readPrivacyMask(parseXml(fixtures.privacyMask));
-    expect(pm.enabled).toBe(true);
-    expect(pm.regions).toHaveLength(1);
-    expect(pm.regions[0][2]).toEqual({ x: 110, y: 120 });
+  /** [id, enabled, maskType] of each region in the document */
+  const slotsOf = (doc) => childElements(privacyRegionList(doc), 'PrivacyMaskRegion')
+    .map(r => [childText(r, 'id'), childText(r, 'enabled'), childText(r, 'maskType')]);
+
+  it('shows every stored region with an area, whatever its own enabled flag', () => {
+    // The NVR reads every region back with enabled=false, yet masks it
+    const nvr = readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions));
+    expect(nvr.enabled).toBe(true);
+    expect(nvr.regions).toHaveLength(2);
+    expect(nvr.regions[0]).toContainEqual({ x: 176, y: 432 });
+
+    // An unused slot (no coordinates) isn't a mask
+    const camera = readPrivacyMask(parseXml(fixtures.privacyMask));
+    expect(camera.regions).toHaveLength(1);
+    expect(camera.regions[0][2]).toEqual({ x: 110, y: 120 });
   });
 
-  it('fills existing slots and keeps device fields', () => {
-    const doc = parseXml(fixtures.privacyMask);
-    applyPrivacyMask(doc, { enabled: true, rects: [{ x1: 1, y1: 2, x2: 3, y2: 4 }, { x1: 5, y1: 6, x2: 7, y2: 8 }] });
-    const regions = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
-    expect(regions.map(r => [childText(r, 'id'), childText(r, 'enabled'), childText(r, 'maskType')]))
-      .toEqual([['1', 'true', 'gray'], ['2', 'true', 'gray']]);
-    expect(readPrivacyMask(doc).regions[1]).toEqual([{ x: 5, y: 6 }, { x: 7, y: 6 }, { x: 7, y: 8 }, { x: 5, y: 8 }]);
-    expect(serializeXml(doc)).toContain('<normalizedScreenWidth>704</normalizedScreenWidth>');
+  describe('a bare region list', () => {
+    const ns = 'xmlns="http://www.isapi.org/ver20/XMLSchema"';
+    const region = (id, enabled, points) => `<PrivacyMaskRegion><id>${id}</id><enabled>${enabled}</enabled><RegionCoordinatesList>${
+      points.map(([x, y]) => `<RegionCoordinates><positionX>${x}</positionX><positionY>${y}</positionY></RegionCoordinates>`).join('')
+    }</RegionCoordinatesList></PrivacyMaskRegion>`;
+    const list = (...regions) => parseXml(`<PrivacyMaskRegionList ${ns}>${regions.join('')}</PrivacyMaskRegionList>`);
+    const box = [[0, 0], [50, 50]];
+
+    it('has no switch: its masks’ own flags say whether masking is on, and zero-area regions are skipped', () => {
+      // A zero-area region switched on masks nothing
+      const flat = readPrivacyMask(list(region(1, 'true', [[0, 0], [0, 0], [0, 0]]), region(2, 'false', [[10, 10], [90, 10], [90, 10]])));
+      expect([flat.enabled, flat.switchable, flat.regions]).toEqual([false, false, []]);
+      // Firmware that honours the per-region flag, with every mask stored off: shown off, not as masking
+      const off = readPrivacyMask(list(region(1, 'false', box), region(2, 'false', box)));
+      expect([off.enabled, off.switchable, off.regions.length]).toEqual([false, false, 2]);
+      expect(readPrivacyMask(list(region(1, 'false', box), region(2, 'true', box))).enabled).toBe(true);
+      expect(readPrivacyMask(parseXml(`<PrivacyMaskRegionList ${ns}/>`))).toEqual({ enabled: false, switchable: false, screen: null, regions: [] });
+    });
+
+    it('saves every mask switched on, whatever the switch it can’t write says', () => {
+      const rect = { x1: 1, y1: 2, x2: 3, y2: 4 };
+      for (const unused of /** @type {const} */ (['disable', 'remove'])) {
+        const doc = list(region(1, 'false', box), region(2, 'false', box), region(3, 'false', box));
+        applyPrivacyMask(doc, { enabled: false, rects: [rect, rect], unused });
+        expect(slotsOf(doc).map(([id, enabled]) => [id, enabled]), unused)
+          .toEqual(unused === 'disable' ? [['1', 'true'], ['2', 'true'], ['3', 'false']] : [['1', 'true'], ['2', 'true']]);
+        expect(childElement(doc.documentElement, 'enabled'), unused).toBeNull();
+        expect(readPrivacyMask(doc), unused).toMatchObject({ enabled: true, switchable: false });
+      }
+    });
   });
 
-  it('disables unused slots instead of deleting them', () => {
+  it('reads a full document’s switch, on or off', () => {
+    // A full document has the switch, on or off
+    expect(readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions))).toMatchObject({ enabled: true, switchable: true });
+    const switchedOff = fixtures.privacyMaskNvrRegions.replace('<enabled>true</enabled>', '<enabled>false</enabled>');
+    expect(readPrivacyMask(parseXml(switchedOff))).toMatchObject({ enabled: false, switchable: true });
+  });
+
+  it('rebuilds the list with exactly the new rectangles, as the web UI does', () => {
+    const doc = parseXml(fixtures.privacyMaskNvrRegions);
+    applyPrivacyMask(doc, { enabled: true, rects: [{ x1: 0, y1: 576, x2: 704, y2: 432 }] });
+    expect(slotsOf(doc)).toEqual([['1', 'true', null]]);
+    const body = serializeXml(doc);
+    expect(body).toMatch(new RegExp('<PrivacyMaskRegionList[^>]*><PrivacyMaskRegion><id>1</id><enabled>true</enabled>' +
+      '<RegionCoordinatesList><RegionCoordinates><positionX>0</positionX><positionY>576</positionY></RegionCoordinates>'));
+    expect(body).toContain('<normalizedScreenWidth>704</normalizedScreenWidth>');
+    expect(readPrivacyMask(doc).regions).toEqual([[{ x: 0, y: 576 }, { x: 704, y: 576 }, { x: 704, y: 432 }, { x: 0, y: 432 }]]);
+  });
+
+  it('writes the global switch into every region and keeps fields like maskType', () => {
     const doc = parseXml(fixtures.privacyMask);
-    applyPrivacyMask(doc, { enabled: false, rects: [] });
-    const regions = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
-    expect(regions.map(r => childText(r, 'enabled'))).toEqual(['false', 'false']);
+    const rect = { x1: 1, y1: 2, x2: 3, y2: 4 };
+    applyPrivacyMask(doc, { enabled: false, rects: [rect, rect, rect] });
+    expect(slotsOf(doc)).toEqual([['1', 'false', 'gray'], ['2', 'false', 'gray'], ['3', 'false', null]]);
     expect(childText(doc.documentElement, 'enabled')).toBe('false');
+    expect(serializeXml(doc)).not.toContain('xmlns=""');
+
+    applyPrivacyMask(doc, { enabled: true, rects: [] });
+    expect(slotsOf(doc)).toEqual([]);
   });
 
-  it('adds slots in the document namespace when the device has too few', () => {
-    const doc = parseXml(fixtures.privacyMask);
-    const rect = { x1: 0, y1: 0, x2: 10, y2: 10 };
-    applyPrivacyMask(doc, { enabled: true, rects: [rect, rect, rect] });
+  it('can disable and empty unused slots instead, for firmware that can’t delete regions', () => {
+    const doc = parseXml(fixtures.privacyMaskNvrRegions);
+    applyPrivacyMask(doc, { enabled: true, rects: [{ x1: 5, y1: 6, x2: 7, y2: 8 }], unused: 'disable' });
+    expect(slotsOf(doc)).toEqual([['1', 'true', null], ['2', 'false', null]]);
     const regions = childElements(privacyRegionList(doc), 'PrivacyMaskRegion');
-    expect(regions.map(r => childText(r, 'id'))).toEqual(['1', '2', '3']);
-    expect(serializeXml(doc)).not.toContain('xmlns=""');
+    expect(childElements(childElements(regions[1], 'RegionCoordinatesList')[0], 'RegionCoordinates')).toHaveLength(0);
+    // A disabled slot keeps no stale coordinates, so it can't reappear as a mask
+    expect(readPrivacyMask(doc).regions).toEqual([[{ x: 5, y: 6 }, { x: 7, y: 6 }, { x: 7, y: 8 }, { x: 5, y: 8 }]]);
   });
 
   it('uses the NVR’s declared screen size and fills an empty list', () => {
@@ -191,41 +481,267 @@ describe('privacy mask', () => {
   });
 });
 
+describe('privacy mask coordinates', () => {
+  const screen = DEFAULT_PRIVACY_SCREEN;
+
+  it('measures Y from the bottom: a region at positionY 432–576 is the top quarter', () => {
+    const top = [{ x: 0, y: 576 }, { x: 704, y: 576 }, { x: 704, y: 432 }, { x: 0, y: 432 }];
+    expect(privacyRegionToImage(top, screen)).toEqual({ x: 0, y: 0, w: 1, h: 0.25 });
+
+    // The NVR fixture: region 1 top-left, region 2 bottom-right
+    const [topLeft, bottomRight] = readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions)).regions;
+    expect(privacyRegionToImage(topLeft, screen)).toEqual({ x: 0, y: 0, w: 0.25, h: 0.25 });
+    expect(privacyRegionToImage(bottomRight, screen)).toEqual({ x: 0.75, y: 0.75, w: 0.25, h: 0.25 });
+  });
+
+  it('saves a rectangle at the top of the picture near positionY = screen height', () => {
+    expect(imageRectToPrivacy({ x: 0.1, y: 0, w: 0.5, h: 0.1 }, screen))
+      .toEqual({ x1: 70, y1: 576, x2: 422, y2: 518 });
+    expect(imageRectToPrivacy({ x: 0, y: 0.9, w: 1, h: 0.1 }, screen))
+      .toEqual({ x1: 0, y1: 58, x2: 704, y2: 0 });
+  });
+
+  it('round-trips, rounding to whole units and clamping to the screen', () => {
+    const rect = { x: 0.15, y: 0.14, w: 0.31, h: 0.33 };
+    const device = imageRectToPrivacy(rect, screen);
+    expect(Object.values(device).every(Number.isInteger)).toBe(true);
+    const corners = [{ x: device.x1, y: device.y1 }, { x: device.x2, y: device.y2 }];
+    const back = privacyRegionToImage(corners, screen);
+    for (const key of ['x', 'y', 'w', 'h']) expect(back[key]).toBeCloseTo(rect[key], 2);
+
+    // A stored region loaded and saved unchanged keeps the device's own coordinates
+    const [topLeft, bottomRight] = readPrivacyMask(parseXml(fixtures.privacyMaskNvrRegions)).regions;
+    expect(imageRectToPrivacy(privacyRegionToImage(topLeft, screen), screen)).toEqual({ x1: 0, y1: 576, x2: 176, y2: 432 });
+    expect(imageRectToPrivacy(privacyRegionToImage(bottomRight, screen), screen)).toEqual({ x1: 528, y1: 144, x2: 704, y2: 0 });
+
+    // Dragged past the edges of the picture
+    expect(imageRectToPrivacy({ x: -0.03, y: -0.03, w: 1.1, h: 1.1 }, screen)).toEqual({ x1: 0, y1: 576, x2: 704, y2: 0 });
+    expect(privacyRegionToImage([{ x: -50, y: 700 }, { x: 900, y: -5 }], screen)).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+  });
+
+  it('uses the document’s own screen size', () => {
+    const screen1080 = { width: 1920, height: 1080 };
+    expect(privacyRegionToImage([{ x: 960, y: 1080 }, { x: 1920, y: 540 }], screen1080)).toEqual({ x: 0.5, y: 0, w: 0.5, h: 0.5 });
+    expect(imageRectToPrivacy({ x: 0.5, y: 0, w: 0.5, h: 0.5 }, screen1080)).toEqual({ x1: 960, y1: 1080, x2: 1920, y2: 540 });
+  });
+});
+
+/** Each notification entry as "field=value …", in document order. */
+const entriesOf = (doc) => triggerNotifications(doc).map(n =>
+  Array.from(n.children, c => `${c.localName}=${c.textContent}`).join(' '));
+
 describe('event trigger notifications', () => {
-  const MANAGED = ['record', 'center', 'email', 'beep', 'IO', 'whiteLight', 'audio'];
   const methodsOf = (doc) => [...readNotificationMethods(doc)];
 
   it('lists every method', () => {
     expect(methodsOf(parseXml(fixtures.eventTrigger))).toEqual(['record', 'IO', 'FTP']);
   });
 
-  it('keeps unmanaged methods and existing settings', () => {
+  it('keeps unmanaged methods, other ports and existing settings', () => {
     const doc = parseXml(fixtures.eventTrigger);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['IO', 'center']), channelId: '1' });
-    const byMethod = Object.fromEntries(triggerNotifications(doc).map(n => [childText(n, 'notificationMethod'), n]));
-    expect(Object.keys(byMethod).sort()).toEqual(['FTP', 'IO', 'center']);
-    expect(childText(byMethod.IO, 'outputIOPortID')).toBe('2');
-    expect(childText(byMethod.IO, 'id')).toBe('IO-2');
+    applyNotifications(doc, [
+      { spec: recordNotification(doc, '1'), enabled: false },
+      { spec: alarmOutputNotification({ port: '1', field: 'outputIOPortID' }), enabled: false },
+      { spec: methodNotification('center'), enabled: true },
+    ]);
+    // Turning port 1 off leaves port 2's entry, which the user set up elsewhere
+    expect(entriesOf(doc)).toEqual([
+      'id=IO-2 notificationMethod=IO notificationRecurrence=beginning outputIOPortID=2',
+      'id=FTP notificationMethod=FTP notificationRecurrence=beginning',
+      'id=center notificationMethod=center notificationRecurrence=beginning',
+    ]);
     expect(childText(doc.documentElement, 'dynVideoInputChannelID')).toBe('1');
+  });
+
+  it('gives new entries notificationRecurrence only where the trigger’s own entries have it', () => {
+    // Camera-style trigger: every entry has it, so new ones copy it
+    const camera = parseXml(fixtures.eventTrigger);
+    applyNotifications(camera, [{ spec: methodNotification('email'), enabled: true }]);
+    expect(entriesOf(camera).at(-1)).toBe('id=email notificationMethod=email notificationRecurrence=beginning');
+
+    // The DS-7604NI stores none (and drops it on save): new entries look like its web UI's
+    const nvr = parseXml(fixtures.eventTriggerNvrVmd3);
+    const record = recordNotification(nvr, '3');
+    applyNotifications(nvr, [{ spec: record, enabled: false }]);
+    applyNotifications(nvr, [{ spec: record, enabled: true }]);
+    expect(entriesOf(nvr)).toEqual([
+      'id=center notificationMethod=center',
+      'id=record-3 notificationMethod=record dynVideoInputID=3',
+    ]);
   });
 
   it('addresses a new record entry the way the trigger does', () => {
     const doc = parseXml(fixtures.eventTrigger);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(), channelId: '3' });
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['record']), channelId: '3' });
-    const rec = triggerNotifications(doc).find(n => childText(n, 'notificationMethod') === 'record');
+    const record = recordNotification(doc, '3');
+    applyNotifications(doc, [{ spec: record, enabled: true }]);
+    const rec = triggerNotifications(doc).find(n => childText(n, 'id') === 'record-3');
     expect([childText(rec, 'videoInputID'), childText(rec, 'dynVideoInputID')]).toEqual(['3', '3']);
-    expect(methodsOf(doc)).toEqual(['FTP', 'record']);
   });
 
-  it('uses NVR conventions for new entries', () => {
+  it('records per channel: another channel’s record link neither reads as on nor gets removed', () => {
+    const ns = 'xmlns="http://www.isapi.org/ver20/XMLSchema"';
+    const doc = parseXml(`<EventTrigger ${ns}><id>VMD-1</id><eventType>VMD</eventType>` +
+      '<dynVideoInputChannelID>1</dynVideoInputChannelID><EventTriggerNotificationList>' +
+      '<EventTriggerNotification><id>record-2</id><notificationMethod>record</notificationMethod>' +
+      '<dynVideoInputID>2</dynVideoInputID></EventTriggerNotification></EventTriggerNotificationList></EventTrigger>');
+    const own = recordNotification(doc, '1');
+    expect(hasNotification(doc, own)).toBe(false);
+
+    applyNotifications(doc, [{ spec: own, enabled: true }]);
+    expect(entriesOf(doc)).toEqual([
+      'id=record-2 notificationMethod=record dynVideoInputID=2',
+      'id=record-1 notificationMethod=record dynVideoInputID=1',
+    ]);
+    expect(hasNotification(doc, own)).toBe(true);
+
+    applyNotifications(doc, [{ spec: own, enabled: false }]);
+    expect(entriesOf(doc)).toEqual(['id=record-2 notificationMethod=record dynVideoInputID=2']);
+  });
+
+  it('switches only its own alarm output port', () => {
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3Io301);
+    const port301 = alarmOutputNotification({ port: '301', field: 'dynOutputIOPortID' });
+    const port401 = alarmOutputNotification({ port: '401', field: 'dynOutputIOPortID' });
+    expect([hasNotification(doc, port301), hasNotification(doc, port401)]).toEqual([true, false]);
+
+    applyNotifications(doc, [{ spec: port301, enabled: false }, { spec: port401, enabled: true }]);
+    expect(entriesOf(doc)).toEqual([
+      'id=record-3 notificationMethod=record dynVideoInputID=3',
+      'id=center notificationMethod=center',
+      'id=IO-401 notificationMethod=IO dynOutputIOPortID=401',
+    ]);
+  });
+
+  it('reads the NVR’s light and speaker entries per channel', () => {
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3WhiteLight); // as the NVR stored its web UI's linkage
+    expect(hasNotification(doc, lightAudioNotification('whiteLightOut', '3'))).toBe(true);
+    expect(hasNotification(doc, lightAudioNotification('whiteLightOut', '4'))).toBe(false);
+    expect(hasNotification(doc, lightAudioNotification('audioOut', '3'))).toBe(false);
+  });
+});
+
+describe('event actions a device and channel offer', () => {
+  /** What the DS-7604NI offers, from its captured answers. */
+  const nvrSupport = () => ({
+    triggerCap: readMotionTriggerCap(parseXml(fixtures.triggersCapNvr)),
+    alarmOutputs: readAlarmOutputs(parseXml(fixtures.ioOutputsNvr), null),
+    whiteLightChannels: readLightAudioChannels(JSON.parse(fixtures.whiteLightAlarmChannelsNvr), 'WhiteLightAlarmList'),
+    audioChannels: readLightAudioChannels(JSON.parse(fixtures.audioAlarmChannelsNvr), 'AudioAlarmList'),
+  });
+  const reasons = (actions) => Object.fromEntries(Object.entries(actions).map(([key, a]) => [key, a.unavailable]));
+
+  it('reads the motion flags of triggersCap, and nothing when it has none', () => {
+    expect(readMotionTriggerCap(parseXml(fixtures.triggersCapNvr))).toEqual({
+      isSupportCenter: true, isSupportRecord: true, isSupportMonitorAlarm: true, isSupportBeep: true,
+      isSupportIO: true, isSupportEmail: true, isSupportAudioOut: true, isSupportWhiteLightOut: true,
+    });
+    const otherEventsOnly = '<EventTriggersCap><IOTriggerCap><isSupportIO>true</isSupportIO></IOTriggerCap></EventTriggersCap>';
+    expect(readMotionTriggerCap(parseXml(otherEventsOnly))).toBeNull();
+    expect(readMotionTriggerCap(null)).toBeNull();
+  });
+
+  it('lists the cameras’ relays, without the light and speaker pseudo outputs', () => {
+    const relays = [
+      { id: '301', type: 'digital', ipAddress: '192.168.254.4' },
+      { id: '401', type: 'digital', ipAddress: '192.168.254.3' },
+    ];
+    expect(readAlarmOutputs(parseXml(fixtures.ioOutputsNvr), null)).toEqual(relays);
+    expect(readAlarmOutputs(parseXml(fixtures.ioProxyOutputsNvr), 'digital')).toEqual(relays);
+
+    // A camera's own relay has no IOType; a switched-off analog output is left out
+    const own = '<IOOutputPortList><IOOutputPort><id>1</id></IOOutputPort>' +
+      '<IOOutputPort><id>9</id><IOUseType>disable</IOUseType><IOType>analogChannel</IOType></IOOutputPort></IOOutputPortList>';
+    expect(readAlarmOutputs(parseXml(own), 'local')).toEqual([{ id: '1', type: 'local', ipAddress: null }]);
+  });
+
+  it('reads which channels’ cameras have a light or a speaker', () => {
+    expect([...nvrSupport().whiteLightChannels]).toEqual(['3', '4']);
+    expect([...nvrSupport().audioChannels]).toEqual(['3', '4']);
+    expect(readLightAudioChannels(null, 'AudioAlarmList').size).toBe(0);
+    expect(readLightAudioChannels({ AudioAlarmList: 'none' }, 'AudioAlarmList').size).toBe(0);
+  });
+
+  it('points the NVR’s channel 3 at its own camera’s relay, light and speaker', () => {
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3);
+    const actions = resolveEventActions(doc, nvrSupport(), { id: '3', ipAddress: '192.168.254.4' });
+    expect(Object.values(reasons(actions)).every(r => r === null)).toBe(true);
+
+    applyNotifications(doc, Object.values(actions).map(a => ({ spec: a.spec, enabled: true })));
+    // Exactly the shapes the NVR's web UI writes and the device accepted
+    expect(entriesOf(doc)).toEqual([
+      'id=record-3 notificationMethod=record dynVideoInputID=3',
+      'id=center notificationMethod=center',
+      'id=email notificationMethod=email',
+      'id=beep notificationMethod=beep',
+      'id=IO-301 notificationMethod=IO dynOutputIOPortID=301',
+      'id=whiteLightOut-3 notificationMethod=whiteLightOut lightAudioOutID=3',
+      'id=audioOut-3 notificationMethod=audioOut lightAudioOutID=3',
+    ]);
+    expect(serializeXml(doc)).not.toMatch(/<notificationMethod>(whiteLight|audio)</);
+  });
+
+  it('disables the relay, light and speaker on a channel whose camera has none', () => {
+    const actions = resolveEventActions(parseXml(fixtures.eventTriggerNvr), nvrSupport(), { id: '1', ipAddress: '192.168.254.2' });
+    expect(reasons(actions)).toEqual({
+      record: null, center: null, email: null, beep: null,
+      IO: 'noAlarmOutput', whiteLight: 'noWhiteLight', audio: 'noSpeaker',
+    });
+    expect([actions.IO.spec, actions.whiteLight.spec, actions.audio.spec]).toEqual([null, null, null]);
+  });
+
+  it('offers only what triggersCap flags true for motion', () => {
+    const support = {
+      ...nvrSupport(),
+      triggerCap: { isSupportRecord: true, isSupportCenter: false, isSupportIO: true, isSupportWhiteLightOut: false },
+    };
+    const actions = resolveEventActions(parseXml(fixtures.eventTriggerNvrVmd3), support, { id: '3', ipAddress: '192.168.254.4' });
+    expect(reasons(actions)).toEqual({
+      record: null, center: 'notSupported', email: 'notSupported', beep: 'notSupported', IO: null,
+      whiteLight: 'notSupported',
+      audio: 'notSupported', // not named, on a device that names the other *Out flag
+    });
+    // An unsupported action still knows its entry, so its toggle can show the state
+    expect(actions.center.spec?.method).toBe('center');
+    expect(actions.audio.spec).toBeNull();
+  });
+
+  it('never falls back to a bare light or speaker method on a device naming either *Out flag', () => {
+    const { isSupportAudioOut, ...lightOnly } = nvrSupport().triggerCap;
+    expect(isSupportAudioOut).toBe(true);
+    const support = { ...nvrSupport(), triggerCap: lightOnly };
+    const doc = parseXml(fixtures.eventTriggerNvrVmd3);
+    const actions = resolveEventActions(doc, support, { id: '3', ipAddress: '192.168.254.4' });
+    expect(actions.whiteLight).toEqual({ spec: lightAudioNotification('whiteLightOut', '3'), unavailable: null });
+    // The DS-7604NI family fails the whole save on a bare "audio" entry
+    expect(actions.audio).toEqual({ spec: null, unavailable: 'notSupported' });
+  });
+
+  it('keeps the old behaviour on a device without triggersCap', () => {
+    const support = {
+      triggerCap: null, alarmOutputs: [{ id: '1', type: 'local', ipAddress: null }],
+      whiteLightChannels: new Set(), audioChannels: new Set(),
+    };
+    const doc = parseXml(fixtures.eventTrigger);
+    const actions = resolveEventActions(doc, support, { id: '1' });
+    expect(Object.values(reasons(actions)).every(r => r === null)).toBe(true);
+    expect([actions.IO.spec?.id, actions.whiteLight.spec?.method, actions.audio.spec?.method]).toEqual(['IO-1', 'whiteLight', 'audio']);
+
+    applyNotifications(doc, [{ spec: actions.IO.spec, enabled: true }]);
+    expect(entriesOf(doc).at(-1)).toBe('id=IO-1 notificationMethod=IO notificationRecurrence=beginning outputIOPortID=1');
+  });
+
+  it('falls back to the device’s own relay, and addresses every port by outputIOPortID when ports are unified', () => {
+    const alarmOutputs = [
+      { id: '301', type: 'digital', ipAddress: '192.168.254.4' },
+      { id: '1', type: 'local', ipAddress: null },
+    ];
     const doc = parseXml(fixtures.eventTriggerNvr);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['center']), channelId: '1' });
-    expect(methodsOf(doc)).toEqual(['center']);
-    applyNotificationMethods(doc, { managed: MANAGED, enabled: new Set(['center', 'record', 'IO']), channelId: '1' });
-    const find = (m) => triggerNotifications(doc).find(n => childText(n, 'notificationMethod') === m);
-    expect([childText(find('record'), 'id'), childText(find('record'), 'dynVideoInputID'), childText(find('record'), 'videoInputID')])
-      .toEqual(['record-1', '1', null]);
-    expect(childText(find('IO'), 'id')).toBe('IO-1');
+    const support = { ...nvrSupport(), alarmOutputs };
+    expect(resolveEventActions(doc, support, { id: '1', ipAddress: '192.168.254.2' }).IO.spec)
+      .toMatchObject({ id: 'IO-1', writeFields: ['outputIOPortID'] });
+
+    const unified = { ...support, triggerCap: { ...support.triggerCap, isSupportIOOutputUnify: true } };
+    expect(resolveEventActions(doc, unified, { id: '3', ipAddress: '192.168.254.4' }).IO.spec)
+      .toMatchObject({ id: 'IO-301', writeFields: ['outputIOPortID'] });
   });
 });

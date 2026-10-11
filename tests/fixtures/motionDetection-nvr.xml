@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<MotionDetection version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<enabled>true</enabled>
+<enableHighlight>true</enableHighlight>
+<samplingInterval>5</samplingInterval>
+<startTriggerTime>1000</startTriggerTime>
+<endTriggerTime>1000</endTriggerTime>
+<regionType>grid</regionType>
+<Grid>
+<rowGranularity>18</rowGranularity>
+<columnGranularity>22</columnGranularity>
+</Grid>
+<MotionDetectionLayout version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<sensitivityLevel>40</sensitivityLevel>
+<layout>
+<gridMap>0000000000000000000000000000000003c00003e00007f80007f80007f80003f80001f80001f00000f0000070000020000000000000</gridMap>
+<RegionList>
+<Region>
+<id>1</id>
+<RegionCoordinatesList>
+<RegionCoordinates>
+<positionX>651</positionX>
+<positionY>684</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>751</positionX>
+<positionY>701</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>952</positionX>
+<positionY>544</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>850</positionX>
+<positionY>147</positionY>
+</RegionCoordinates>
+<RegionCoordinates>
+<positionX>616</positionX>
+<positionY>486</positionY>
+</RegionCoordinates>
+</RegionCoordinatesList>
+</Region>
+</RegionList>
+</layout>
+<targetType>human</targetType>
+</MotionDetectionLayout>
+</MotionDetection>

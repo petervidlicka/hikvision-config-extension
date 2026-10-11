@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<InputProxyChannelList version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema" size="0">
+<InputProxyChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>1</id>
+<name>Kamera vchod</name>
+<sourceInputPortDescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.2</ipAddress>
+<managePortNo>8000</managePortNo>
+<srcInputPort>1</srcInputPort>
+<userName>admin</userName>
+<connMode>plugplay</connMode>
+<streamType>auto</streamType>
+<model>DS-2CD2347G2H-LIU</model>
+<firmwareVersion>V5.7.18 build 240826</firmwareVersion>
+</sourceInputPortDescriptor>
+<enableAnr>false</enableAnr>
+<enableTiming>true</enableTiming>
+</InputProxyChannel>
+<InputProxyChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>2</id>
+<name>Kamera vjezd</name>
+<sourceInputPortDescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.9</ipAddress>
+<managePortNo>8000</managePortNo>
+<srcInputPort>1</srcInputPort>
+<userName>admin</userName>
+<connMode>plugplay</connMode>
+<streamType>auto</streamType>
+<model>DS-2CD2347G2H-LIU</model>
+<firmwareVersion>V5.7.18 build 240826</firmwareVersion>
+</sourceInputPortDescriptor>
+<enableAnr>false</enableAnr>
+<enableTiming>true</enableTiming>
+</InputProxyChannel>
+<InputProxyChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>3</id>
+<name>Kamera garaz</name>
+<sourceInputPortDescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.4</ipAddress>
+<managePortNo>8000</managePortNo>
+<srcInputPort>1</srcInputPort>
+<userName>admin</userName>
+<connMode>plugplay</connMode>
+<streamType>auto</streamType>
+<model>DS-2CD2346G2-ISU/SL</model>
+<firmwareVersion>V5.5.800 build 210628</firmwareVersion>
+</sourceInputPortDescriptor>
+<enableAnr>false</enableAnr>
+<enableTiming>true</enableTiming>
+</InputProxyChannel>
+<InputProxyChannel version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>4</id>
+<name>Kamera skluzavka</name>
+<sourceInputPortDescriptor>
+<proxyProtocol>HIKVISION</proxyProtocol>
+<addressingFormatType>ipaddress</addressingFormatType>
+<ipAddress>192.168.254.3</ipAddress>
+<managePortNo>8000</managePortNo>
+<srcInputPort>1</srcInputPort>
+<userName>admin</userName>
+<connMode>plugplay</connMode>
+<streamType>auto</streamType>
+<model>DS-2CD2346G2-ISU/SL</model>
+<firmwareVersion>V5.5.113 build 210317</firmwareVersion>
+</sourceInputPortDescriptor>
+<enableAnr>false</enableAnr>
+<enableTiming>true</enableTiming>
+</InputProxyChannel>
+</InputProxyChannelList>
