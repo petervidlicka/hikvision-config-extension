@@ -12,7 +12,28 @@
   clicking through UI changes without a device. Run `npm run harness`.
 
   In the console, `mockDevice` exposes requests and saved XML; set
-  `mockDevice.rejectAuth = true` to simulate a password change on the device.
+  `mockDevice.rejectAuth = true` to simulate a password change on the device
+  (add `mockDevice.loginLock = {lockStatus: 'lock', unlockTime: 1800, retryLoginTime: 0}`
+  to see the lock message at Connect, or `mockDevice.activated = false` to see
+  the one for a device that hasn't been activated),
+  `mockDevice.unreachable = true` for a wrong IP address,
+  `mockDevice.offlineChannels = ['4']` before Connect to see a disconnected camera
+  (its feed shows "No signal"; set it while viewing a channel to see a camera
+  stop answering, and back to [] to see it recover),
+  `mockDevice.writeStatus = {statusCode: 7, statusString: 'Reboot Required', subStatusCode: 'rebootRequired'}`
+  for a save that needs a reboot, or add an error answer to
+  `mockDevice.failures` (see tests/support/mock-nvr.js).
+  Live snapshots are a cached still that changes once a second, like the
+  DS-7604NI's (the fps readout shows about 1), 704×576 with the 16:9 picture
+  squeezed in (its circle shows round when the aspect is right) and 1920×1088
+  in HD; set `mockDevice.fullSizeStill = null` before switching to HD for
+  firmware that ignores the requested size. Set
+  `mockDevice.snapshotRefreshMs = 0` for a camera that sends a new picture
+  for every request (about 3–5 fps), and switch to another tab and back to
+  see the feeds stop and resume in `mockDevice.requests`.
+  Playback finds the same recordings on every day. Its "Today" is the
+  device's: set `mockDevice.localTime = '2026-10-25T15:00:00+01:00'` before
+  Connect for a device on another date (here the day the clocks go back).
   Use host 192.168.0.108 and any password to connect.
 -->
 <script type="module">
@@ -25,6 +46,7 @@
 
   window.chrome = createChromeStub().chrome;
   const device = createMockNvr({ snapshotDelayMs: 300, realFetch: window.fetch.bind(window) });
+  device.snapshotRefreshMs = 1000;
   window.fetch = device.fetch;
   window.mockDevice = device;
 

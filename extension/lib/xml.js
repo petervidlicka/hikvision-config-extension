@@ -3,8 +3,10 @@
  *
  * Config is edited in place on the document the device returned, so fields
  * this extension doesn't know about survive a save untouched. Lookups match
- * on local name because ISAPI documents use a default namespace
- * (http://www.hikvision.com/ver20/XMLSchema) and some firmware mixes in
+ * on local name because the namespace varies by document, and within one:
+ * most use http://www.hikvision.com/ver20/XMLSchema, motion and privacy-mask
+ * documents use http://www.isapi.org/ver20/XMLSchema, list items can
+ * redeclare the other one, some answers have none, and some firmware mixes in
  * elements with an empty namespace.
  */
 
@@ -17,11 +19,20 @@ export const XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>';
  * @throws {Error} when the device returned something that isn't XML
  */
 export function parseXml(text) {
-  const doc = new DOMParser().parseFromString(text, 'application/xml');
-  if (doc.getElementsByTagName('parsererror').length > 0) {
-    throw new Error('Device returned malformed XML');
-  }
+  const doc = parseXmlOrNull(text);
+  if (!doc) throw new Error('Device returned malformed XML');
   return doc;
+}
+
+/**
+ * Parse an ISAPI response the caller can do without, e.g. an optional
+ * capabilities document: a body that isn't XML gives null, not an error.
+ * @param {string} text
+ * @returns {XMLDocument|null}
+ */
+export function parseXmlOrNull(text) {
+  const doc = new DOMParser().parseFromString(text, 'application/xml');
+  return doc.getElementsByTagName('parsererror').length > 0 ? null : doc;
 }
 
 /**

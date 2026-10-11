@@ -6,12 +6,15 @@
 /** @typedef {import('../lib/isapi.js').Channel} Channel */
 /** @typedef {import('../lib/config-xml.js').MotionCapabilities} MotionCapabilities */
 
-/** A point in canvas pixels. @typedef {{x: number, y: number}} CanvasPoint */
-/** A rectangle in canvas pixels. @typedef {{x: number, y: number, w: number, h: number}} CanvasRect */
+/** @typedef {import('../lib/shapes.js').ImagePoint} ImagePoint */
+/** @typedef {import('../lib/shapes.js').ImageRect} ImageRect */
+/** @typedef {import('./tools/registry.js').LoadOrigin} LoadOrigin */
 
 /**
  * Everything the page keeps between events. Tool fields are filled in by
  * each tool's initState() when the registry starts (see tools/registry.js).
+ * Shapes and pointer positions are fractions of the picture (lib/shapes.js),
+ * not canvas pixels, so a frame of another size doesn't move them.
  * @typedef {object} AppState
  * @property {DeviceConfig|null} config - connection details while connected
  * @property {boolean} connected
@@ -19,12 +22,11 @@
  * @property {string|null} activeChannel - id of the selected channel
  * @property {string|null} activeTool - id of the active config tool
  * @property {boolean} isDrawing - a privacy rectangle drag is in progress
- * @property {CanvasPoint|null} drawStart
- * @property {CanvasPoint|null} drawCurrent
- * @property {CanvasPoint|null} mousePos - last pointer position over the canvas
+ * @property {ImagePoint|null} drawStart
+ * @property {ImagePoint|null} drawCurrent
+ * @property {ImagePoint|null} mousePos - last pointer position over the canvas
  * @property {(() => void)|null} stopSnapshotFeed - stops the single-view loop
  * @property {'main'|'sub'} streamType - single view: main (HD) or sub (SD) stream
- * @property {number[]} frameTimes - when recent frames arrived, for the FPS readout
  * @property {'single'|'grid'} viewMode
  * @property {((() => void)|null)[]} gridFeedStops - per-cell loop stoppers
  * @property {(string|null)[]} gridCellChannels - channel id per grid cell
@@ -35,10 +37,11 @@
  * @property {AbortController|null} scanAbort - cancels a running network scan
  *
  * Motion detection tool
- * @property {{points: CanvasPoint[]}[]} motionRegions
- * @property {CanvasPoint[]} drawingPoints - corners of the polygon being drawn
+ * @property {{points: ImagePoint[]}[]} motionRegions
+ * @property {ImagePoint[]} drawingPoints - corners of the polygon being drawn
  * @property {MotionCapabilities} motionCaps - device limits, refreshed on load
- * @property {'region'|'grid'} motionMode - polygons, or cells for grid-only cameras
+ * @property {import('../lib/config-xml.js').MotionEditMode} motionMode - polygons, cells for grid-only
+ *   cameras, or the stored regions shown read-only (see motionEditMode)
  * @property {import('../lib/config-xml.js').MotionGrid|null} motionGrid - cells in grid mode
  * @property {boolean|null} gridPaintValue - while dragging in grid mode: painting (true) or erasing
  * @property {boolean} motionEnabled
@@ -47,18 +50,24 @@
  * @property {boolean} detectHuman
  * @property {boolean} detectVehicle
  * @property {XMLDocument|null} motionDoc - device XML from the last load
+ * @property {LoadOrigin|null} motionFrom - where motionDoc came from; saves go only there
  *
  * Privacy mask tool
  * @property {boolean} privacyEnabled
- * @property {CanvasRect[]} privacyRegions
+ * @property {boolean} privacySwitchable - privacyDoc has the global on/off switch; false for a bare region list
+ * @property {ImageRect[]} privacyRegions
  * @property {number} privacyNormW - device coordinate space width
  * @property {number} privacyNormH
  * @property {XMLDocument|null} privacyDoc
  * @property {string|null} privacyPath - URL the privacy config came from
+ * @property {LoadOrigin|null} privacyFrom - device and channel privacyDoc came from; saves go only there
  *
  * Event actions tool
  * @property {Record<string, boolean>} eventActions - enabled actions by key
  * @property {XMLDocument|null} eventTriggerDoc
+ * @property {LoadOrigin|null} eventTriggerFrom - where eventTriggerDoc came from; saves go only there
+ * @property {Record<import('../lib/config-xml.js').EventActionKey, import('../lib/config-xml.js').EventActionTarget>|null} eventActionTargets
+ *   - per action, the entry its toggle stands for on the loaded channel, or why it's unavailable
  */
 
 // Tool fields are added by initToolRegistry() before anything reads them,
@@ -76,7 +85,6 @@ export const state = /** @type {AppState} */ (/** @type {unknown} */ ({
   mousePos: null,
   stopSnapshotFeed: null,
   streamType: 'sub',
-  frameTimes: [],
   viewMode: 'single',
   gridFeedStops: [null, null, null, null],
   gridCellChannels: [null, null, null, null],

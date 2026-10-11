@@ -186,6 +186,7 @@ input::placeholder { color: #555568; }
   background: rgba(255,255,255,0.15);
   border-color: transparent;
 }
+.channel-item.offline { opacity: 0.5; }
 
 /* ── Tool Tabs ── */
 .tool-tabs {
@@ -261,6 +262,17 @@ input::placeholder { color: #555568; }
   max-width: 100%;
   max-height: 100%;
 }
+/*
+ * A frame whose pixels have another aspect than its camera's picture (an
+ * NVR's 704×576 still of a 16:9 camera), shown at the camera's aspect, as
+ * wide as fitStreamAspect() in src/feed.js says unless the page is narrower.
+ * The drawing canvas follows the displayed size.
+ */
+#videoFeed.stream-aspect {
+  width: var(--stream-width);
+  aspect-ratio: var(--stream-aspect);
+  object-fit: fill;
+}
 #drawCanvas {
   position: absolute;
   top: 0;
@@ -269,6 +281,26 @@ input::placeholder { color: #555568; }
   height: 100%;
   cursor: crosshair;
 }
+
+/* The live feed stopped delivering frames: say so, and dim the last frame as stale */
+.feed-overlay {
+  display: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2;
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-family: var(--mono);
+  font-size: 12px;
+  pointer-events: none;
+}
+.canvas-container.no-signal .feed-overlay { display: block; }
+.canvas-container.no-signal #videoFeed,
+.grid-cell.no-signal img.grid-feed { filter: grayscale(1) brightness(0.45); }
 
 .no-feed { text-align: center; color: var(--text-dim); }
 .no-feed .icon { font-size: 48px; margin-bottom: 12px; opacity: 0.3; }
@@ -321,6 +353,9 @@ input[type="range"]::-webkit-slider-thumb {
   border: 2px solid var(--bg);
   box-shadow: 0 0 0 1px var(--accent);
 }
+input[type="range"]:disabled { opacity: 0.45; }
+input[type="range"]:disabled::-webkit-slider-thumb { cursor: not-allowed; }
+.slider-note { margin-top: 4px; font-size: 11px; color: var(--text-dim); }
 
 .toggle-row {
   display: flex;
@@ -348,6 +383,10 @@ input[type="range"]::-webkit-slider-thumb {
   transition: transform 0.2s;
 }
 .toggle.on::after { transform: translateX(16px); }
+/* A switch this device or camera can't use (an event action, the privacy
+   mask switch); the row's title says why */
+.toggle-row.unavailable { opacity: 0.45; }
+.toggle-row.unavailable .toggle { cursor: not-allowed; }
 
 /* ── Notification Toast ── */
 .toast {
@@ -506,6 +545,7 @@ input[type="range"]::-webkit-slider-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
+  container-type: size; /* for sizing a frame shown at its camera's aspect */
 }
 .grid-cell img.grid-feed {
   position: absolute;
@@ -514,6 +554,13 @@ input[type="range"]::-webkit-slider-thumb {
   height: 100%;
   object-fit: contain;
   display: none;
+}
+/* A frame shown at its camera's aspect (see #videoFeed.stream-aspect): as big as fits, centred */
+.grid-cell img.grid-feed.stream-aspect {
+  margin: auto;
+  width: min(100cqw, 100cqh * var(--stream-aspect));
+  height: min(100cqh, 100cqw / var(--stream-aspect));
+  object-fit: fill;
 }
 .grid-cell img.grid-feed.loaded {
   display: block;
@@ -564,6 +611,16 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 12px;
   color: var(--text-dim);
   opacity: 0.5;
+}
+/* Over the cell's last frame, which is positioned */
+.grid-cell.no-signal .grid-no-feed {
+  position: relative;
+  z-index: 1;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  opacity: 1;
 }
 
 /* ── Network Scanner ── */
@@ -676,6 +733,11 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 11px;
   color: var(--text-dim);
   margin-top: 2px;
+}
+.scan-device-note {
+  font-size: 11px;
+  color: var(--warning);
+  margin-top: 4px;
 }
 
 /* "← Back to scan" link inside the login form */

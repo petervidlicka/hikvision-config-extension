@@ -1,38 +1,38 @@
 /**
- * Motion detection tool: draw polygon regions, sensitivity and targets.
+ * Motion detection tool: draw polygon regions (or mark grid cells on cameras
+ * without polygons), sensitivity and targets. Regions are kept as fractions
+ * of the picture (lib/shapes.js) and become device units only when saved.
+ * Which editor a camera gets, and what is kept as stored because the camera
+ * doesn't say, is decided in lib/config-xml.js (motionEditMode,
+ * readMotionCapabilities).
  */
 
-import { MOTION_COORDINATE_SCALE, applyMotionConfig, readMotionCapabilities, readMotionConfig } from '../../lib/config-xml.js';
+import {
+  applyMotionConfig, imageToMotionRegion, mergeTargetTypes, motionEditMode, motionRegionToImage, readMotionCapabilities,
+  readMotionConfig, snapSensitivity,
+} from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
+import { hasArea, isSimplePolygon, pixelDistance, pointInPolygon, toPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
-import { loadTool } from './registry.js';
-import { activeChannelInfo, errorMessage, setStatus, showToast } from '../ui.js';
+import { loadTool, saveTarget } from './registry.js';
+import { errorMessage, reportSaveFailed, reportSaved, setStatus, showToast } from '../ui.js';
 import { cloneXml } from '../../lib/xml.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL: Motion Detection (polygon region-based)
 // ═══════════════════════════════════════════════════════════════════════════
 
-/**
- * Check if a point is inside a polygon using ray casting.
- * @param {number} px
- * @param {number} py
- * @param {import('../state.js').CanvasPoint[]} points
- */
-export function pointInPolygon(px, py, points) {
-  let inside = false;
-  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-    const xi = points[i].x, yi = points[i].y;
-    const xj = points[j].x, yj = points[j].y;
-    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
 /** @typedef {import('./registry.js').Tool} Tool */
+
+/** Clicking this close to the first corner, in canvas pixels (screen pixels, see resizeCanvas), closes the polygon. */
+const CLOSE_DISTANCE_PX = 12;
+/** A click this close to the last corner, in canvas (screen) pixels, is the same corner again. */
+const SAME_CORNER_PX = 4;
+/** Why a region can't be closed or saved: Hikvision's web UI refuses such regions too. */
+const CROSSING_EDGES = 'Edges of a region must not cross';
+/** Why a region can't be closed: its corners all lie on one line (or one spot), so it covers nothing. */
+const NO_AREA = 'The corners of a region must not all lie on one line';
 
 /** @satisfies {Tool} */
 export const motionTool = {
@@ -48,6 +48,9 @@ export const motionTool = {
     <div class="slider-group">
       <label>Sensitivity <span id="sensitivityVal">40</span></label>
       <input type="range" id="sensitivitySlider" min="0" max="100" step="20" value="40" />
+      <div class="slider-note" id="sensitivityNote" style="display:none">
+        Kept as stored: this camera doesn’t list the levels it accepts.
+      </div>
     </div>
     <div class="toggle-row" id="dynamicAnalysisRow">
       <span>Dynamic Analysis</span>
@@ -65,6 +68,10 @@ export const motionTool = {
       <strong>Double-click</strong> or click near the start to close the shape.
       <strong>Right-click</strong> a region to delete it.
       Up to <span id="motionMaxRegions">4</span> regions, <span id="motionPointRange">4–10</span> corners each.
+    </div>
+    <div class="instructions" id="motionReadOnlyNote" style="display:none">
+      <span id="motionReadOnlyReason">Editing regions isn’t supported for this camera yet.</span>
+      Its regions are shown as stored, and saving keeps them as they are.
     </div>
     <div class="instructions" id="motionGridInstructions" style="display:none">
       This camera uses a detection grid.
@@ -103,6 +110,7 @@ export const motionTool = {
       detectHuman: false,
       detectVehicle: false,
       motionDoc: null, // device XML from the last load; saves edit a copy
+      motionFrom: null,
     };
   },
 
@@ -111,6 +119,7 @@ export const motionTool = {
     state.drawingPoints = [];
     state.motionGrid = null;
     state.motionDoc = null;
+    state.motionFrom = null;
   },
 
   draw(ctx, canvas) {
@@ -118,13 +127,16 @@ export const motionTool = {
       drawGrid(ctx, canvas);
       return;
     }
+    /** @param {import('../../lib/shapes.js').ImagePoint} p */
+    const px = p => toPixels(p, canvas);
     // Draw completed regions
     state.motionRegions.forEach((reg, i) => {
       if (reg.points.length < 3) return;
+      const points = reg.points.map(px);
       ctx.beginPath();
-      ctx.moveTo(reg.points[0].x, reg.points[0].y);
-      for (let p = 1; p < reg.points.length; p++) {
-        ctx.lineTo(reg.points[p].x, reg.points[p].y);
+      ctx.moveTo(points[0].x, points[0].y);
+      for (let p = 1; p < points.length; p++) {
+        ctx.lineTo(points[p].x, points[p].y);
       }
       ctx.closePath();
       ctx.fillStyle = 'rgba(74, 108, 247, 0.3)';
@@ -134,7 +146,7 @@ export const motionTool = {
       ctx.stroke();
 
       // Draw vertices
-      reg.points.forEach(p => {
+      points.forEach(p => {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 4, 0, Math.PI * 2);
         ctx.fillStyle = 'rgba(74, 108, 247, 0.9)';
@@ -142,8 +154,8 @@ export const motionTool = {
       });
 
       // Label
-      const cx = reg.points.reduce((s, p) => s + p.x, 0) / reg.points.length;
-      const cy = reg.points.reduce((s, p) => s + p.y, 0) / reg.points.length;
+      const cx = points.reduce((s, p) => s + p.x, 0) / points.length;
+      const cy = points.reduce((s, p) => s + p.y, 0) / points.length;
       ctx.fillStyle = 'rgba(74, 108, 247, 0.9)';
       ctx.font = 'bold 12px "JetBrains Mono", monospace';
       ctx.fillText(`Region ${i + 1}`, cx - 30, cy + 4);
@@ -151,7 +163,7 @@ export const motionTool = {
 
     // Draw in-progress polygon
     if (state.drawingPoints.length > 0) {
-      const pts = state.drawingPoints;
+      const pts = state.drawingPoints.map(px);
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       for (let p = 1; p < pts.length; p++) {
@@ -159,7 +171,8 @@ export const motionTool = {
       }
       // Line to current mouse position
       if (state.mousePos) {
-        ctx.lineTo(state.mousePos.x, state.mousePos.y);
+        const mouse = px(state.mousePos);
+        ctx.lineTo(mouse.x, mouse.y);
       }
       ctx.strokeStyle = 'rgba(74, 108, 247, 0.6)';
       ctx.lineWidth = 2;
@@ -181,6 +194,7 @@ export const motionTool = {
   },
 
   onMouseDown(pos, e) {
+    if (state.motionMode === 'readonly') return;
     if (state.motionMode === 'grid') {
       const cell = gridCellAt(pos);
       if (!cell || !state.motionGrid) return;
@@ -194,7 +208,7 @@ export const motionTool = {
     if (e.button === 2) {
       // Right-click: delete region under cursor
       for (let i = state.motionRegions.length - 1; i >= 0; i--) {
-        if (pointInPolygon(pos.x, pos.y, state.motionRegions[i].points)) {
+        if (pointInPolygon(pos, state.motionRegions[i].points)) {
           state.motionRegions.splice(i, 1);
           updateRegionList();
           redraw();
@@ -207,7 +221,7 @@ export const motionTool = {
     const pts = state.drawingPoints;
 
     // Clicking near the start vertex closes the polygon
-    if (pts.length >= 2 && Math.hypot(pos.x - pts[0].x, pos.y - pts[0].y) < 12) {
+    if (pts.length >= 2 && pixelDistance(pos, pts[0], dom.canvas) < CLOSE_DISTANCE_PX) {
       closePolygon();
       return;
     }
@@ -219,11 +233,14 @@ export const motionTool = {
 
     // The clicks of a double-click land on the same spot — don't add duplicate corners
     const last = pts[pts.length - 1];
-    if (last && Math.hypot(pos.x - last.x, pos.y - last.y) < 4) return;
+    if (last && pixelDistance(pos, last, dom.canvas) < SAME_CORNER_PX) return;
 
     pts.push({ x: pos.x, y: pos.y });
     if (pts.length >= state.motionCaps.maxPoints) {
-      closePolygon();
+      // The last corner allowed closes the region; one that makes its edges
+      // cross is taken back, so another can go in its place
+      if (!closePolygon()) pts.pop();
+      redraw();
       return;
     }
     redraw();
@@ -252,23 +269,28 @@ export const motionTool = {
   },
 
   onDblClick(pos, e) {
-    if (state.drawingPoints.length > 0) closePolygon();
+    // Only when the double-click's own corner went in: at the corner limit,
+    // one that would make the edges cross is taken back, and the region then
+    // stays open rather than closing without the corner the user placed
+    const last = state.drawingPoints[state.drawingPoints.length - 1];
+    if (last && pixelDistance(pos, last, dom.canvas) < SAME_CORNER_PX) closePolygon();
   },
 
-  async load() {
-    if (!state.config || !state.activeChannel) return;
-    const channel = activeChannelInfo();
+  async load({ from, stale }) {
+    const { config, channel } = from;
     setStatus('Loading motion detection config...');
     try {
-      const [doc, capsDoc] = await Promise.all([
-        Isapi.getXml(state.config, Isapi.motionDetectionPath(channel)),
-        Isapi.getMotionCapabilities(state.config, channel),
+      const [doc, caps] = await Promise.all([
+        Isapi.getXml(config, Isapi.motionDetectionPath(channel)),
+        Isapi.getMotionLimits(config, channel),
       ]);
+      // The newer load, or the channel moved on to, fills the panel
+      if (stale()) return;
       state.motionDoc = doc;
-      state.motionCaps = readMotionCapabilities(capsDoc);
+      state.motionFrom = from;
+      state.motionCaps = caps;
       const md = readMotionConfig(doc);
-      // Polygons whenever the device supports them, as Hikvision's own UI does
-      state.motionMode = state.motionCaps.regionTypes.includes('region') || !md.grid ? 'region' : 'grid';
+      state.motionMode = motionEditMode(caps, md);
       state.motionGrid = md.grid ? { ...md.grid, cells: md.grid.cells.map(row => [...row]) } : null;
       applyCapabilities();
       byId('dynamicAnalysisRow').style.display = md.supportsDynamicAnalysis ? '' : 'none';
@@ -278,18 +300,14 @@ export const motionTool = {
 
       if (md.sensitivity !== null) {
         state.sensitivity = md.sensitivity;
-        byId('sensitivitySlider', HTMLInputElement).value = String(md.sensitivity);
+        const slider = byId('sensitivitySlider', HTMLInputElement);
+        // Room for a stored level off the usual scale, when the camera gives none
+        if (!caps.sensitivity) slider.max = String(Math.max(100, md.sensitivity));
+        slider.value = String(md.sensitivity);
         byId('sensitivityVal').textContent = String(md.sensitivity);
       }
 
-      // Device coordinates are 0–1000 with Y=0 at the bottom; the canvas has Y=0 at the top
-      const scale = MOTION_COORDINATE_SCALE;
-      state.motionRegions = md.regions.map(points => ({
-        points: points.map(p => ({
-          x: (p.x / scale) * dom.canvas.width,
-          y: (1 - p.y / scale) * dom.canvas.height,
-        })),
-      }));
+      state.motionRegions = md.regions.map(points => ({ points: motionRegionToImage(points, md.screen) }));
       state.drawingPoints = [];
 
       state.dynamicAnalysis = md.dynamicAnalysis;
@@ -302,35 +320,44 @@ export const motionTool = {
       updateRegionList();
       redraw();
       showToast('Motion detection config loaded', 'success');
-      setStatus('Config loaded', `Channel ${state.activeChannel}`);
+      setStatus('Config loaded', `Channel ${channel.id}`);
     } catch (err) {
+      if (stale()) return;
       showToast('Failed to load motion config: ' + errorMessage(err), 'error');
       setStatus('Failed to load config');
     }
   },
 
   async save() {
-    if (!state.config || !state.activeChannel) return;
-    if (!state.motionDoc) {
-      showToast('Load the settings from the device before saving', 'error');
-      return;
-    }
+    const loaded = state.motionDoc;
+    const from = saveTarget(loaded ? state.motionFrom : null);
+    if (!loaded || !from) return;
     const caps = state.motionCaps;
     if (state.drawingPoints.length > 0) {
       showToast('Finish or cancel (Esc) the region you are drawing first', 'error');
       return;
     }
 
-    // Snap to the device's sensitivity steps (e.g. 0, 20, … 100)
-    const { min, max, step } = caps.sensitivity;
-    const rawSensitivity = Number(byId('sensitivitySlider', HTMLInputElement).value);
-    const sensitivity = Math.min(max, Math.max(min, min + Math.round((rawSensitivity - min) / step) * step));
+    // Regions loaded from the device are checked here; drawn ones were when they closed
+    const regions = state.motionRegions.map(reg => imageToMotionRegion(reg.points));
+    const invalid = regions.findIndex(points => !isSimplePolygon(points));
+    if (state.motionMode === 'region' && invalid >= 0) {
+      const n = invalid + 1;
+      showToast(hasArea(regions[invalid])
+        ? `${CROSSING_EDGES}: redraw region ${n} before saving`
+        : `Region ${n} has no area: delete or redraw it before saving`, 'error');
+      return;
+    }
 
-    const scale = MOTION_COORDINATE_SCALE;
-    /** @param {number} v - fraction of the image, 0–1 */
-    const toDevice = v => Math.min(scale, Math.max(0, Math.round(v * scale)));
+    // Snap to the device's sensitivity steps (e.g. 0, 20, … 100). Without
+    // them the slider is locked and the stored level goes back as loaded:
+    // snapping it to a guessed step could change it unasked.
+    const sensitivity = caps.sensitivity
+      ? snapSensitivity(Number(byId('sensitivitySlider', HTMLInputElement).value), caps.sensitivity)
+      : undefined;
+
     // Edit a copy so a failed save leaves the loaded config intact
-    const doc = cloneXml(state.motionDoc);
+    const doc = cloneXml(loaded);
 
     setStatus('Saving motion detection config...');
     try {
@@ -340,23 +367,22 @@ export const motionTool = {
         enabled: state.motionEnabled,
         sensitivity,
         dynamicAnalysis: state.dynamicAnalysis,
-        // Flip Y back to the device convention (Y=0 at the bottom)
-        regions: state.motionRegions.map(reg => reg.points.map(p => ({
-          x: toDevice(p.x / dom.canvas.width),
-          y: toDevice(1 - p.y / dom.canvas.height),
-        }))),
+        regions,
         targetTypes: caps.targetTypes.length
-          ? caps.targetTypes.filter(t => (t === 'human' && state.detectHuman) || (t === 'vehicle' && state.detectVehicle))
+          ? mergeTargetTypes(caps.targetTypes, readMotionConfig(loaded).targetTypes, {
+            human: state.detectHuman, vehicle: state.detectVehicle,
+          })
           : undefined,
       });
 
-      await Isapi.putXml(state.config, Isapi.motionDetectionPath(activeChannelInfo()), doc);
-      state.motionDoc = doc;
-      showToast('Motion detection saved successfully!', 'success');
-      setStatus('Config saved', `Channel ${state.activeChannel}`);
+      const result = await Isapi.putXml(from.config, Isapi.motionDetectionPath(from.channel), doc);
+      // Only while the panel still holds what this save started from: after
+      // a switch it holds another channel's settings, which its next save
+      // must not mix with this channel's document
+      if (state.motionDoc === loaded) state.motionDoc = doc;
+      reportSaved('Motion detection', result, from.channel.id);
     } catch (err) {
-      showToast('Failed to save: ' + errorMessage(err), 'error');
-      setStatus('Save failed');
+      reportSaveFailed('motion detection', err, from.channel.id);
     }
   },
 
@@ -398,14 +424,15 @@ export const motionTool = {
 
 };
 
-/** Render the region list in the sidebar. */
+/** Render the region list in the sidebar; read-only regions can't be deleted. */
 function updateRegionList() {
   const list = byId('motionRegionList');
   if (!list) return;
+  const editable = state.motionMode !== 'readonly';
   list.innerHTML = state.motionRegions.map((r, i) => `
     <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:12px;font-family:var(--mono)">
       <span style="color:var(--text-dim)">Region ${i + 1} (${r.points.length} pts)</span>
-      <button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete-motion="${i}">x</button>
+      ${editable ? `<button class="btn btn-danger" style="padding:2px 8px;font-size:10px" data-delete-motion="${i}">x</button>` : ''}
     </div>
   `).join('');
 
@@ -420,49 +447,74 @@ function updateRegionList() {
 }
 
 /**
- * Finish the polygon being drawn. Too few corners keeps it open — the
- * device rejects regions below its minimum.
+ * Finish the polygon being drawn. It stays open, to be finished another way
+ * or cancelled (Esc), when it has too few corners (the device rejects
+ * regions below its minimum), covers no area, or its edges cross, checked
+ * in the device units it will be saved in.
+ * @returns {boolean} whether it closed
  */
 function closePolygon() {
   const { minPoints } = state.motionCaps;
   if (state.drawingPoints.length < minPoints) {
     showToast(`A detection region needs at least ${minPoints} corners`, 'error');
-    return;
+    return false;
+  }
+  const corners = imageToMotionRegion(state.drawingPoints);
+  if (!isSimplePolygon(corners)) {
+    showToast(hasArea(corners) ? CROSSING_EDGES : NO_AREA, 'error');
+    return false;
   }
   state.motionRegions.push({ points: [...state.drawingPoints] });
   state.drawingPoints = [];
   updateRegionList();
   redraw();
+  return true;
 }
 
-/** Apply the device's limits to the panel controls. */
+/**
+ * Apply the device's limits to the panel controls. A camera that doesn't
+ * say which sensitivity levels it accepts gets the slider locked (see
+ * setToolPanelLoading) with a note, as Hikvision's web UI hides it.
+ */
 function applyCapabilities() {
   const caps = state.motionCaps;
   const slider = byId('sensitivitySlider', HTMLInputElement);
-  slider.min = String(caps.sensitivity.min);
-  slider.max = String(caps.sensitivity.max);
-  slider.step = String(caps.sensitivity.step);
+  const range = caps.sensitivity;
+  slider.min = String(range?.min ?? 0);
+  slider.max = String(range?.max ?? 100);
+  slider.step = range ? String(range.step) : 'any';
+  slider.dataset.locked = String(!range);
+  slider.disabled = !range;
+  byId('sensitivityNote').style.display = range ? 'none' : '';
   byId('motionMaxRegions').textContent = String(caps.maxRegions);
   byId('motionPointRange').textContent = `${caps.minPoints}–${caps.maxPoints}`;
   byId('detectHumanLabel').style.display = caps.targetTypes.includes('human') ? '' : 'none';
   byId('detectVehicleLabel').style.display = caps.targetTypes.includes('vehicle') ? '' : 'none';
   byId('targetDetectionRow').style.display = caps.targetTypes.length ? '' : 'none';
-  const grid = state.motionMode === 'grid';
-  byId('motionRegionInstructions').style.display = grid ? 'none' : '';
-  byId('motionGridInstructions').style.display = grid ? '' : 'none';
-  byId('motionRegionList').style.display = grid ? 'none' : '';
+  const mode = state.motionMode;
+  byId('motionRegionInstructions').style.display = mode === 'region' ? '' : 'none';
+  byId('motionGridInstructions').style.display = mode === 'grid' ? '' : 'none';
+  byId('motionReadOnlyNote').style.display = mode === 'readonly' ? '' : 'none';
+  // Without capabilities this may be a passing failure (the DS-7604NI answers 503 now and then)
+  byId('motionReadOnlyReason').textContent = caps.regionTypes.length
+    ? 'Editing regions isn’t supported for this camera yet.'
+    : 'The camera didn’t say how its regions can be edited: Load from Device to ask again.';
+  byId('motionRegionList').style.display = mode === 'grid' ? 'none' : '';
+  // Nothing to clear when the regions can't be edited
+  const clearGroup = byId('clearMotionRegionsBtn').parentElement;
+  if (clearGroup) clearGroup.style.display = mode === 'readonly' ? 'none' : '';
 }
 
 /**
- * The grid cell under a canvas position, or null outside the grid.
- * @param {import('../state.js').CanvasPoint} pos
+ * The grid cell under a point on the picture, or null outside the grid.
+ * @param {import('../../lib/shapes.js').ImagePoint} pos
  * @returns {{row: number, col: number}|null}
  */
 function gridCellAt(pos) {
   const grid = state.motionGrid;
   if (!grid) return null;
-  const col = Math.floor((pos.x / dom.canvas.width) * grid.cols);
-  const row = Math.floor((pos.y / dom.canvas.height) * grid.rows);
+  const col = Math.floor(pos.x * grid.cols);
+  const row = Math.floor(pos.y * grid.rows);
   return row >= 0 && row < grid.rows && col >= 0 && col < grid.cols ? { row, col } : null;
 }
 

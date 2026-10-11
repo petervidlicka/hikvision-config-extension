@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <MotionDetection version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<!-- Synthetic, kept for shapes the DS-7604NI capture (motionDetection-nvr.xml) lacks: the hikvision.com namespace (the DS-7604NI writes motion in isapi.org), and an empty target type written with xmlns="" as the web UI writes a new one. Its grid (the top four rows) is independent of its region; the DS-7604NI stores the cells its polygons overlap instead, and reads back regionType grid after any save. -->
 <enabled>true</enabled>
 <enableHighlight>false</enableHighlight>
 <samplingInterval>2</samplingInterval>
@@ -28,9 +29,4 @@
 </layout>
 <targetType xmlns=""></targetType>
 </MotionDetectionLayout>
-<enableDynamicAnalysis>false</enableDynamicAnalysis>
-<TargetDetection>
-<detectionTarget><targetType>human</targetType><enabled>true</enabled></detectionTarget>
-<detectionTarget><targetType>vehicle</targetType><enabled>false</enabled></detectionTarget>
-</TargetDetection>
 </MotionDetection>

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<EventTrigger version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<id>VMD-3</id>
+<eventType>VMD</eventType>
+<dynVideoInputChannelID>3</dynVideoInputChannelID>
+<EventTriggerNotificationList version="2.0" xmlns="http://www.isapi.org/ver20/XMLSchema">
+<EventTriggerNotification>
+<id>IO-301</id>
+<notificationMethod>IO</notificationMethod>
+<dynOutputIOPortID>301</dynOutputIOPortID>
+</EventTriggerNotification>
+<EventTriggerNotification>
+<id>record-3</id>
+<notificationMethod>record</notificationMethod>
+<dynVideoInputID>3</dynVideoInputID>
+</EventTriggerNotification>
+<EventTriggerNotification>
+<id>center</id>
+<notificationMethod>center</notificationMethod>
+</EventTriggerNotification>
+</EventTriggerNotificationList>
+</EventTrigger>

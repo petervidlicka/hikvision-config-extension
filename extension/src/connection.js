@@ -3,7 +3,11 @@
  * connection details.
  */
 
-import { Isapi } from '../lib/isapi.js';
+import { applyStreamSizes } from '../lib/channels.js';
+import { NOT_ACTIVATED_MESSAGE, checkActivation } from '../lib/device-probe.js';
+import { AuthError, forgetDigestSessions } from '../lib/digest-auth.js';
+import { NetworkError } from '../lib/errors.js';
+import { Isapi, TIMEOUT_MS } from '../lib/isapi.js';
 import { clearFrame, stopAllGridFeeds, stopSnapshotFeed } from './feed.js';
 import { showConnectionForm, showScanIntro } from './scan.js';
 import { dom, state } from './state.js';
@@ -16,24 +20,38 @@ import { resetPlayback } from './playback.js';
  * The device rejected our credentials mid-session (password changed, device
  * reset, account locked). Stop every feed immediately — each further request
  * counts as a failed login and Hikvision locks the account after a few.
+ *
+ * A lock isn't the password's fault (the right one is refused too until it
+ * lifts), so the password stays and the message says how long to wait.
+ * @param {AuthError} err
  */
-export function handleAuthFailure() {
+export function handleAuthFailure(err) {
   if (!state.connected) return;
   disconnect();
   showConnectionForm();
+  if (err.locked) {
+    showToast(err.message, 'error');
+    return;
+  }
   dom.passInput.value = '';
-  showToast('The device rejected the login. Re-enter the password to reconnect.', 'error');
+  showToast(err.attemptsLeft !== undefined
+    ? `${err.message}. Re-enter the password to reconnect.`
+    : 'The device rejected the login. Re-enter the password to reconnect.', 'error');
 }
 // ─── Connection ─────────────────────────────────────────────────────────────
 
 export async function connect() {
   const host = dom.hostInput.value.trim();
-  const port = dom.portInput.value.trim() || '80';
+  const port = readPort(dom.portInput.value);
   const username = dom.userInput.value.trim();
   const password = dom.passInput.value;
 
   if (!host || !username || !password) {
     showToast('Please fill in all connection fields', 'error');
+    return;
+  }
+  if (port === null) {
+    showToast('The port must be a number from 1 to 65535 (80 when left empty)', 'error');
     return;
   }
 
@@ -51,14 +69,14 @@ export async function connect() {
     return;
   }
 
-  state.config = { host, port: parseInt(port), username, password };
+  state.config = { host, port, username, password };
   dom.connectBtn.innerHTML = '<span class="loading"></span> Connecting...';
   dom.connectBtn.disabled = true;
   setStatus('Connecting to ' + host + '...');
 
   try {
     const dev = await Isapi.getDeviceInfo(state.config);
-    saveConnectionDetails(host, port, username, password);
+    saveConnectionDetails(host, String(port), username, password);
 
     state.connected = true;
     dom.statusDot.classList.add('connected');
@@ -74,12 +92,75 @@ export async function connect() {
 
     await loadChannels();
   } catch (err) {
-    showToast('Connection failed: ' + errorMessage(err), 'error');
+    showToast('Connection failed: ' + await connectFailureMessage(err, host, port), 'error');
     setStatus('Connection failed');
     dom.statusDot.classList.remove('connected');
   } finally {
     dom.connectBtn.disabled = false;
     if (dom.connectBtn.querySelector('.loading')) dom.connectBtn.textContent = 'Connect';
+  }
+}
+
+/**
+ * The port in the connection form, read as logins always have: an empty
+ * field is 80, and leading digits count ("80a" is 80). Read once, so the
+ * login, the activation check and the messages all use the same number.
+ * @param {string} text
+ * @returns {number|null} null when it isn't a port
+ */
+function readPort(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return 80;
+  const port = parseInt(trimmed, 10);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : null;
+}
+
+/**
+ * Why Connect failed, in words the user can act on. When nothing answers at
+ * all (refused, unreachable or timed out), the address is almost always
+ * wrong, so say which address was tried. When the device refuses the login,
+ * it may not have been activated yet: then no password works, so asking for
+ * another would only cost failed logins. The device is asked without a
+ * login, which costs no attempt. That is asked whatever the device said
+ * about the rejection, since a lock is kept per computer, not per account,
+ * so a device that isn't activated may count attempts too.
+ * @param {unknown} err
+ * @param {string} host
+ * @param {number} port
+ * @returns {Promise<string>}
+ */
+async function connectFailureMessage(err, host, port) {
+  if (err instanceof NetworkError) return `No response from ${host}:${port} — check the IP address and port`;
+  if (err instanceof AuthError && await isNotActivated(host, port)) return notActivatedMessage(err);
+  return errorMessage(err);
+}
+
+/**
+ * Say to activate the device, and keep what it said about a lock or the
+ * attempts left, which still holds until it is activated.
+ * @param {AuthError} err
+ * @returns {string}
+ */
+function notActivatedMessage(err) {
+  const explained = err.locked || err.attemptsLeft !== undefined;
+  return explained ? `${NOT_ACTIVATED_MESSAGE}. ${err.message}` : NOT_ACTIVATED_MESSAGE;
+}
+
+/**
+ * Whether the device says it hasn't been activated. Not knowing (older
+ * firmware without /SDK/activateStatus, or no answer) counts as activated.
+ * @param {string} host
+ * @param {number} port
+ * @returns {Promise<boolean>}
+ */
+async function isNotActivated(host, port) {
+  try {
+    const status = await checkActivation({ host, port }, { timeoutMs: TIMEOUT_MS.connect });
+    return status?.activated === false;
+  } catch {
+    // Only an invalid address throws, and the login has just reached this one. Should it
+    // happen anyway, the login's own failure is still the message to show, not this check's
+    return false;
   }
 }
 
@@ -103,6 +184,10 @@ export function saveConnectionDetails(host, port, username, password) {
 }
 
 export function disconnect() {
+  // The next Connect starts from a fresh challenge, so a password changed
+  // meanwhile costs one failed login there, not two
+  if (state.config) forgetDigestSessions(state.config);
+
   // Stop all feeds
   resetPlayback();
   stopSnapshotFeed();
@@ -119,8 +204,9 @@ export function disconnect() {
   state.activeSection = 'liveview';
   state.gridExpandedCell = null;
 
-  // Reset tool state
+  // Reset tool state, and what was read about this device's hardware
   ToolRegistry.getAll().forEach(t => t.resetState());
+  Isapi.clearDeviceCache();
 
   // Collapse config section
   state.configExpanded = false;
@@ -143,16 +229,25 @@ export function disconnect() {
   setStatus('Ready');
 }
 
-/** Fetch the channel list and show it in the sidebar. */
+/**
+ * Fetch the channel list, with each camera's picture size (which the live
+ * view shows its pictures' aspect by), and show it in the sidebar.
+ */
 export async function loadChannels() {
   if (!state.config) return;
   try {
-    state.channels = await Isapi.getChannels(state.config);
+    const channels = await Isapi.getChannels(state.config);
+    state.channels = applyStreamSizes(channels, await Isapi.getStreamSizes(state.config));
     dom.channelList.innerHTML = '';
 
     state.channels.forEach((ch, i) => {
       const div = document.createElement('div');
       div.className = 'channel-item' + (i === 0 ? ' active' : '');
+      // The device says the camera isn't connected; its feed may stay empty
+      if (ch.online === false) {
+        div.classList.add('offline');
+        div.title = 'Offline';
+      }
       // Names come from the device — never parse them as HTML
       const num = document.createElement('div');
       num.className = 'ch-num';

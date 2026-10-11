@@ -5,14 +5,25 @@
 import { dom, state } from './state.js';
 
 /** @typedef {import('../lib/isapi.js').Channel} Channel */
+/** @typedef {import('../lib/isapi.js').WriteResult} WriteResult */
+
+/**
+ * A channel with its kind, which decides the ISAPI URL family, and whether
+ * the device lists it online. A channel missing from the list counts as an
+ * analog one.
+ * @param {string} channelId
+ * @returns {Channel}
+ */
+export function channelInfo(channelId) {
+  return state.channels.find(ch => ch.id === channelId) ?? { id: channelId, name: '', kind: 'analog' };
+}
 
 /**
  * The active channel with its kind, which decides the ISAPI URL family.
  * @returns {Channel}
  */
 export function activeChannelInfo() {
-  return state.channels.find(ch => ch.id === state.activeChannel)
-    ?? { id: state.activeChannel ?? '', name: '', kind: 'analog' };
+  return channelInfo(state.activeChannel ?? '');
 }
 
 /**
@@ -41,6 +52,43 @@ export function showToast(msg, type = 'info') {
   dom.toast.textContent = msg;
   dom.toast.className = `toast ${type} show`;
   setTimeout(() => dom.toast.classList.remove('show'), 3000);
+}
+
+/**
+ * Confirm a save in a toast and the status bar. When the device stored the
+ * change but applies it only after a reboot, say so — otherwise the save
+ * looks like it did nothing. A save that finishes after the user moved on
+ * to another channel names the channel it saved, so it isn't taken for the
+ * one on screen.
+ * @param {string} subject - what was saved, e.g. "Motion detection"
+ * @param {WriteResult} result - what Isapi.putXml returned
+ * @param {string|null} [channelId] - the channel saved; the active one by default
+ */
+export function reportSaved(subject, result, channelId = state.activeChannel) {
+  const channel = `Channel ${channelId}`;
+  const what = channelId === state.activeChannel ? subject : `${subject} for channel ${channelId}`;
+  if (result.rebootRequired) {
+    showToast(`${what} saved — reboot the device for this to take effect`, 'success');
+    setStatus('Config saved — reboot required', channel);
+  } else {
+    showToast(`${what} saved successfully!`, 'success');
+    setStatus('Config saved', channel);
+  }
+}
+
+/**
+ * Report a save the device refused or never answered, with its reason. Like
+ * reportSaved, a save that ends after the user moved on to another channel
+ * names the channel it was for, so the failure isn't taken for the one on
+ * screen.
+ * @param {string} subject - what was saved, mid-sentence, e.g. "event actions"
+ * @param {unknown} err - what the save threw
+ * @param {string} channelId - the channel the save was for
+ */
+export function reportSaveFailed(subject, err, channelId) {
+  const which = channelId === state.activeChannel ? '' : ` for channel ${channelId}`;
+  showToast(`Failed to save ${subject}${which}: ${errorMessage(err)}`, 'error');
+  setStatus('Save failed', `Channel ${channelId}`);
 }
 
 /**

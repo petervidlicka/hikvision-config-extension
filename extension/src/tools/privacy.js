@@ -1,20 +1,32 @@
 /**
- * Privacy mask tool: draw rectangular masks over the image.
+ * Privacy mask tool: draw rectangular masks over the image. Masks are kept
+ * as fractions of the picture (lib/shapes.js); device coordinates (Y from
+ * the bottom) are mapped by the helpers in lib/config-xml.js, and
+ * Isapi.savePrivacyMask does the save. The on/off switch is disabled where
+ * the device serves only its bare region list, which has no switch.
  */
 
-import { applyPrivacyMask, readPrivacyMask } from '../../lib/config-xml.js';
+import {
+  DEFAULT_PRIVACY_SCREEN, imageRectToPrivacy, privacyRegionToImage, readPrivacyMask,
+} from '../../lib/config-xml.js';
 import { Isapi } from '../../lib/isapi.js';
+import { rectContains, rectFromCorners, rectToPixels } from '../../lib/shapes.js';
 import { redraw } from '../canvas.js';
 import { byId, dom, queryAll, state } from '../state.js';
-import { loadTool } from './registry.js';
-import { activeChannelInfo, errorMessage, setStatus, showToast } from '../ui.js';
-import { cloneXml } from '../../lib/xml.js';
+import { loadTool, saveTarget } from './registry.js';
+import { errorMessage, reportSaveFailed, reportSaved, setStatus, showToast } from '../ui.js';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // TOOL: Privacy Mask
 // ═══════════════════════════════════════════════════════════════════════════
 
 /** @typedef {import('./registry.js').Tool} Tool */
+
+/** A drag smaller than this on either side, in canvas pixels (screen pixels, see resizeCanvas), draws no mask. */
+const MIN_MASK_SIDE_PX = 10;
+
+/** What the disabled switch says when hovered, where the loaded document has no switch (see readPrivacyMask). */
+const NO_SWITCH_HINT = 'This device doesn’t let the extension switch masks on or off';
 
 /** @satisfies {Tool} */
 export const privacyTool = {
@@ -23,7 +35,7 @@ export const privacyTool = {
   cursor: 'crosshair',
 
   panelHTML: `
-    <div class="toggle-row">
+    <div class="toggle-row" id="privacyToggleRow">
       <span>Privacy Mask</span>
       <div class="toggle" id="privacyToggle"></div>
     </div>
@@ -53,11 +65,13 @@ export const privacyTool = {
   initState() {
     return {
       privacyEnabled: false,
+      privacySwitchable: true,
       privacyRegions: [],
       privacyNormW: 704,
       privacyNormH: 576,
       privacyDoc: null,
       privacyPath: null,
+      privacyFrom: null,
     };
   },
 
@@ -65,12 +79,16 @@ export const privacyTool = {
     state.privacyRegions = [];
     state.privacyDoc = null;
     state.privacyPath = null;
+    state.privacyFrom = null;
     state.privacyNormW = 704;
     state.privacyNormH = 576;
+    state.privacySwitchable = true;
+    showSwitch();
   },
 
   draw(ctx, canvas) {
-    state.privacyRegions.forEach((reg, i) => {
+    state.privacyRegions.forEach((mask, i) => {
+      const reg = rectToPixels(mask, canvas);
       ctx.fillStyle = 'rgba(239, 68, 68, 0.3)';
       ctx.fillRect(reg.x, reg.y, reg.w, reg.h);
       ctx.strokeStyle = 'rgba(239, 68, 68, 0.8)';
@@ -84,10 +102,7 @@ export const privacyTool = {
 
     // Draw in-progress rectangle
     if (state.isDrawing && state.drawStart && state.drawCurrent) {
-      const x = Math.min(state.drawStart.x, state.drawCurrent.x);
-      const y = Math.min(state.drawStart.y, state.drawCurrent.y);
-      const w = Math.abs(state.drawCurrent.x - state.drawStart.x);
-      const h = Math.abs(state.drawCurrent.y - state.drawStart.y);
+      const { x, y, w, h } = rectToPixels(rectFromCorners(state.drawStart, state.drawCurrent), canvas);
       ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
       ctx.fillRect(x, y, w, h);
       ctx.strokeStyle = 'rgba(239, 68, 68, 0.6)';
@@ -102,8 +117,7 @@ export const privacyTool = {
     if (e.button === 2) {
       // Right-click: delete region under cursor
       for (let i = state.privacyRegions.length - 1; i >= 0; i--) {
-        const r = state.privacyRegions[i];
-        if (pos.x >= r.x && pos.x <= r.x + r.w && pos.y >= r.y && pos.y <= r.y + r.h) {
+        if (rectContains(state.privacyRegions[i], pos)) {
           state.privacyRegions.splice(i, 1);
           updateRegionList();
           redraw();
@@ -128,95 +142,83 @@ export const privacyTool = {
 
   onMouseUp(pos, e) {
     if (state.isDrawing && state.drawStart) {
-      const x = Math.min(state.drawStart.x, pos.x);
-      const y = Math.min(state.drawStart.y, pos.y);
-      const w = Math.abs(pos.x - state.drawStart.x);
-      const h = Math.abs(pos.y - state.drawStart.y);
-      if (w > 10 && h > 10) {
-        state.privacyRegions.push({ x, y, w, h });
+      const mask = rectFromCorners(state.drawStart, pos);
+      const { w, h } = rectToPixels(mask, dom.canvas);
+      if (w > MIN_MASK_SIDE_PX && h > MIN_MASK_SIDE_PX) {
+        state.privacyRegions.push(mask);
         updateRegionList();
       }
     }
   },
 
-  async load() {
-    if (!state.config || !state.activeChannel) return;
+  async load({ from, stale }) {
     setStatus('Loading privacy mask config...');
     try {
-      const { doc, path } = await Isapi.getPrivacyMask(state.config, activeChannelInfo());
+      const { doc, path } = await Isapi.getPrivacyMask(from.config, from.channel);
+      // The newer load, or the channel moved on to, fills the panel
+      if (stale()) return;
       state.privacyDoc = doc;
       state.privacyPath = path;
+      state.privacyFrom = from;
       const pm = readPrivacyMask(doc);
 
       state.privacyEnabled = pm.enabled;
-      byId('privacyToggle').classList.toggle('on', state.privacyEnabled);
+      state.privacySwitchable = pm.switchable;
+      showSwitch();
 
-      // Use the coordinate space the device declares; otherwise guess between
-      // the 704x576 grid of older firmware and a 0–10000 normalized range
-      const allPoints = pm.regions.flat();
-      state.privacyNormW = pm.screen?.width ?? (allPoints.some(p => p.x > 1000) ? 10000 : 704);
-      state.privacyNormH = pm.screen?.height ?? (allPoints.some(p => p.y > 1000) ? 10000 : 576);
-
-      state.privacyRegions = pm.regions.map(points => {
-        const xs = points.map(p => p.x);
-        const ys = points.map(p => p.y);
-        const minX = Math.min(...xs);
-        const minY = Math.min(...ys);
-        return {
-          x: (minX / state.privacyNormW) * dom.canvas.width,
-          y: (minY / state.privacyNormH) * dom.canvas.height,
-          w: ((Math.max(...xs) - minX) / state.privacyNormW) * dom.canvas.width,
-          h: ((Math.max(...ys) - minY) / state.privacyNormH) * dom.canvas.height,
-        };
-      });
+      // The coordinate space the device declares, else the web UI's default
+      const screen = pm.screen ?? DEFAULT_PRIVACY_SCREEN;
+      state.privacyNormW = screen.width;
+      state.privacyNormH = screen.height;
+      state.privacyRegions = pm.regions.map(points => privacyRegionToImage(points, screen));
 
       updateRegionList();
       redraw();
       showToast('Privacy mask config loaded', 'success');
-      setStatus('Config loaded', `Channel ${state.activeChannel}`);
+      setStatus('Config loaded', `Channel ${from.channel.id}`);
     } catch (err) {
+      if (stale()) return;
       showToast('Failed to load privacy mask: ' + errorMessage(err), 'error');
       setStatus('Failed to load config');
     }
   },
 
   async save() {
-    if (!state.config || !state.activeChannel) return;
-    if (!state.privacyDoc) {
-      showToast('Load the settings from the device before saving', 'error');
-      return;
-    }
+    const loaded = state.privacyDoc;
+    const path = state.privacyPath;
+    const from = saveTarget(loaded && path ? state.privacyFrom : null);
+    if (!loaded || !path || !from) return;
 
-    // Use the same coordinate scale that was detected on load
-    const normW = state.privacyNormW;
-    const normH = state.privacyNormH;
-    const doc = cloneXml(state.privacyDoc);
+    // The same coordinate space as on load
+    const screen = { width: state.privacyNormW, height: state.privacyNormH };
+    const mask = {
+      enabled: state.privacyEnabled,
+      rects: state.privacyRegions.map(rect => imageRectToPrivacy(rect, screen)),
+    };
 
     setStatus('Saving privacy mask config...');
     try {
-      applyPrivacyMask(doc, {
-        enabled: state.privacyEnabled,
-        rects: state.privacyRegions.map(reg => ({
-          x1: (reg.x / dom.canvas.width) * normW,
-          y1: (reg.y / dom.canvas.height) * normH,
-          x2: ((reg.x + reg.w) / dom.canvas.width) * normW,
-          y2: ((reg.y + reg.h) / dom.canvas.height) * normH,
-        })),
-      });
-      await Isapi.putXml(state.config, /** @type {string} */ (state.privacyPath), doc);
-      state.privacyDoc = doc;
-      showToast('Privacy mask saved successfully!', 'success');
-      setStatus('Config saved', `Channel ${state.activeChannel}`);
+      const { doc, result } = await Isapi.savePrivacyMask(from.config, path, loaded, mask);
+      // Only while the panel still holds what this save started from (see motion's save)
+      if (state.privacyDoc === loaded) {
+        state.privacyDoc = doc;
+        // Without a switch, the masks were saved on (see applyPrivacyMask): show what the device now has
+        if (!state.privacySwitchable) {
+          state.privacyEnabled = readPrivacyMask(doc).enabled;
+          showSwitch();
+        }
+      }
+      reportSaved('Privacy mask', result, from.channel.id);
     } catch (err) {
-      showToast('Failed to save: ' + errorMessage(err), 'error');
-      setStatus('Save failed');
+      reportSaveFailed('privacy mask', err, from.channel.id);
     }
   },
 
   bindPanel() {
     byId('privacyToggle').addEventListener('click', () => {
+      if (!state.privacySwitchable) return;
       state.privacyEnabled = !state.privacyEnabled;
-      byId('privacyToggle').classList.toggle('on', state.privacyEnabled);
+      showSwitch();
     });
 
     byId('clearPrivacyBtn').addEventListener('click', () => {
@@ -231,6 +233,20 @@ export const privacyTool = {
 
   onActivate() {},
 };
+
+/**
+ * Show the on/off switch as the state has it: disabled, saying why, where
+ * the loaded document has no switch to write, rather than accepting clicks
+ * a save would ignore.
+ */
+function showSwitch() {
+  const row = byId('privacyToggleRow');
+  row.classList.toggle('unavailable', !state.privacySwitchable);
+  row.title = state.privacySwitchable ? '' : NO_SWITCH_HINT;
+  const toggle = byId('privacyToggle');
+  toggle.classList.toggle('on', state.privacyEnabled);
+  toggle.setAttribute('aria-disabled', String(!state.privacySwitchable));
+}
 
 /** Render the region list in the sidebar. */
 function updateRegionList() {

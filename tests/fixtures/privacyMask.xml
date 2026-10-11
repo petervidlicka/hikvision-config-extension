@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic, not captured: a camera with fixed mask slots (hikvision.com namespace, maskType on each slot, an unused slot 2 without coordinates), for reading slots and for the single-PUT save that firmware without DELETE gets. The DS-7604NI is different: it has no maskType, stores only the regions sent, and reads every region back with enabled false (see privacyMask-nvr-regions.xml). -->
 <PrivacyMask version="2.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
 <enabled>true</enabled>
 <normalizedScreenSize><normalizedScreenWidth>704</normalizedScreenWidth><normalizedScreenHeight>576</normalizedScreenHeight></normalizedScreenSize>

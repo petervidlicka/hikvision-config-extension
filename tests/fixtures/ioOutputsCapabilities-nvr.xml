@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<IOOutputPortList version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>301</id>
+<IODescriptor>
+<proxyProtocol opt="HIKVISION, AXIS, PANASONIC, BOSCH, PELCO, SONY">HIKVISION</proxyProtocol>
+<userName>admin</userName>
+<addressingFormatType>opt="ipaddress,hostname"</addressingFormatType>
+<ipAddress>192.168.254.4</ipAddress>
+<managePortNo>8000</managePortNo>
+<innerIOPortID>1</innerIOPortID>
+</IODescriptor>
+<PowerOnState>
+<defaultState opt="low,high">low</defaultState>
+<outputState opt="high,low,pulse">pulse</outputState>
+<pulseDuration>5000</pulseDuration>
+</PowerOnState>
+<name></name>
+<IOUseType opt="disable,electricLock,custom,audio,whiteLight">
+</IOUseType>
+<enabled opt="true,false">
+</enabled>
+<IOType opt="local,digitalChannel,analogChannel">digitalChannel</IOType>
+</IOOutputPort>
+<IOOutputPort version="1.0" xmlns="http://www.hikvision.com/ver20/XMLSchema">
+<id>401</id>
+<IODescriptor>
+<proxyProtocol opt="HIKVISION, AXIS, PANASONIC, BOSCH, PELCO, SONY">HIKVISION</proxyProtocol>
+<userName>admin</userName>
+<addressingFormatType>opt="ipaddress,hostname"</addressingFormatType>
+<ipAddress>192.168.254.3</ipAddress>
+<managePortNo>8000</managePortNo>
+<innerIOPortID>1</innerIOPortID>
+</IODescriptor>
+<PowerOnState>
+<defaultState opt="low,high">low</defaultState>
+<outputState opt="high,low,pulse">pulse</outputState>
+<pulseDuration>5000</pulseDuration>
+</PowerOnState>
+<name></name>
+<IOUseType opt="disable,electricLock,custom,audio,whiteLight">
+</IOUseType>
+<enabled opt="true,false">
+</enabled>
+<IOType opt="local,digitalChannel,analogChannel">digitalChannel</IOType>
+</IOOutputPort>
+</IOOutputPortList>
